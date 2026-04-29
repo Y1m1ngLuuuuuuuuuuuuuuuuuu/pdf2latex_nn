@@ -472,6 +472,13 @@ def load_existing_ids(path: Path) -> set[str]:
     return ids
 
 
+def load_processed_ids(*paths: Path) -> set[str]:
+    processed: set[str] = set()
+    for path in paths:
+        processed.update(load_existing_ids(path))
+    return processed
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -525,25 +532,31 @@ def main() -> int:
     print(f"[dataset] selected {len(candidates)} candidates from {args.candidate_source}", flush=True)
 
     accepted_path = paths.report_dir / "accepted.jsonl"
+    rejected_path = paths.report_dir / "rejected.jsonl"
     accepted_ids = load_existing_ids(accepted_path)
+    processed_ids = load_processed_ids(accepted_path, rejected_path)
     successes = len(accepted_ids)
     attempted = 0
     if successes:
         print(f"[dataset] resuming with {successes} accepted samples already present", flush=True)
+    if processed_ids:
+        print(f"[dataset] skipping {len(processed_ids)} previously processed ids", flush=True)
 
     for candidate in candidates:
         if successes >= args.target_successes:
             break
-        if candidate["arxiv_id"] in accepted_ids and not args.force:
+        if candidate["arxiv_id"] in processed_ids and not args.force:
             continue
         attempted += 1
         arxiv_id = candidate["arxiv_id"]
         print(f"[dataset] attempt {attempted}: {arxiv_id}", flush=True)
         if process_candidate(candidate, paths, args):
             successes += 1
+            accepted_ids.add(arxiv_id)
             print(f"[dataset] accepted {arxiv_id}; total={successes}/{args.target_successes}", flush=True)
         else:
             print(f"[dataset] rejected {arxiv_id}; total={successes}/{args.target_successes}", flush=True)
+        processed_ids.add(arxiv_id)
 
     summary = {
         "started_at": started_at,
