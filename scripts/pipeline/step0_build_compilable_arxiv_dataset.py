@@ -130,6 +130,10 @@ def id_year(arxiv_id: str) -> int | None:
 
 
 def record_year(record: dict, arxiv_id: str) -> int | None:
+    arxiv_id_year = id_year(arxiv_id)
+    if arxiv_id_year is not None:
+        return arxiv_id_year
+
     for key in ["year", "published_year", "created_year"]:
         value = record.get(key)
         if isinstance(value, int):
@@ -152,7 +156,7 @@ def record_year(record: dict, arxiv_id: str) -> int | None:
                 if match:
                     return int(match.group(0))
 
-    return id_year(arxiv_id)
+    return None
 
 
 def iter_metadata_candidates(metadata_path: Path, year: int, limit: int) -> Iterable[dict]:
@@ -388,6 +392,7 @@ def process_candidate(
     accepted_log: JsonlLog,
     rejected_log: JsonlLog,
     gate: AcceptGate,
+    download_slots: threading.Semaphore,
     compile_slots: threading.Semaphore,
 ) -> dict:
     arxiv_id = candidate["arxiv_id"]
@@ -420,7 +425,10 @@ def process_candidate(
     compile_dir = work_dir / "compile"
     started_at = now_iso()
     try:
-        size_bytes = download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
+        with download_slots:
+            if gate.full():
+                return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+            size_bytes = download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
         unpack_source(archive_path, extracted_dir, args.max_unpacked_mb)
         main_tex = find_main_tex(extracted_dir)
         if main_tex is None:
@@ -490,6 +498,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-successes", type=int, default=3000)
     parser.add_argument("--candidate-limit", type=int, default=100000)
     parser.add_argument("--workers", type=int, default=128)
+    parser.add_argument("--download-slots", type=int, default=24)
     parser.add_argument("--compile-slots", type=int, default=32)
     parser.add_argument("--max-pending", type=int, default=256)
     parser.add_argument("--download-timeout", type=int, default=120)
@@ -518,6 +527,7 @@ def main() -> int:
     rejected_ids = load_ids_from_jsonl(rejected_path)
     processed_ids = accepted_ids | rejected_ids
     gate = AcceptGate(args.target_successes, len(accepted_ids))
+    download_slots = threading.Semaphore(args.download_slots)
     compile_slots = threading.Semaphore(args.compile_slots)
 
     started_at = now_iso()
@@ -534,6 +544,7 @@ def main() -> int:
                 "target_successes": args.target_successes,
                 "existing_successes": len(accepted_ids),
                 "workers": args.workers,
+                "download_slots": args.download_slots,
                 "compile_slots": args.compile_slots,
                 "engine": args.engine,
                 "started_at": started_at,
@@ -568,6 +579,7 @@ def main() -> int:
                         accepted_log,
                         rejected_log,
                         gate,
+                        download_slots,
                         compile_slots,
                     )
                 )
