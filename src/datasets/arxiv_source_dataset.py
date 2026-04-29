@@ -14,13 +14,18 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import urllib.parse
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Iterable
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - server requirements include requests.
+    requests = None
 
 
 ARXIV_DATASET_REF = "Cornell-University/arxiv"
@@ -233,21 +238,91 @@ def select_candidates_from_arxiv_api(
     return candidates
 
 
-def download_eprint(arxiv_id: str, output_path: Path, retries: int, sleep_seconds: float) -> None:
+def parse_id_scan_months(raw_months: str) -> list[int]:
+    months: list[int] = []
+    for part in raw_months.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        month = int(part)
+        if month < 1 or month > 12:
+            raise ValueError(f"Invalid month in --id-scan-months: {part}")
+        months.append(month)
+    if not months:
+        raise ValueError("--id-scan-months must contain at least one month")
+    return months
+
+
+def select_candidates_by_id_scan(
+    year: int,
+    limit: int,
+    output_path: Path,
+    raw_months: str,
+    start_number: int,
+    end_number: int,
+) -> list[dict]:
+    if start_number < 1:
+        raise ValueError("--id-scan-start-number must be >= 1")
+    if end_number < start_number:
+        raise ValueError("--id-scan-end-number must be >= --id-scan-start-number")
+
+    candidates: list[dict] = []
+    year_prefix = f"{year % 100:02d}"
+    for month in parse_id_scan_months(raw_months):
+        month_prefix = f"{year_prefix}{month:02d}"
+        for number in range(start_number, end_number + 1):
+            candidates.append(
+                {
+                    "arxiv_id": f"{month_prefix}.{number:05d}",
+                    "title": None,
+                    "categories": None,
+                    "update_date": None,
+                    "versions": [{"created": f"{year}-{month:02d}"}],
+                }
+            )
+            if len(candidates) >= limit:
+                write_jsonl(output_path, candidates)
+                return candidates
+
+    write_jsonl(output_path, candidates)
+    return candidates
+
+
+def download_eprint(arxiv_id: str, output_path: Path, retries: int, sleep_seconds: float, timeout: int) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     url = ARXIV_EPRINT_URL.format(arxiv_id=arxiv_id)
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
+        part_path = output_path.with_suffix(output_path.suffix + ".part")
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "pdf2latex-nn-dataset/0.1"})
-            with urllib.request.urlopen(request, timeout=90) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"HTTP {response.status}")
-                with output_path.open("wb") as handle:
-                    shutil.copyfileobj(response, handle)
+            if requests is not None:
+                response = requests.get(
+                    url,
+                    timeout=timeout,
+                    allow_redirects=True,
+                    stream=True,
+                    headers={"User-Agent": "pdf2latex-nn-research/0.1"},
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                with part_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+            else:
+                request = urllib.request.Request(url, headers={"User-Agent": "pdf2latex-nn-research/0.1"})
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"HTTP {response.status}")
+                    with part_path.open("wb") as handle:
+                        shutil.copyfileobj(response, handle)
+            if not part_path.exists() or part_path.stat().st_size == 0:
+                raise RuntimeError("empty e-print response")
+            part_path.replace(output_path)
             return
-        except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+        except Exception as exc:
             last_error = exc
+            part_path.unlink(missing_ok=True)
             if attempt < retries:
                 time.sleep(sleep_seconds)
     raise RuntimeError(f"download failed for {arxiv_id}: {last_error}")
@@ -348,7 +423,7 @@ def process_candidate(candidate: dict, paths: DatasetPaths, args: argparse.Names
     compile_dir = work_dir / "compile"
     log_path = paths.report_dir / "logs" / f"{arxiv_id}.log"
     try:
-        download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep)
+        download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
         unpack_source(archive_path, extracted_dir)
         main_tex = find_main_tex(extracted_dir)
         if main_tex is None:
@@ -401,12 +476,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--year", type=int, default=2025)
-    parser.add_argument("--candidate-source", choices=["kaggle", "arxiv-api"], default="kaggle")
+    parser.add_argument("--candidate-source", choices=["kaggle", "arxiv-api", "id-scan"], default="kaggle")
     parser.add_argument("--target-successes", type=int, default=2000)
     parser.add_argument("--candidate-limit", type=int, default=10000)
     parser.add_argument("--api-batch-size", type=int, default=100)
     parser.add_argument("--api-sleep", type=float, default=3.0)
+    parser.add_argument("--id-scan-months", default="01,02,03,04,05,06,07,08,09,10,11,12")
+    parser.add_argument("--id-scan-start-number", type=int, default=1)
+    parser.add_argument("--id-scan-end-number", type=int, default=99999)
     parser.add_argument("--compile-timeout", type=int, default=180)
+    parser.add_argument("--download-timeout", type=int, default=90)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-sleep", type=float, default=3.0)
     parser.add_argument("--force", action="store_true")
@@ -424,7 +503,7 @@ def main() -> int:
         metadata_path = ensure_kaggle_metadata(paths)
         candidates_path = paths.metadata_dir / f"arxiv_{args.year}_candidates.jsonl"
         candidates = select_candidates(metadata_path, args.year, args.candidate_limit, candidates_path)
-    else:
+    elif args.candidate_source == "arxiv-api":
         candidates_path = paths.metadata_dir / f"arxiv_{args.year}_arxiv_api_candidates.jsonl"
         candidates = select_candidates_from_arxiv_api(
             args.year,
@@ -432,6 +511,16 @@ def main() -> int:
             candidates_path,
             args.api_batch_size,
             args.api_sleep,
+        )
+    else:
+        candidates_path = paths.metadata_dir / f"arxiv_{args.year}_id_scan_candidates.jsonl"
+        candidates = select_candidates_by_id_scan(
+            args.year,
+            args.candidate_limit,
+            candidates_path,
+            args.id_scan_months,
+            args.id_scan_start_number,
+            args.id_scan_end_number,
         )
     print(f"[dataset] selected {len(candidates)} candidates from {args.candidate_source}", flush=True)
 
