@@ -1,0 +1,67 @@
+.DS_Store
+Thumbs.db
+
+# Local secrets and machine-specific configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kaggle.json
+.kaggle/
+secrets/
+local_secrets/
+docs/LOCAL_PRIVATE*.md
+docs/*_PRIVATE.md
+_legacy_reference/
+
+__pycache__/
+*.py[cod]
+*.pyo
+
+.venv/
+.venv_*/
+venv/
+env/
+
+.model_cache/
+
+# Heavy generated artifacts and historical runtime snapshots.
+archive/
+server_cache_backup/
+paper_artifacts/
+reports*/
+demo_*/
+logs*/
+
+# Model/checkpoint binaries should be stored in external artifact storage or
+# regenerated on AutoDL, not committed to the source repository.
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Runtime data and generated outputs. Keep the standard folders in the tree,
+# but do not version their contents.
+data/**
+!data/**/
+!data/.gitkeep
+!data/**/.gitkeep
+
+artifacts/**
+!artifacts/**/
+!artifacts/README.md
+!artifacts/.gitkeep
+
+logs/**
+!logs/.gitkeep
+
+models/**
+!models/**/
+!models/.gitkeep
+
+outputs/**
+!outputs/.gitkeep
+
+# Local transfer/download staging.
+artifacts/local_arxiv_sources/

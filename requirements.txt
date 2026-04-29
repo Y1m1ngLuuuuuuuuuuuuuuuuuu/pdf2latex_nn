@@ -1,0 +1,58 @@
+# Core deep learning frameworks
+torch==2.8.0
+torchvision==0.19.0
+torch-geometric==2.6.1
+
+# YOLOv8 for object detection
+ultralytics==8.4.39
+
+# AWS S3 access for ArXiv data
+boto3==1.37.38
+awscli
+
+# PDF processing
+pdf2image==1.17.0
+PyPDF2==3.0.1
+
+# OCR and text recognition
+paddleocr==3.4.1
+paddlepaddle==2.6.0
+
+# Formula recognition
+pix2tex==0.1.4
+
+# NLP and text embeddings
+transformers==4.46.3
+sentencepiece==0.2.0
+tokenizers==0.20.3
+
+# Data processing
+numpy==1.24.3
+pandas==2.0.3
+Pillow==10.0.0
+opencv-python==4.8.0.74
+scipy==1.10.1
+
+# HTTP requests
+requests==2.31.0
+
+# Configuration and utilities
+PyYAML==6.0.1
+tqdm==4.66.1
+python-dotenv==1.0.0
+
+# Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+
+# Testing
+pytest==7.4.0
+pytest-cov==4.1.0
+
+# LaTeX parsing
+pylatexenc==2.10
+
+# Code quality
+black==23.7.0
+flake8==6.1.0
+isort==5.12.0
