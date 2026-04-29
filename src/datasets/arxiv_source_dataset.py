@@ -433,11 +433,14 @@ def main() -> int:
             args.api_batch_size,
             args.api_sleep,
         )
+    print(f"[dataset] selected {len(candidates)} candidates from {args.candidate_source}", flush=True)
 
     accepted_path = paths.report_dir / "accepted.jsonl"
     accepted_ids = load_existing_ids(accepted_path)
     successes = len(accepted_ids)
     attempted = 0
+    if successes:
+        print(f"[dataset] resuming with {successes} accepted samples already present", flush=True)
 
     for candidate in candidates:
         if successes >= args.target_successes:
@@ -445,8 +448,13 @@ def main() -> int:
         if candidate["arxiv_id"] in accepted_ids and not args.force:
             continue
         attempted += 1
+        arxiv_id = candidate["arxiv_id"]
+        print(f"[dataset] attempt {attempted}: {arxiv_id}", flush=True)
         if process_candidate(candidate, paths, args):
             successes += 1
+            print(f"[dataset] accepted {arxiv_id}; total={successes}/{args.target_successes}", flush=True)
+        else:
+            print(f"[dataset] rejected {arxiv_id}; total={successes}/{args.target_successes}", flush=True)
 
     summary = {
         "started_at": started_at,
