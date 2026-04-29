@@ -40,6 +40,12 @@ ARXIV_ID_RE = re.compile(r"^(\d{4})\.\d{4,5}(v\d+)?$")
 VERSION_SUFFIX_RE = re.compile(r"v\d+$")
 
 
+class DownloadFailed(RuntimeError):
+    def __init__(self, message: str, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
 @dataclasses.dataclass(frozen=True)
 class DatasetPaths:
     data_root: Path
@@ -226,7 +232,7 @@ def download_eprint(arxiv_id: str, output_path: Path, retries: int, retry_sleep:
             if requests is not None:
                 with requests.get(url, headers=headers, stream=True, timeout=timeout, allow_redirects=True) as response:
                     if response.status_code != 200:
-                        raise RuntimeError(f"HTTP {response.status_code}")
+                        raise DownloadFailed(f"HTTP {response.status_code}", permanent=response.status_code == 404)
                     with part_path.open("wb") as handle:
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
                             if chunk:
@@ -235,7 +241,7 @@ def download_eprint(arxiv_id: str, output_path: Path, retries: int, retry_sleep:
                 request = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(request, timeout=timeout) as response:
                     if response.status != 200:
-                        raise RuntimeError(f"HTTP {response.status}")
+                        raise DownloadFailed(f"HTTP {response.status}", permanent=response.status == 404)
                     with part_path.open("wb") as handle:
                         shutil.copyfileobj(response, handle)
             if not part_path.exists() or part_path.stat().st_size == 0:
@@ -243,12 +249,25 @@ def download_eprint(arxiv_id: str, output_path: Path, retries: int, retry_sleep:
             part_path.replace(output_path)
             return output_path.stat().st_size
         except Exception as exc:  # noqa: PERF203 - retry loop clarity matters here.
-            last_error = exc
+            if isinstance(exc, DownloadFailed):
+                last_error = exc
+                if exc.permanent:
+                    break
+            else:
+                last_error = DownloadFailed(f"{type(exc).__name__}: {exc}", permanent=False)
             part_path.unlink(missing_ok=True)
             if attempt < retries:
                 time.sleep(retry_sleep)
 
-    raise RuntimeError(f"download failed: {last_error}")
+    if isinstance(last_error, DownloadFailed):
+        raise last_error
+    raise DownloadFailed(f"download failed: {last_error}", permanent=False)
+
+
+def download_failure_status(exc: DownloadFailed) -> str:
+    if exc.permanent:
+        return "source_not_found"
+    return "download_error"
 
 
 def safe_extract_tar(archive_path: Path, output_dir: Path) -> None:
@@ -391,6 +410,7 @@ def process_candidate(
     args: argparse.Namespace,
     accepted_log: JsonlLog,
     rejected_log: JsonlLog,
+    transient_log: JsonlLog,
     gate: AcceptGate,
     download_slots: threading.Semaphore,
     compile_slots: threading.Semaphore,
@@ -425,10 +445,23 @@ def process_candidate(
     compile_dir = work_dir / "compile"
     started_at = now_iso()
     try:
-        with download_slots:
-            if gate.full():
-                return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
-            size_bytes = download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
+        try:
+            with download_slots:
+                if gate.full():
+                    return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+                size_bytes = download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
+        except DownloadFailed as exc:
+            row = {
+                **candidate,
+                "status": download_failure_status(exc),
+                "error": str(exc)[:500],
+                "finished_at": now_iso(),
+            }
+            if exc.permanent:
+                rejected_log.append(row)
+            else:
+                transient_log.append(row)
+            return row
         unpack_source(archive_path, extracted_dir, args.max_unpacked_mb)
         main_tex = find_main_tex(extracted_dir)
         if main_tex is None:
@@ -498,7 +531,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-successes", type=int, default=3000)
     parser.add_argument("--candidate-limit", type=int, default=100000)
     parser.add_argument("--workers", type=int, default=128)
-    parser.add_argument("--download-slots", type=int, default=24)
+    parser.add_argument("--download-slots", type=int, default=6)
     parser.add_argument("--compile-slots", type=int, default=32)
     parser.add_argument("--max-pending", type=int, default=256)
     parser.add_argument("--download-timeout", type=int, default=120)
@@ -520,8 +553,10 @@ def main() -> int:
 
     accepted_path = paths.report_dir / "accepted.jsonl"
     rejected_path = paths.report_dir / "rejected.jsonl"
+    transient_path = paths.report_dir / "download_errors.jsonl"
     accepted_log = JsonlLog(accepted_path)
     rejected_log = JsonlLog(rejected_path)
+    transient_log = JsonlLog(transient_path)
 
     accepted_ids = load_ids_from_jsonl(accepted_path)
     rejected_ids = load_ids_from_jsonl(rejected_path)
@@ -578,6 +613,7 @@ def main() -> int:
                         args,
                         accepted_log,
                         rejected_log,
+                        transient_log,
                         gate,
                         download_slots,
                         compile_slots,
