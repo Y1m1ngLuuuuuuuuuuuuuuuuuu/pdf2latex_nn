@@ -50,7 +50,7 @@ def test_full_width_title_stays_before_two_columns_and_auxiliary_is_dropped():
     assert result["page_summaries"][0]["dropped_auxiliary_blocks"] == 1
 
 
-def test_title_anchor_keeps_visually_prior_opposite_column_text_before_title():
+def test_region_between_full_width_blocks_sorts_left_column_before_right_column():
     pages = [
         [
             para("", [80, 534, 482, 579]),
@@ -65,9 +65,9 @@ def test_title_anchor_keeps_visually_prior_opposite_column_text_before_title():
     page = result["pages"][0]
 
     assert [item["text_for_embedding"] for item in page] == [
-        "right continuation",
         "Key Observations",
         "left section body",
+        "right continuation",
         "right section body",
     ]
     assert result["page_summaries"][0]["dropped_empty_textual_blocks"] == 1

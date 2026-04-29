@@ -241,12 +241,12 @@ def _sort_page_blocks(blocks: list[BlockView], cfg: SortConfig) -> list[BlockVie
             for view in column_blocks
             if view.original_index not in emitted and view.cy < full.y0 - cfg.y_tolerance
         ]
-        ordered.extend(_sort_column_region(before, cfg))
+        ordered.extend(_sort_column_region(before))
         emitted.update(view.original_index for view in before)
         ordered.append(full)
 
     remaining = [view for view in column_blocks if view.original_index not in emitted]
-    ordered.extend(_sort_column_region(remaining, cfg))
+    ordered.extend(_sort_column_region(remaining))
     return ordered
 
 
@@ -295,41 +295,13 @@ def _infer_column_split(blocks: list[BlockView], cfg: SortConfig) -> float | Non
     return (centers[best_index] + centers[best_index + 1]) / 2.0
 
 
-def _sort_column_region(blocks: list[BlockView], cfg: SortConfig) -> list[BlockView]:
-    """Sort a region that has already been split into page columns.
+def _sort_column_region(blocks: list[BlockView]) -> list[BlockView]:
+    """Sort one region between full-width blocks: left column, then right."""
 
-    Section titles act as local anchors: material visually above the title is
-    emitted before the title, even if it sits in the opposite column.
-    """
-
-    ordered: list[BlockView] = []
-    pending = {view.original_index: view for view in blocks}
-    titles = sorted(
-        (view for view in blocks if view.block.get("type") == "title"),
-        key=lambda view: (view.y0, view.x0, view.original_index),
-    )
-
-    for title in titles:
-        if title.original_index not in pending:
-            continue
-        before = [
-            view
-            for view in pending.values()
-            if view.original_index != title.original_index and view.cy < title.y0 - cfg.y_tolerance
-        ]
-        before = sorted(before, key=lambda view: (view.y0, view.x0, view.original_index))
-        ordered.extend(before)
-        for view in before:
-            pending.pop(view.original_index, None)
-        ordered.append(title)
-        pending.pop(title.original_index, None)
-
-    remaining = sorted(
-        pending.values(),
+    return sorted(
+        blocks,
         key=lambda view: (view.column_id or 0, view.y0, view.x0, view.original_index),
     )
-    ordered.extend(remaining)
-    return ordered
 
 
 def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
