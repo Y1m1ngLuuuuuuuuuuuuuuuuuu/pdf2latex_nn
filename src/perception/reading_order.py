@@ -46,6 +46,7 @@ class SortConfig:
     min_column_gap: float = 130.0
     min_blocks_per_column: int = 2
     y_tolerance: float = 8.0
+    drop_empty_textual_blocks: bool = True
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,12 @@ def sort_content_list_v2(
 
     for page_idx, page in enumerate(pages):
         views = [_make_block_view(block, i, page_idx, cfg) for i, block in enumerate(page)]
-        sortable = [view for view in views if keep_auxiliary or not view.is_auxiliary]
+        empty_textual = [view for view in views if cfg.drop_empty_textual_blocks and view.is_textual and not view.text]
+        sortable = [
+            view
+            for view in views
+            if (keep_auxiliary or not view.is_auxiliary) and view not in empty_textual
+        ]
         dropped = [view for view in views if view.is_auxiliary and not keep_auxiliary]
         ordered = _sort_page_blocks(sortable, cfg)
         enriched = _enrich_ordered_blocks(ordered)
@@ -134,6 +140,7 @@ def sort_content_list_v2(
                 "input_blocks": len(page),
                 "output_blocks": len(enriched),
                 "dropped_auxiliary_blocks": len(dropped),
+                "dropped_empty_textual_blocks": len(empty_textual),
                 "column_count": _count_columns(ordered),
                 "full_width_blocks": sum(1 for view in ordered if view.is_full_width),
                 "text_runs": len({item["text_run_id"] for item in enriched if item.get("text_run_id") is not None}),
@@ -150,6 +157,7 @@ def sort_content_list_v2(
             "min_column_gap": cfg.min_column_gap,
             "min_blocks_per_column": cfg.min_blocks_per_column,
             "y_tolerance": cfg.y_tolerance,
+            "drop_empty_textual_blocks": cfg.drop_empty_textual_blocks,
             "keep_auxiliary": keep_auxiliary,
         },
         "pages": sorted_pages,
@@ -223,7 +231,6 @@ def _parse_bbox(value: Any) -> tuple[float, float, float, float]:
 
 def _sort_page_blocks(blocks: list[BlockView], cfg: SortConfig) -> list[BlockView]:
     column_blocks, full_width_blocks = _assign_columns(blocks, cfg)
-    column_blocks = sorted(column_blocks, key=lambda view: (view.column_id or 0, view.y0, view.x0, view.original_index))
     full_width_blocks = sorted(full_width_blocks, key=lambda view: (view.y0, view.x0, view.original_index))
 
     ordered: list[BlockView] = []
@@ -234,12 +241,12 @@ def _sort_page_blocks(blocks: list[BlockView], cfg: SortConfig) -> list[BlockVie
             for view in column_blocks
             if view.original_index not in emitted and view.cy < full.y0 - cfg.y_tolerance
         ]
-        ordered.extend(before)
+        ordered.extend(_sort_column_region(before, cfg))
         emitted.update(view.original_index for view in before)
         ordered.append(full)
 
     remaining = [view for view in column_blocks if view.original_index not in emitted]
-    ordered.extend(remaining)
+    ordered.extend(_sort_column_region(remaining, cfg))
     return ordered
 
 
@@ -286,6 +293,43 @@ def _infer_column_split(blocks: list[BlockView], cfg: SortConfig) -> float | Non
     if best_gap < cfg.min_column_gap or best_index < 0:
         return None
     return (centers[best_index] + centers[best_index + 1]) / 2.0
+
+
+def _sort_column_region(blocks: list[BlockView], cfg: SortConfig) -> list[BlockView]:
+    """Sort a region that has already been split into page columns.
+
+    Section titles act as local anchors: material visually above the title is
+    emitted before the title, even if it sits in the opposite column.
+    """
+
+    ordered: list[BlockView] = []
+    pending = {view.original_index: view for view in blocks}
+    titles = sorted(
+        (view for view in blocks if view.block.get("type") == "title"),
+        key=lambda view: (view.y0, view.x0, view.original_index),
+    )
+
+    for title in titles:
+        if title.original_index not in pending:
+            continue
+        before = [
+            view
+            for view in pending.values()
+            if view.original_index != title.original_index and view.cy < title.y0 - cfg.y_tolerance
+        ]
+        before = sorted(before, key=lambda view: (view.y0, view.x0, view.original_index))
+        ordered.extend(before)
+        for view in before:
+            pending.pop(view.original_index, None)
+        ordered.append(title)
+        pending.pop(title.original_index, None)
+
+    remaining = sorted(
+        pending.values(),
+        key=lambda view: (view.column_id or 0, view.y0, view.x0, view.original_index),
+    )
+    ordered.extend(remaining)
+    return ordered
 
 
 def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:

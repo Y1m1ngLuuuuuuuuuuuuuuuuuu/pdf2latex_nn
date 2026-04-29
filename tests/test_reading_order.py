@@ -48,3 +48,26 @@ def test_full_width_title_stays_before_two_columns_and_auxiliary_is_dropped():
     assert [item["text_for_embedding"] for item in page] == ["Paper Title", "left", "right"]
     assert page[0]["is_full_width"] is True
     assert result["page_summaries"][0]["dropped_auxiliary_blocks"] == 1
+
+
+def test_title_anchor_keeps_visually_prior_opposite_column_text_before_title():
+    pages = [
+        [
+            para("", [80, 534, 482, 579]),
+            title("Key Observations", [83, 590, 227, 606]),
+            para("right continuation", [516, 535, 870, 550]),
+            para("left section body", [80, 611, 482, 890]),
+            para("right section body", [514, 558, 916, 811]),
+        ]
+    ]
+
+    result = sort_content_list_v2(pages)
+    page = result["pages"][0]
+
+    assert [item["text_for_embedding"] for item in page] == [
+        "right continuation",
+        "Key Observations",
+        "left section body",
+        "right section body",
+    ]
+    assert result["page_summaries"][0]["dropped_empty_textual_blocks"] == 1
