@@ -14,8 +14,10 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Iterable
@@ -24,7 +26,9 @@ from typing import Iterable
 ARXIV_DATASET_REF = "Cornell-University/arxiv"
 ARXIV_METADATA_FILE = "arxiv-metadata-oai-snapshot.json"
 ARXIV_EPRINT_URL = "https://arxiv.org/e-print/{arxiv_id}"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -155,6 +159,76 @@ def select_candidates(metadata_path: Path, year: int, limit: int, output_path: P
                     "versions": record.get("versions"),
                 }
             )
+    write_jsonl(output_path, candidates)
+    return candidates
+
+
+def xml_text(element: ET.Element, path: str) -> str:
+    child = element.find(path, ATOM_NS)
+    if child is None or child.text is None:
+        return ""
+    return " ".join(child.text.split())
+
+
+def select_candidates_from_arxiv_api(
+    year: int,
+    limit: int,
+    output_path: Path,
+    batch_size: int,
+    sleep_seconds: float,
+) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    start = 0
+    year_start = f"{year}01010000"
+    year_end = f"{year}12312359"
+
+    while len(candidates) < limit:
+        max_results = min(batch_size, limit - len(candidates))
+        query = {
+            "search_query": f"submittedDate:[{year_start} TO {year_end}]",
+            "start": str(start),
+            "max_results": str(max_results),
+            "sortBy": "submittedDate",
+            "sortOrder": "ascending",
+        }
+        url = f"{ARXIV_API_URL}?{urllib.parse.urlencode(query)}"
+        request = urllib.request.Request(url, headers={"User-Agent": "pdf2latex-nn-dataset/0.1"})
+        with urllib.request.urlopen(request, timeout=90) as response:
+            if response.status != 200:
+                raise RuntimeError(f"arXiv API returned HTTP {response.status}")
+            root = ET.fromstring(response.read())
+
+        entries = root.findall("atom:entry", ATOM_NS)
+        if not entries:
+            break
+
+        for entry in entries:
+            raw_id = xml_text(entry, "atom:id").rstrip("/").rsplit("/", 1)[-1]
+            arxiv_id = re.sub(r"v\d+$", "", raw_id)
+            if not arxiv_id or arxiv_id in seen or not ARXIV_ID_RE.match(arxiv_id):
+                continue
+            published = xml_text(entry, "atom:published")
+            if published and not published.startswith(f"{year}-"):
+                continue
+            categories = [node.attrib.get("term", "") for node in entry.findall("atom:category", ATOM_NS)]
+            seen.add(arxiv_id)
+            candidates.append(
+                {
+                    "arxiv_id": arxiv_id,
+                    "title": xml_text(entry, "atom:title"),
+                    "categories": " ".join(term for term in categories if term),
+                    "update_date": xml_text(entry, "atom:updated")[:10],
+                    "versions": [{"created": published}],
+                }
+            )
+            if len(candidates) >= limit:
+                break
+
+        start += len(entries)
+        if len(candidates) < limit:
+            time.sleep(sleep_seconds)
+
     write_jsonl(output_path, candidates)
     return candidates
 
@@ -327,8 +401,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--year", type=int, default=2025)
+    parser.add_argument("--candidate-source", choices=["kaggle", "arxiv-api"], default="kaggle")
     parser.add_argument("--target-successes", type=int, default=2000)
     parser.add_argument("--candidate-limit", type=int, default=10000)
+    parser.add_argument("--api-batch-size", type=int, default=100)
+    parser.add_argument("--api-sleep", type=float, default=3.0)
     parser.add_argument("--compile-timeout", type=int, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-sleep", type=float, default=3.0)
@@ -342,9 +419,20 @@ def main() -> int:
     paths.ensure()
 
     started_at = dt.datetime.now(dt.UTC).isoformat()
-    metadata_path = ensure_kaggle_metadata(paths)
-    candidates_path = paths.metadata_dir / f"arxiv_{args.year}_candidates.jsonl"
-    candidates = select_candidates(metadata_path, args.year, args.candidate_limit, candidates_path)
+    metadata_path: Path | None = None
+    if args.candidate_source == "kaggle":
+        metadata_path = ensure_kaggle_metadata(paths)
+        candidates_path = paths.metadata_dir / f"arxiv_{args.year}_candidates.jsonl"
+        candidates = select_candidates(metadata_path, args.year, args.candidate_limit, candidates_path)
+    else:
+        candidates_path = paths.metadata_dir / f"arxiv_{args.year}_arxiv_api_candidates.jsonl"
+        candidates = select_candidates_from_arxiv_api(
+            args.year,
+            args.candidate_limit,
+            candidates_path,
+            args.api_batch_size,
+            args.api_sleep,
+        )
 
     accepted_path = paths.report_dir / "accepted.jsonl"
     accepted_ids = load_existing_ids(accepted_path)
@@ -366,9 +454,10 @@ def main() -> int:
         "year": args.year,
         "target_successes": args.target_successes,
         "candidate_limit": args.candidate_limit,
+        "candidate_source": args.candidate_source,
         "attempted_this_run": attempted,
         "accepted_total": successes,
-        "metadata_path": str(metadata_path),
+        "metadata_path": str(metadata_path) if metadata_path else None,
         "candidates_path": str(candidates_path),
     }
     (paths.report_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -378,4 +467,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
