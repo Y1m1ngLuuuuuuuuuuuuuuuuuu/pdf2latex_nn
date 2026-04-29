@@ -13,6 +13,7 @@ secrets/
 local_secrets/
 docs/LOCAL_PRIVATE*.md
 docs/*_PRIVATE.md
+PROJECT_TUTORIAL.md
 _legacy_reference/
 
 __pycache__/

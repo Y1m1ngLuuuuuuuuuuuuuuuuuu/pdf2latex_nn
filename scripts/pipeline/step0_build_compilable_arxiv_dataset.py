@@ -104,6 +104,10 @@ class AcceptGate:
             self.count += 1
             return self.count
 
+    def value(self) -> int:
+        with self.lock:
+            return self.count
+
 
 def now_iso() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
@@ -518,6 +522,151 @@ def process_candidate(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def prepare_candidate_for_compile(
+    candidate: dict,
+    paths: DatasetPaths,
+    args: argparse.Namespace,
+    accepted_log: JsonlLog,
+    rejected_log: JsonlLog,
+    transient_log: JsonlLog,
+    gate: AcceptGate,
+) -> dict:
+    arxiv_id = candidate["arxiv_id"]
+    safe = safe_id(arxiv_id)
+    final_source_dir = paths.source_dir / safe
+    final_pdf_path = paths.pdf_dir / f"{safe}.pdf"
+
+    if gate.full():
+        return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+
+    if final_source_dir.exists() and final_pdf_path.exists() and not args.force:
+        accepted_index = gate.reserve()
+        if accepted_index is None:
+            return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+        row = {
+            **candidate,
+            "status": "already_present",
+            "accepted_index": accepted_index,
+            "pdf": str(final_pdf_path),
+            "source_dir": str(final_source_dir),
+            "finished_at": now_iso(),
+        }
+        accepted_log.append(row)
+        return row
+
+    work_dir = Path(tempfile.mkdtemp(prefix=f"{safe}_", dir=paths.tmp_dir))
+    archive_path = work_dir / "source.eprint"
+    extracted_dir = work_dir / "source"
+    started_at = now_iso()
+    try:
+        try:
+            size_bytes = download_eprint(arxiv_id, archive_path, args.retries, args.retry_sleep, args.download_timeout)
+        except DownloadFailed as exc:
+            row = {
+                **candidate,
+                "status": download_failure_status(exc),
+                "error": str(exc)[:500],
+                "finished_at": now_iso(),
+            }
+            if exc.permanent:
+                rejected_log.append(row)
+            else:
+                transient_log.append(row)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return row
+
+        unpack_source(archive_path, extracted_dir, args.max_unpacked_mb)
+        main_tex = find_main_tex(extracted_dir)
+        if main_tex is None:
+            row = {**candidate, "status": "no_main_tex", "size_bytes": size_bytes, "finished_at": now_iso()}
+            rejected_log.append(row)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return row
+
+        return {
+            **candidate,
+            "status": "ready_to_compile",
+            "size_bytes": size_bytes,
+            "work_dir": str(work_dir),
+            "extracted_dir": str(extracted_dir),
+            "main_tex": str(main_tex),
+            "main_tex_relative": str(main_tex.relative_to(extracted_dir)),
+            "started_at": started_at,
+        }
+    except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile, urllib.error.URLError) as exc:
+        row = {**candidate, "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "finished_at": now_iso()}
+        rejected_log.append(row)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return row
+
+
+def compile_prepared_candidate(
+    prepared: dict,
+    paths: DatasetPaths,
+    args: argparse.Namespace,
+    accepted_log: JsonlLog,
+    rejected_log: JsonlLog,
+    gate: AcceptGate,
+) -> dict:
+    arxiv_id = prepared["arxiv_id"]
+    safe = safe_id(arxiv_id)
+    work_dir = Path(prepared["work_dir"])
+    extracted_dir = Path(prepared["extracted_dir"])
+    main_tex = Path(prepared["main_tex"])
+    compile_dir = work_dir / "compile"
+    final_source_dir = paths.source_dir / safe
+    final_pdf_path = paths.pdf_dir / f"{safe}.pdf"
+    log_path = paths.report_dir / "logs" / f"{safe}.log"
+
+    try:
+        if gate.full():
+            return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+        ok, compile_log, pdf_path = compile_tex(main_tex, compile_dir, args.compile_timeout, args.engine)
+        log_path.write_text(tail_text(compile_log), encoding="utf-8", errors="ignore")
+        if not ok or pdf_path is None:
+            row = {
+                **{k: v for k, v in prepared.items() if k not in {"work_dir", "extracted_dir", "main_tex"}},
+                "status": "compile_failed",
+                "log": str(log_path),
+                "finished_at": now_iso(),
+            }
+            rejected_log.append(row)
+            return row
+
+        accepted_index = gate.reserve()
+        if accepted_index is None:
+            return {"arxiv_id": arxiv_id, "status": "skipped_target_reached"}
+        copy_tree(extracted_dir, final_source_dir)
+        final_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf_path, final_pdf_path)
+        row = {
+            **{k: v for k, v in prepared.items() if k not in {"work_dir", "extracted_dir", "main_tex"}},
+            "status": "accepted",
+            "accepted_index": accepted_index,
+            "main_tex": prepared["main_tex_relative"],
+            "pdf": str(final_pdf_path),
+            "source_dir": str(final_source_dir),
+            "log": str(log_path),
+            "finished_at": now_iso(),
+        }
+        accepted_log.append(row)
+        return row
+    except subprocess.TimeoutExpired as exc:
+        row = {**prepared, "status": "timeout", "error": str(exc)[:500], "finished_at": now_iso()}
+        for key in ["work_dir", "extracted_dir", "main_tex"]:
+            row.pop(key, None)
+        rejected_log.append(row)
+        return row
+    except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile, urllib.error.URLError) as exc:
+        row = {**prepared, "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "finished_at": now_iso()}
+        for key in ["work_dir", "extracted_dir", "main_tex"]:
+            row.pop(key, None)
+        rejected_log.append(row)
+        return row
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def write_progress(paths: DatasetPaths, payload: dict) -> None:
     progress_path = paths.report_dir / "progress.json"
     progress_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -534,6 +683,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-slots", type=int, default=6)
     parser.add_argument("--compile-slots", type=int, default=32)
     parser.add_argument("--max-pending", type=int, default=256)
+    parser.add_argument("--download-backlog", type=int, default=24)
+    parser.add_argument("--compile-backlog", type=int, default=96)
     parser.add_argument("--download-timeout", type=int, default=120)
     parser.add_argument("--compile-timeout", type=int, default=240)
     parser.add_argument("--retries", type=int, default=3)
@@ -543,11 +694,228 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", default="arxiv_2025_compilable_unattended")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--progress-every", type=int, default=25)
+    parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
+    parser.add_argument("--pipeline-mode", choices=["staged", "combined"], default="staged")
     return parser
 
 
-def main() -> int:
-    args = build_arg_parser().parse_args()
+def make_progress_payload(
+    *,
+    started_at: str,
+    args: argparse.Namespace,
+    gate: AcceptGate,
+    status_counts: dict[str, int],
+    attempted: int,
+    download_completed: int,
+    compile_submitted: int,
+    compile_completed: int,
+    download_pending: int,
+    compile_pending: int,
+    ready_to_compile: int,
+) -> dict:
+    return {
+        "started_at": started_at,
+        "updated_at": now_iso(),
+        "mode": args.pipeline_mode,
+        "attempted_submitted": attempted,
+        "download_completed": download_completed,
+        "compile_submitted": compile_submitted,
+        "compile_completed": compile_completed,
+        "accepted_total": gate.value(),
+        "target_successes": args.target_successes,
+        "download_pending": download_pending,
+        "compile_pending": compile_pending,
+        "ready_to_compile": ready_to_compile,
+        "status_counts": status_counts,
+    }
+
+
+def write_and_print_progress(paths: DatasetPaths, payload: dict) -> None:
+    write_progress(paths, payload)
+    print(json.dumps({"event": "progress", **payload}, ensure_ascii=False, sort_keys=True), flush=True)
+
+
+def run_staged(args: argparse.Namespace) -> int:
+    paths = DatasetPaths.from_data_root(args.data_root, args.run_name)
+    paths.ensure()
+
+    accepted_path = paths.report_dir / "accepted.jsonl"
+    rejected_path = paths.report_dir / "rejected.jsonl"
+    transient_path = paths.report_dir / "download_errors.jsonl"
+    accepted_log = JsonlLog(accepted_path)
+    rejected_log = JsonlLog(rejected_path)
+    transient_log = JsonlLog(transient_path)
+
+    accepted_ids = load_ids_from_jsonl(accepted_path)
+    rejected_ids = load_ids_from_jsonl(rejected_path)
+    processed_ids = accepted_ids | rejected_ids
+    gate = AcceptGate(args.target_successes, len(accepted_ids))
+
+    started_at = now_iso()
+    attempted = 0
+    download_completed = 0
+    compile_submitted = 0
+    compile_completed = 0
+    status_counts: dict[str, int] = {}
+
+    print(
+        json.dumps(
+            {
+                "event": "start",
+                "metadata": str(args.metadata),
+                "year": args.year,
+                "target_successes": args.target_successes,
+                "existing_successes": len(accepted_ids),
+                "pipeline_mode": args.pipeline_mode,
+                "download_slots": args.download_slots,
+                "compile_slots": args.compile_slots,
+                "download_backlog": args.download_backlog,
+                "compile_backlog": args.compile_backlog,
+                "engine": args.engine,
+                "started_at": started_at,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+    candidates = (
+        candidate
+        for candidate in iter_metadata_candidates(args.metadata, args.year, args.candidate_limit)
+        if args.force or candidate["arxiv_id"] not in processed_ids
+    )
+
+    download_pending = set()
+    compile_pending = set()
+    ready_to_compile: list[dict] = []
+    exhausted_candidates = False
+    last_heartbeat = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=args.download_slots) as download_executor, ThreadPoolExecutor(
+        max_workers=args.compile_slots
+    ) as compile_executor:
+        while not gate.full():
+            while (
+                len(download_pending) < args.download_backlog
+                and len(ready_to_compile) + len(compile_pending) < args.compile_backlog
+                and not exhausted_candidates
+                and not gate.full()
+            ):
+                try:
+                    candidate = next(candidates)
+                except StopIteration:
+                    exhausted_candidates = True
+                    break
+                attempted += 1
+                download_pending.add(
+                    download_executor.submit(
+                        prepare_candidate_for_compile,
+                        candidate,
+                        paths,
+                        args,
+                        accepted_log,
+                        rejected_log,
+                        transient_log,
+                        gate,
+                    )
+                )
+
+            while ready_to_compile and len(compile_pending) < args.compile_backlog and not gate.full():
+                prepared = ready_to_compile.pop(0)
+                compile_submitted += 1
+                compile_pending.add(
+                    compile_executor.submit(
+                        compile_prepared_candidate,
+                        prepared,
+                        paths,
+                        args,
+                        accepted_log,
+                        rejected_log,
+                        gate,
+                    )
+                )
+
+            if not download_pending and not compile_pending and not ready_to_compile:
+                break
+
+            wait_targets = set(download_pending) | set(compile_pending)
+            done, _ = wait(wait_targets, timeout=1.0, return_when=FIRST_COMPLETED)
+
+            for future in list(done):
+                if future in download_pending:
+                    download_pending.remove(future)
+                    download_completed += 1
+                    row = future.result()
+                    status = str(row.get("status") or "unknown")
+                    if status == "ready_to_compile":
+                        ready_to_compile.append(row)
+                    else:
+                        status_counts[status] = status_counts.get(status, 0) + 1
+                else:
+                    compile_pending.remove(future)
+                    compile_completed += 1
+                    row = future.result()
+                    status = str(row.get("status") or "unknown")
+                    status_counts[status] = status_counts.get(status, 0) + 1
+
+            should_report = False
+            if done:
+                total_completed = download_completed + compile_completed
+                should_report = total_completed % args.progress_every == 0
+                should_report = should_report or any(
+                    str(future.result().get("status") or "") == "accepted" for future in done if future.done()
+                )
+            if time.monotonic() - last_heartbeat >= args.heartbeat_seconds:
+                should_report = True
+                last_heartbeat = time.monotonic()
+            if should_report:
+                progress = make_progress_payload(
+                    started_at=started_at,
+                    args=args,
+                    gate=gate,
+                    status_counts=status_counts,
+                    attempted=attempted,
+                    download_completed=download_completed,
+                    compile_submitted=compile_submitted,
+                    compile_completed=compile_completed,
+                    download_pending=len(download_pending),
+                    compile_pending=len(compile_pending),
+                    ready_to_compile=len(ready_to_compile),
+                )
+                write_and_print_progress(paths, progress)
+
+    summary = make_progress_payload(
+        started_at=started_at,
+        args=args,
+        gate=gate,
+        status_counts=status_counts,
+        attempted=attempted,
+        download_completed=download_completed,
+        compile_submitted=compile_submitted,
+        compile_completed=compile_completed,
+        download_pending=len(download_pending),
+        compile_pending=len(compile_pending),
+        ready_to_compile=len(ready_to_compile),
+    )
+    summary.update(
+        {
+            "finished_at": now_iso(),
+            "metadata": str(args.metadata),
+            "year": args.year,
+            "accepted_path": str(accepted_path),
+            "rejected_path": str(rejected_path),
+            "source_dir": str(paths.source_dir),
+            "pdf_dir": str(paths.pdf_dir),
+        }
+    )
+    (paths.report_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    write_progress(paths, summary)
+    print(json.dumps({"event": "finished", **summary}, ensure_ascii=False, sort_keys=True), flush=True)
+    return 0 if gate.value() >= args.target_successes else 2
+
+
+def run_combined(args: argparse.Namespace) -> int:
     paths = DatasetPaths.from_data_root(args.data_root, args.run_name)
     paths.ensure()
 
@@ -578,6 +946,7 @@ def main() -> int:
                 "year": args.year,
                 "target_successes": args.target_successes,
                 "existing_successes": len(accepted_ids),
+                "pipeline_mode": args.pipeline_mode,
                 "workers": args.workers,
                 "download_slots": args.download_slots,
                 "compile_slots": args.compile_slots,
@@ -597,6 +966,7 @@ def main() -> int:
     )
 
     pending = set()
+    last_heartbeat = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         while not gate.full():
             while len(pending) < args.max_pending and not gate.full():
@@ -621,33 +991,48 @@ def main() -> int:
                 )
             if not pending:
                 break
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
             for future in done:
                 row = future.result()
                 completed += 1
                 status = str(row.get("status") or "unknown")
                 status_counts[status] = status_counts.get(status, 0) + 1
-                if completed % args.progress_every == 0 or status == "accepted":
-                    progress = {
-                        "started_at": started_at,
-                        "updated_at": now_iso(),
-                        "attempted_submitted": attempted,
-                        "completed": completed,
-                        "accepted_total": gate.count,
-                        "target_successes": args.target_successes,
-                        "pending": len(pending),
-                        "status_counts": status_counts,
-                    }
-                    write_progress(paths, progress)
-                    print(json.dumps({"event": "progress", **progress}, ensure_ascii=False, sort_keys=True), flush=True)
+            if done and (completed % args.progress_every == 0 or any(f.result().get("status") == "accepted" for f in done)):
+                progress = {
+                    "started_at": started_at,
+                    "updated_at": now_iso(),
+                    "mode": args.pipeline_mode,
+                    "attempted_submitted": attempted,
+                    "completed": completed,
+                    "accepted_total": gate.value(),
+                    "target_successes": args.target_successes,
+                    "pending": len(pending),
+                    "status_counts": status_counts,
+                }
+                write_and_print_progress(paths, progress)
+            elif time.monotonic() - last_heartbeat >= args.heartbeat_seconds:
+                last_heartbeat = time.monotonic()
+                progress = {
+                    "started_at": started_at,
+                    "updated_at": now_iso(),
+                    "mode": args.pipeline_mode,
+                    "attempted_submitted": attempted,
+                    "completed": completed,
+                    "accepted_total": gate.value(),
+                    "target_successes": args.target_successes,
+                    "pending": len(pending),
+                    "status_counts": status_counts,
+                }
+                write_and_print_progress(paths, progress)
 
     summary = {
         "started_at": started_at,
         "finished_at": now_iso(),
+        "mode": args.pipeline_mode,
         "metadata": str(args.metadata),
         "year": args.year,
         "target_successes": args.target_successes,
-        "accepted_total": gate.count,
+        "accepted_total": gate.value(),
         "attempted_submitted": attempted,
         "completed": completed,
         "status_counts": status_counts,
@@ -659,7 +1044,14 @@ def main() -> int:
     (paths.report_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     write_progress(paths, summary)
     print(json.dumps({"event": "finished", **summary}, ensure_ascii=False, sort_keys=True), flush=True)
-    return 0 if gate.count >= args.target_successes else 2
+    return 0 if gate.value() >= args.target_successes else 2
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
+    if args.pipeline_mode == "combined":
+        return run_combined(args)
+    return run_staged(args)
 
 
 if __name__ == "__main__":
