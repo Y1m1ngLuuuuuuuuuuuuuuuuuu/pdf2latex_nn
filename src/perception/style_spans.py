@@ -88,13 +88,13 @@ def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConf
         page = doc[page_idx]
         clip = normalized_bbox_to_page_rect(page, bbox, config.clip_margin)
         try:
-            blocks = page.get_text("dict", clip=clip).get("blocks", [])
+            blocks = page.get_text("rawdict", clip=clip).get("blocks", [])
         except (ValueError, RuntimeError):
             continue
         for block in blocks:
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
-                    text = str(span.get("text") or "")
+                    text = reconstruct_raw_span_text(span)
                     if not text.strip():
                         continue
                     font_name = normalize_font_name(str(span.get("font") or ""))
@@ -114,13 +114,49 @@ def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConf
     return spans
 
 
+def reconstruct_raw_span_text(span: dict[str, Any]) -> str:
+    """Rebuild span text from raw characters, preserving inferred word spaces."""
+
+    chars = span.get("chars")
+    if not isinstance(chars, list) or not chars:
+        return str(span.get("text") or "")
+
+    size = float(span.get("size") or 0.0)
+    gap_threshold = max(1.0, size * 0.22)
+    parts: list[str] = []
+    previous_x1: float | None = None
+    previous_char = ""
+
+    for char in chars:
+        value = str(char.get("c") or "")
+        if not value:
+            continue
+        bbox = char.get("bbox")
+        x0 = float(bbox[0]) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None
+        x1 = float(bbox[2]) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None
+        if (
+            parts
+            and previous_x1 is not None
+            and x0 is not None
+            and x0 - previous_x1 > gap_threshold
+            and previous_char not in " ([{/%“‘"
+            and value not in " .,;:!?)]}%”’"
+        ):
+            parts.append(" ")
+        parts.append(value)
+        if x1 is not None:
+            previous_x1 = x1
+        previous_char = value
+    return "".join(parts)
+
+
 def merge_raw_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for span in spans:
         key = style_key(span)
         if current is not None and style_key(current) == key:
-            current["text"] += span["text"]
+            current["text"] = join_span_text(current["text"], span["text"])
             current["char_count"] += len(span["text"])
             continue
         if current is not None:
@@ -138,6 +174,39 @@ def merge_raw_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if current is not None:
         merged.append(current)
     return merged
+
+
+def join_span_text(left: str, right: str) -> str:
+    """Join adjacent PyMuPDF fragments while restoring readable word spacing."""
+
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.endswith((" ", "\n")) or right.startswith((" ", "\n")):
+        return left + right
+
+    lch = left[-1]
+    rch = right[0]
+    if lch == "-":
+        return left + right
+    if rch in ".,;:!?)]}%”’":
+        return left + right
+    if lch in "([{/%“‘":
+        return left + right
+    if _is_word_char(lch) and _is_word_char(rch):
+        return left + " " + right
+    if _is_word_char(lch) and rch in "([{“‘":
+        return left + " " + right
+    if lch == "." and len(left) >= 2 and left[-2].isdigit() and rch.isdigit():
+        return left + right
+    if lch in ".,;:!?)]}%”’" and _is_word_char(rch):
+        return left + " " + right
+    return left + right
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum()
 
 
 def style_key(span: dict[str, Any]) -> tuple[Any, ...]:

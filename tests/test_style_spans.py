@@ -2,8 +2,10 @@ from src.perception.style_spans import (
     baseline_font_size,
     bucket_font_size,
     is_inline_math_font,
+    join_span_text,
     merge_raw_spans,
     normalize_font_name,
+    reconstruct_raw_span_text,
 )
 
 
@@ -61,6 +63,32 @@ def test_merge_raw_spans_state_machine_merges_equal_style_only():
     assert merged[0]["text"] == "hello world"
     assert merged[0]["char_count"] == 11
     assert merged[1]["text"] == "!"
+
+
+def test_join_span_text_restores_word_spacing_without_breaking_punctuation():
+    assert join_span_text("The", "MSPL") == "The MSPL"
+    assert join_span_text("framework", "demonstrated") == "framework demonstrated"
+    assert join_span_text("accuracy", ",") == "accuracy,"
+    assert join_span_text("0", ".") == "0."
+    assert join_span_text("0.", "7884") == "0.7884"
+    assert join_span_text("chal-", "lenges") == "chal-lenges"
+
+
+def test_reconstruct_raw_span_text_inserts_spaces_from_char_gaps():
+    span = {
+        "size": 10.0,
+        "chars": [
+            {"c": "T", "bbox": [0, 0, 5, 10]},
+            {"c": "h", "bbox": [5.2, 0, 10, 10]},
+            {"c": "e", "bbox": [10.2, 0, 15, 10]},
+            {"c": "M", "bbox": [20, 0, 27, 10]},
+            {"c": "S", "bbox": [27.2, 0, 33, 10]},
+            {"c": "P", "bbox": [33.2, 0, 39, 10]},
+            {"c": "L", "bbox": [39.2, 0, 44, 10]},
+        ],
+    }
+
+    assert reconstruct_raw_span_text(span) == "The MSPL"
 
 
 def test_baseline_font_size_uses_char_weighted_mode():
