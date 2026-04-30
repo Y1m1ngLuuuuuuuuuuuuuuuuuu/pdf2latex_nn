@@ -9,6 +9,17 @@ from typing import Any
 
 
 PAGE_SIZE = 1000.0
+TYPE_VOCAB = ["text", "title", "equation", "table", "figure", "list", "other"]
+NON_TEXT_DENSITY_TYPES = {"equation", "table", "figure"}
+PLACEHOLDER_TEXT = {
+    "equation": "[EQUATION]",
+    "table": "[TABLE]",
+    "figure": "[FIGURE]",
+    "other": "[EMPTY]",
+    "text": "[EMPTY]",
+    "title": "[EMPTY]",
+    "list": "[EMPTY]",
+}
 
 
 @dataclass(frozen=True)
@@ -54,20 +65,34 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
     from torch_geometric.data import Data
 
     items = load_content_v3(input_path)
-    texts = [str(item.get("text_for_embedding") or "") for item in items]
+    texts = [text_for_embedding(item) for item in items]
     semantic = embed_texts_scibert_cls(texts, config)
+    type_onehot = build_type_onehot_matrix(items)
     geometry = build_geometry_matrix(items)
-    x = torch.cat([semantic, geometry], dim=1)
+    stats = build_derived_stats_matrix(items)
+    x = torch.cat([semantic, type_onehot, geometry, stats], dim=1)
     edge_index = build_sequential_edge_index(len(items), bidirectional=config.bidirectional_edges)
     data = Data(x=x, edge_index=edge_index)
     data.node_records = make_node_records(items)
     data.feature_schema = {
         "semantic": {"start": 0, "end": 768, "dim": 768, "source": "SciBERT CLS window mean"},
-        "geometry": {
+        "type_onehot": {
             "start": 768,
-            "end": 772,
+            "end": 775,
+            "dim": 7,
+            "vocab": TYPE_VOCAB,
+        },
+        "geometry": {
+            "start": 775,
+            "end": 779,
             "dim": 4,
             "fields": ["x_start_local", "y_start_page", "x_end_local", "y_end_page"],
+        },
+        "derived_stats": {
+            "start": 779,
+            "end": 782,
+            "dim": 3,
+            "fields": ["macro_position", "aspect_ratio", "text_density"],
         },
     }
     data.source_path = str(input_path)
@@ -120,6 +145,18 @@ def embed_texts_scibert_cls(texts: list[str], config: GraphBuildConfig) -> Any:
     return torch.stack(vectors, dim=0)
 
 
+def build_type_onehot_matrix(items: list[dict[str, Any]]) -> Any:
+    import torch
+
+    rows = []
+    for item in items:
+        type_name = canonical_type(item.get("type"))
+        row = [0.0] * len(TYPE_VOCAB)
+        row[TYPE_VOCAB.index(type_name)] = 1.0
+        rows.append(row)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
 def build_geometry_matrix(items: list[dict[str, Any]]) -> Any:
     """Return N x 4 geometry tensor using first/last bbox local coordinates."""
 
@@ -145,6 +182,28 @@ def build_geometry_matrix(items: list[dict[str, Any]]) -> Any:
         x_end = normalize_x_in_local_frame(last[2], last, last_page, page_frames, bool(item.get("is_full_width")))
         y_end = last[3] / PAGE_SIZE
         rows.append([x_start, y_start, x_end, y_end])
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_derived_stats_matrix(items: list[dict[str, Any]]) -> Any:
+    import torch
+
+    total_nodes = max(1, len(items) - 1)
+    rows = []
+    for idx, item in enumerate(items):
+        chunks = list(iter_bbox_chunks(item.get("bbox")))
+        macro_position = idx / total_nodes
+        total_width = sum(max(0.0, bbox[2] - bbox[0]) for bbox in chunks)
+        total_height = sum(max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
+        area_sum = sum(max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
+        aspect_ratio = total_height / max(total_width, 1.0)
+        type_name = canonical_type(item.get("type"))
+        if type_name in NON_TEXT_DENSITY_TYPES:
+            text_density = 0.0
+        else:
+            char_count = len(str(item.get("text_for_embedding") or ""))
+            text_density = char_count / max(area_sum, 1.0)
+        rows.append([macro_position, aspect_ratio, text_density])
     return torch.tensor(rows, dtype=torch.float32)
 
 
@@ -238,6 +297,7 @@ def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "global_order": item.get("global_order"),
                 "type": item.get("type"),
+                "canonical_type": canonical_type(item.get("type")),
                 "page_idx": item.get("page_idx"),
                 "visual_order": item.get("visual_order"),
                 "merge_count": item.get("merge_count"),
@@ -259,3 +319,27 @@ def iter_bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:
         chunk = value[idx : idx + 4]
         chunks.append((float(chunk[0]), float(chunk[1]), float(chunk[2]), float(chunk[3])))
     return chunks
+
+
+def canonical_type(value: Any) -> str:
+    raw = str(value or "").lower()
+    if raw in {"paragraph", "text"}:
+        return "text"
+    if raw == "title":
+        return "title"
+    if raw in {"equation", "equation_interline", "interline_equation", "display_formula"}:
+        return "equation"
+    if raw == "table":
+        return "table"
+    if raw in {"figure", "image", "chart"}:
+        return "figure"
+    if raw == "list":
+        return "list"
+    return "other"
+
+
+def text_for_embedding(item: dict[str, Any]) -> str:
+    text = str(item.get("text_for_embedding") or "").strip()
+    if text:
+        return text
+    return PLACEHOLDER_TEXT[canonical_type(item.get("type"))]

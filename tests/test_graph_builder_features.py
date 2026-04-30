@@ -1,8 +1,13 @@
 from src.reasoning.graph_builder import (
+    TYPE_VOCAB,
+    build_derived_stats_matrix,
     build_geometry_matrix,
     build_sequential_edge_index,
+    build_type_onehot_matrix,
+    canonical_type,
     infer_page_frames,
     iter_bbox_chunks,
+    text_for_embedding,
 )
 
 
@@ -75,3 +80,59 @@ def test_sequential_edges_are_bidirectional_by_default():
     edge_index = build_sequential_edge_index(3)
 
     assert edge_index.tolist() == [[0, 1, 1, 2], [1, 0, 2, 1]]
+
+
+def test_canonical_type_maps_mineru_names_to_fixed_vocab():
+    assert TYPE_VOCAB == ["text", "title", "equation", "table", "figure", "list", "other"]
+    assert canonical_type("paragraph") == "text"
+    assert canonical_type("equation_interline") == "equation"
+    assert canonical_type("chart") == "figure"
+    assert canonical_type("algorithm") == "other"
+
+
+def test_type_onehot_matrix_uses_fixed_vocab():
+    if not has_torch():
+        return
+    items = [
+        {"type": "paragraph"},
+        {"type": "title"},
+        {"type": "equation_interline"},
+        {"type": "table"},
+        {"type": "chart"},
+        {"type": "list"},
+        {"type": "algorithm"},
+    ]
+
+    onehot = build_type_onehot_matrix(items)
+
+    assert tuple(onehot.shape) == (7, 7)
+    assert onehot.argmax(dim=1).tolist() == list(range(7))
+
+
+def test_empty_non_text_gets_placeholder_for_bert():
+    assert text_for_embedding({"type": "chart", "text_for_embedding": ""}) == "[FIGURE]"
+    assert text_for_embedding({"type": "table", "text_for_embedding": ""}) == "[TABLE]"
+    assert text_for_embedding({"type": "equation_interline", "text_for_embedding": ""}) == "[EQUATION]"
+
+
+def test_derived_stats_masks_density_for_non_text_types_and_uses_area_sum():
+    if not has_torch():
+        return
+    items = [
+        {
+            "type": "paragraph",
+            "bbox": [0, 0, 10, 10, 0, 0, 20, 10],
+            "text_for_embedding": "abcde",
+        },
+        {
+            "type": "equation_interline",
+            "bbox": [0, 0, 10, 10],
+            "text_for_embedding": r"\\frac{a}{b}",
+        },
+    ]
+
+    stats = build_derived_stats_matrix(items)
+
+    assert tuple(stats.shape) == (2, 3)
+    assert round(float(stats[0][2]), 4) == round(5 / 300, 4)
+    assert float(stats[1][2]) == 0.0
