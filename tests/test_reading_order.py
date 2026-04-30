@@ -1,4 +1,4 @@
-from src.perception.reading_order import extract_text, sort_content_list_v2
+from src.perception.reading_order import build_content_v3, extract_text, sort_content_list_v2
 
 
 def para(text, bbox):
@@ -71,3 +71,66 @@ def test_region_between_full_width_blocks_sorts_left_column_before_right_column(
         "right section body",
     ]
     assert result["page_summaries"][0]["dropped_empty_textual_blocks"] == 1
+
+
+def visual_item(text, page, order, bbox, column):
+    return {
+        "page_idx": page,
+        "visual_order": order,
+        "original_index": order,
+        "type": "paragraph",
+        "bbox": bbox,
+        "column_id": column,
+        "is_full_width": False,
+        "is_textual": True,
+        "text_for_embedding": text,
+        "block": {"type": "paragraph"},
+    }
+
+
+def test_content_v3_merges_same_page_column_continuation_without_terminal_punctuation():
+    payload = {
+        "pages": [
+            [
+                visual_item("a critical requirement", 5, 0, [80, 611, 482, 890], 0),
+                visual_item("for intrusion detection systems.", 5, 1, [514, 535, 916, 550], 1),
+            ]
+        ]
+    }
+
+    result = build_content_v3(payload)
+    item = result["items"][0]
+
+    assert len(result["items"]) == 1
+    assert item["text_for_embedding"] == "a critical requirement for intrusion detection systems."
+    assert item["bbox"] == [80, 611, 482, 890, 514, 535, 916, 550]
+    assert item["merge_count"] == 2
+
+
+def test_content_v3_does_not_merge_when_previous_has_terminal_punctuation():
+    payload = {
+        "pages": [
+            [
+                visual_item("This sentence ends.", 0, 0, [80, 611, 482, 890], 0),
+                visual_item("New sentence.", 0, 1, [514, 535, 916, 550], 1),
+            ]
+        ]
+    }
+
+    result = build_content_v3(payload)
+
+    assert len(result["items"]) == 2
+
+
+def test_content_v3_merges_cross_page_continuation():
+    payload = {
+        "pages": [
+            [visual_item("continues across", 0, 0, [80, 820, 482, 930], 0)],
+            [visual_item("the next page.", 1, 0, [80, 90, 482, 160], 0)],
+        ]
+    }
+
+    result = build_content_v3(payload)
+
+    assert len(result["items"]) == 1
+    assert result["items"][0]["source_page_idxs"] == [0, 1]

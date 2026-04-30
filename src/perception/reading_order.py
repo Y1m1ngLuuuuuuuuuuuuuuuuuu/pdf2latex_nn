@@ -25,6 +25,22 @@ TEXTUAL_TYPES = {
     "algorithm",
 }
 
+MERGEABLE_TYPES = {
+    "paragraph",
+    "list",
+}
+
+TERMINAL_PUNCTUATION = {
+    ".",
+    "?",
+    "!",
+    "。",
+    "？",
+    "！",
+    ";",
+    "；",
+}
+
 FULL_WIDTH_TYPES = {
     "title",
     "table",
@@ -165,6 +181,58 @@ def sort_content_list_v2(
     }
 
 
+def build_content_v3(
+    visual_order_payload: dict[str, Any],
+    *,
+    same_page_cross_column_y_tolerance: float = 80.0,
+    cross_page_bottom_threshold: float = 780.0,
+    cross_page_top_threshold: float = 260.0,
+) -> dict[str, Any]:
+    """Merge visually ordered text blocks into cross-page logical content."""
+
+    pages = visual_order_payload.get("pages")
+    if not isinstance(pages, list):
+        raise ValueError("Expected visual order payload with a pages list")
+
+    flattened: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, list):
+            continue
+        for item in page:
+            if isinstance(item, dict):
+                flattened.append(item)
+
+    merged: list[dict[str, Any]] = []
+    for item in flattened:
+        candidate = _new_v3_item(item, len(merged))
+        if merged and _should_merge_v3(
+            merged[-1],
+            candidate,
+            same_page_cross_column_y_tolerance=same_page_cross_column_y_tolerance,
+            cross_page_bottom_threshold=cross_page_bottom_threshold,
+            cross_page_top_threshold=cross_page_top_threshold,
+        ):
+            _merge_v3_item(merged[-1], candidate)
+        else:
+            merged.append(candidate)
+
+    for idx, item in enumerate(merged):
+        item["global_order"] = idx
+
+    return {
+        "schema_version": "content_v3_paragraph_merge",
+        "source_format": "content_list_v2_visual_order",
+        "config": {
+            "same_page_cross_column_y_tolerance": same_page_cross_column_y_tolerance,
+            "cross_page_bottom_threshold": cross_page_bottom_threshold,
+            "cross_page_top_threshold": cross_page_top_threshold,
+            "mergeable_types": sorted(MERGEABLE_TYPES),
+            "terminal_punctuation": sorted(TERMINAL_PUNCTUATION),
+        },
+        "items": merged,
+    }
+
+
 def extract_text(block: dict[str, Any]) -> str:
     """Extract readable text from MinerU v2 nested content structures."""
 
@@ -202,6 +270,13 @@ def extract_text(block: dict[str, Any]) -> str:
 
     visit(block.get("content"))
     return " ".join(parts)
+
+
+def has_terminal_punctuation(text: str) -> bool:
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    return stripped[-1] in TERMINAL_PUNCTUATION
 
 
 def _make_block_view(block: dict[str, Any], index: int, page_idx: int, cfg: SortConfig) -> BlockView:
@@ -348,3 +423,117 @@ def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
 def _count_columns(ordered: list[BlockView]) -> int:
     columns = {view.column_id for view in ordered if view.column_id is not None}
     return len(columns)
+
+
+def _new_v3_item(item: dict[str, Any], global_order: int) -> dict[str, Any]:
+    bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else []
+    text = item.get("text_for_embedding") or ""
+    return {
+        "global_order": global_order,
+        "type": item.get("type"),
+        "page_idx": item.get("page_idx"),
+        "visual_order": item.get("visual_order"),
+        "original_index": item.get("original_index"),
+        "bbox": list(bbox),
+        "column_id": item.get("column_id"),
+        "is_full_width": item.get("is_full_width"),
+        "is_textual": item.get("is_textual"),
+        "text_for_embedding": text,
+        "merge_count": 1,
+        "source_page_idxs": [item.get("page_idx")],
+        "source_visual_orders": [item.get("visual_order")],
+        "source_original_indexes": [item.get("original_index")],
+        "block": item.get("block"),
+    }
+
+
+def _should_merge_v3(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    same_page_cross_column_y_tolerance: float,
+    cross_page_bottom_threshold: float,
+    cross_page_top_threshold: float,
+) -> bool:
+    if previous.get("type") != current.get("type"):
+        return False
+    if previous.get("type") not in MERGEABLE_TYPES:
+        return False
+    if not previous.get("text_for_embedding") or not current.get("text_for_embedding"):
+        return False
+    if has_terminal_punctuation(str(previous.get("text_for_embedding", ""))):
+        return False
+
+    prev_page = _last_value(previous.get("source_page_idxs"))
+    cur_page = current.get("page_idx")
+    if not isinstance(prev_page, int) or not isinstance(cur_page, int):
+        return False
+
+    prev_bbox = _last_bbox(previous.get("bbox"))
+    cur_bbox = _first_bbox(current.get("bbox"))
+    if prev_bbox is None or cur_bbox is None:
+        return False
+
+    if prev_page == cur_page:
+        return _is_same_page_cross_column_continuation(previous, current, prev_bbox, cur_bbox, same_page_cross_column_y_tolerance)
+    if cur_page == prev_page + 1:
+        return prev_bbox[3] >= cross_page_bottom_threshold and cur_bbox[1] <= cross_page_top_threshold
+    return False
+
+
+def _merge_v3_item(previous: dict[str, Any], current: dict[str, Any]) -> None:
+    previous["bbox"].extend(current.get("bbox", []))
+    previous["text_for_embedding"] = _join_continuation_text(
+        str(previous.get("text_for_embedding", "")),
+        str(current.get("text_for_embedding", "")),
+    )
+    previous["merge_count"] = int(previous.get("merge_count", 1)) + int(current.get("merge_count", 1))
+    for key in ("source_page_idxs", "source_visual_orders", "source_original_indexes"):
+        previous.setdefault(key, [])
+        previous[key].extend(current.get(key, []))
+
+
+def _join_continuation_text(left: str, right: str) -> str:
+    left = left.rstrip()
+    right = right.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.endswith("-"):
+        return left[:-1] + right
+    return left + " " + right
+
+
+def _is_same_page_cross_column_continuation(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    prev_bbox: tuple[float, float, float, float],
+    cur_bbox: tuple[float, float, float, float],
+    y_tolerance: float,
+) -> bool:
+    prev_col = previous.get("column_id")
+    cur_col = current.get("column_id")
+    if prev_col == 0 and cur_col == 1:
+        return cur_bbox[1] <= prev_bbox[1] + y_tolerance
+    return False
+
+
+def _last_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, list) or len(value) < 4 or len(value) % 4 != 0:
+        return None
+    vals = value[-4:]
+    return (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+
+
+def _first_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, list) or len(value) < 4:
+        return None
+    vals = value[:4]
+    return (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+
+
+def _last_value(value: Any) -> Any:
+    if isinstance(value, list) and value:
+        return value[-1]
+    return None
