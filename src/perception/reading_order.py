@@ -31,6 +31,18 @@ MERGEABLE_TYPES = {
     "list",
 }
 
+FLOAT_TYPES = {
+    "algorithm",
+    "chart",
+    "code",
+    "equation",
+    "equation_interline",
+    "figure",
+    "image",
+    "interline_equation",
+    "table",
+}
+
 TERMINAL_PUNCTUATION = {
     ".",
     "?",
@@ -249,8 +261,10 @@ def build_content_v4(
     *,
     x_alignment_tolerance: float = 28.0,
     parent_indent_threshold: float = 20.0,
+    max_skipped_float_blocks: int = 3,
+    float_cross_page_top_threshold: float = 760.0,
 ) -> dict[str, Any]:
-    """Add list-aware marker and parent annotations without merging marked blocks."""
+    """Add list annotations and merge clear paragraph continuations across floats."""
 
     raw_items = content_v3_payload.get("items")
     if not isinstance(raw_items, list):
@@ -260,8 +274,13 @@ def build_content_v4(
     output: list[dict[str, Any]] = []
     active_parent_idx: int | None = None
     list_item_counter = 0
+    consumed_indexes: set[int] = set()
 
-    for item in items:
+    for item_index, raw_item in enumerate(items):
+        if item_index in consumed_indexes:
+            continue
+
+        item = raw_item
         text = str(item.get("text_for_embedding") or "")
         marker = detect_list_marker(text)
         item["list_marker"] = marker
@@ -283,6 +302,23 @@ def build_content_v4(
             output.append(item)
             continue
 
+        continuation = _find_float_separated_paragraph_continuation(
+            items,
+            item_index,
+            max_skipped_float_blocks=max_skipped_float_blocks,
+            float_cross_page_top_threshold=float_cross_page_top_threshold,
+        )
+        if continuation is not None:
+            continuation_index, skipped = continuation
+            _merge_v3_item(item, _new_v3_item_like(items[continuation_index]))
+            item["float_continuation_merge_count"] = int(item.get("float_continuation_merge_count", 0)) + 1
+            item["skipped_float_global_orders"] = [
+                skipped_item.get("global_order", items.index(skipped_item))
+                for skipped_item in skipped
+            ]
+            item["skipped_float_types"] = [skipped_item.get("type") for skipped_item in skipped]
+            consumed_indexes.add(continuation_index)
+
         output.append(item)
         if item.get("type") not in MERGEABLE_TYPES:
             active_parent_idx = None
@@ -297,6 +333,9 @@ def build_content_v4(
             "x_alignment_tolerance": x_alignment_tolerance,
             "parent_indent_threshold": parent_indent_threshold,
             "merge_marked_items": False,
+            "max_skipped_float_blocks": max_skipped_float_blocks,
+            "float_cross_page_top_threshold": float_cross_page_top_threshold,
+            "float_types": sorted(FLOAT_TYPES),
         },
         "items": output,
     }
@@ -631,6 +670,56 @@ def _new_v3_item_like(item: dict[str, Any]) -> dict[str, Any]:
         "source_visual_orders": list(item.get("source_visual_orders") or [item.get("visual_order")]),
         "source_original_indexes": list(item.get("source_original_indexes") or [item.get("original_index")]),
     }
+
+
+def _find_float_separated_paragraph_continuation(
+    items: list[dict[str, Any]],
+    item_index: int,
+    *,
+    max_skipped_float_blocks: int,
+    float_cross_page_top_threshold: float,
+) -> tuple[int, list[dict[str, Any]]] | None:
+    current = items[item_index]
+    if current.get("type") != "paragraph":
+        return None
+    if detect_list_marker(str(current.get("text_for_embedding") or "")) is not None:
+        return None
+    if not str(current.get("text_for_embedding") or "").rstrip().endswith("-"):
+        return None
+
+    skipped: list[dict[str, Any]] = []
+    cursor = item_index + 1
+    while cursor < len(items) and _is_float_block(items[cursor]) and len(skipped) < max_skipped_float_blocks:
+        skipped.append(items[cursor])
+        cursor += 1
+
+    if not skipped or cursor >= len(items):
+        return None
+
+    candidate = items[cursor]
+    if candidate.get("type") != "paragraph":
+        return None
+    if detect_list_marker(str(candidate.get("text_for_embedding") or "")) is not None:
+        return None
+    if not candidate.get("text_for_embedding"):
+        return None
+
+    prev_page = _last_value(current.get("source_page_idxs"))
+    cur_page = candidate.get("page_idx")
+    prev_bbox = _last_bbox(current.get("bbox"))
+    cur_bbox = _first_bbox(candidate.get("bbox"))
+    if not isinstance(prev_page, int) or not isinstance(cur_page, int) or prev_bbox is None or cur_bbox is None:
+        return None
+
+    if cur_page == prev_page + 1 and cur_bbox[1] <= float_cross_page_top_threshold:
+        return cursor, skipped
+    if cur_page == prev_page:
+        return cursor, skipped
+    return None
+
+
+def _is_float_block(item: dict[str, Any]) -> bool:
+    return str(item.get("type") or "").lower() in FLOAT_TYPES
 
 
 def _find_list_parent(output: list[dict[str, Any]], item: dict[str, Any], indent_threshold: float) -> int | None:

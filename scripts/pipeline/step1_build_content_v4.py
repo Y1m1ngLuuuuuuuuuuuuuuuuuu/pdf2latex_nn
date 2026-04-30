@@ -20,6 +20,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True, help="Output content v4 JSON")
     parser.add_argument("--x-alignment-tolerance", type=float, default=28.0)
     parser.add_argument("--parent-indent-threshold", type=float, default=20.0)
+    parser.add_argument("--max-skipped-float-blocks", type=int, default=3)
+    parser.add_argument("--float-cross-page-top-threshold", type=float, default=760.0)
     return parser
 
 
@@ -30,13 +32,24 @@ def main() -> int:
         payload,
         x_alignment_tolerance=args.x_alignment_tolerance,
         parent_indent_threshold=args.parent_indent_threshold,
+        max_skipped_float_blocks=args.max_skipped_float_blocks,
+        float_cross_page_top_threshold=args.float_cross_page_top_threshold,
     )
     v4["source_path"] = str(args.input)
     write_json(args.output, v4)
     items = v4["items"]
     list_items = [item for item in items if item.get("list_item_id")]
+    float_merges = [item for item in items if item.get("float_continuation_merge_count")]
     print(f"wrote {args.output}")
-    print(f"items={len(items)} list_items={len(list_items)} marked_item_merge=False")
+    print(f"items={len(items)} list_items={len(list_items)} float_merges={len(float_merges)} marked_item_merge=False")
+    for item in float_merges[:10]:
+        print(
+            "float_merge order={global_order} skipped={skipped} text={text}".format(
+                global_order=item.get("global_order"),
+                skipped=item.get("skipped_float_types"),
+                text=str(item.get("text_for_embedding") or "")[:160].replace("\n", " "),
+            )
+        )
     for item in list_items[:20]:
         print(
             "order={global_order} id={list_item_id} marker={marker} text={text}".format(

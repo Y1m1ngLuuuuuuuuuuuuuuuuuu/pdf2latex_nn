@@ -73,18 +73,22 @@ def test_region_between_full_width_blocks_sorts_left_column_before_right_column(
     assert result["page_summaries"][0]["dropped_empty_textual_blocks"] == 1
 
 
-def visual_item(text, page, order, bbox, column):
+def visual_item(text, page, order, bbox, column, item_type="paragraph"):
     return {
         "page_idx": page,
         "visual_order": order,
         "original_index": order,
-        "type": "paragraph",
+        "type": item_type,
         "bbox": bbox,
         "column_id": column,
         "is_full_width": False,
         "is_textual": True,
         "text_for_embedding": text,
-        "block": {"type": "paragraph"},
+        "merge_count": 1,
+        "source_page_idxs": [page],
+        "source_visual_orders": [order],
+        "source_original_indexes": [order],
+        "block": {"type": item_type},
     }
 
 
@@ -181,3 +185,23 @@ def test_content_v4_parent_colon_sets_list_parent_without_merging_parent():
     assert len(items) == 2
     assert items[1]["list_parent_global_order"] == 0
     assert items[1]["list_level"] == 1
+
+
+def test_content_v4_merges_hyphenated_paragraph_across_float_block():
+    payload = {
+        "items": [
+            visual_item("For CI-", 5, 0, [514, 818, 916, 890], 1),
+            visual_item("Algorithm 1: floating block", 6, 1, [81, 66, 478, 481], 0, item_type="algorithm"),
+            visual_item("CEVSE2024 continues here.", 6, 2, [81, 507, 482, 704], 0),
+        ]
+    }
+
+    result = build_content_v4(payload)
+    items = result["items"]
+
+    assert len(items) == 2
+    assert items[0]["text_for_embedding"] == "For CICEVSE2024 continues here."
+    assert items[0]["bbox"] == [514, 818, 916, 890, 81, 507, 482, 704]
+    assert items[0]["source_page_idxs"] == [5, 6]
+    assert items[0]["skipped_float_types"] == ["algorithm"]
+    assert items[1]["type"] == "algorithm"

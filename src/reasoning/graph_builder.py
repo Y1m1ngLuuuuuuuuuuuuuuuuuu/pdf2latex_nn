@@ -9,12 +9,14 @@ from typing import Any
 
 
 PAGE_SIZE = 1000.0
-TYPE_VOCAB = ["text", "title", "equation", "table", "figure", "list", "other"]
-NON_TEXT_DENSITY_TYPES = {"equation", "table", "figure"}
+TYPE_VOCAB = ["text", "title", "equation", "table", "figure", "algorithm", "list", "code", "other"]
+NON_TEXT_DENSITY_TYPES = {"equation", "table", "figure", "algorithm", "code"}
 PLACEHOLDER_TEXT = {
     "equation": "[EQUATION]",
     "table": "[TABLE]",
     "figure": "[FIGURE]",
+    "algorithm": "[ALGORITHM]",
+    "code": "[CODE]",
     "other": "[EMPTY]",
     "text": "[EMPTY]",
     "title": "[EMPTY]",
@@ -78,19 +80,19 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
         "semantic": {"start": 0, "end": 768, "dim": 768, "source": "SciBERT CLS window mean"},
         "type_onehot": {
             "start": 768,
-            "end": 775,
-            "dim": 7,
+            "end": 777,
+            "dim": 9,
             "vocab": TYPE_VOCAB,
         },
         "geometry": {
-            "start": 775,
-            "end": 779,
+            "start": 777,
+            "end": 781,
             "dim": 4,
             "fields": ["x_start_local", "y_start_page", "x_end_local", "y_end_page"],
         },
         "derived_stats": {
-            "start": 779,
-            "end": 782,
+            "start": 781,
+            "end": 784,
             "dim": 3,
             "fields": ["macro_position", "aspect_ratio", "text_density"],
         },
@@ -333,8 +335,12 @@ def canonical_type(value: Any) -> str:
         return "table"
     if raw in {"figure", "image", "chart"}:
         return "figure"
+    if raw == "algorithm":
+        return "algorithm"
     if raw == "list":
         return "list"
+    if raw == "code":
+        return "code"
     return "other"
 
 
