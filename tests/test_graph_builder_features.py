@@ -83,12 +83,13 @@ def test_sequential_edges_are_bidirectional_by_default():
 
 
 def test_canonical_type_maps_mineru_names_to_fixed_vocab():
-    assert TYPE_VOCAB == ["text", "title", "equation", "table", "figure", "algorithm", "list", "code", "other"]
+    assert TYPE_VOCAB == ["text", "title", "equation", "table", "figure", "algorithm", "list", "code", "reference", "other"]
     assert canonical_type("paragraph") == "text"
     assert canonical_type("equation_interline") == "equation"
     assert canonical_type("chart") == "figure"
     assert canonical_type("algorithm") == "algorithm"
     assert canonical_type("code") == "code"
+    assert canonical_type("reference") == "reference"
 
 
 def test_type_onehot_matrix_uses_fixed_vocab():
@@ -103,13 +104,14 @@ def test_type_onehot_matrix_uses_fixed_vocab():
         {"type": "algorithm"},
         {"type": "list"},
         {"type": "code"},
+        {"type": "reference"},
         {"type": "unknown"},
     ]
 
     onehot = build_type_onehot_matrix(items)
 
-    assert tuple(onehot.shape) == (9, 9)
-    assert onehot.argmax(dim=1).tolist() == list(range(9))
+    assert tuple(onehot.shape) == (10, 10)
+    assert onehot.argmax(dim=1).tolist() == list(range(10))
 
 
 def test_empty_non_text_gets_placeholder_for_bert():
@@ -117,6 +119,7 @@ def test_empty_non_text_gets_placeholder_for_bert():
     assert text_for_embedding({"type": "table", "text_for_embedding": ""}) == "[TABLE]"
     assert text_for_embedding({"type": "equation_interline", "text_for_embedding": ""}) == "[EQUATION]"
     assert text_for_embedding({"type": "algorithm", "text_for_embedding": ""}) == "[ALGORITHM]"
+    assert text_for_embedding({"type": "reference", "text_for_embedding": "Author A. Paper."}) == "[REFERENCE]"
 
 
 def test_derived_stats_masks_density_for_non_text_types_and_uses_area_sum():

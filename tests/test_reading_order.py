@@ -15,6 +15,50 @@ def test_extract_text_from_v2_nested_content():
     assert extract_text(block) == "Key Observation"
 
 
+def test_extract_text_from_reference_list_item_content():
+    block = {
+        "type": "list",
+        "content": {
+            "list_type": "reference_list",
+            "list_items": [
+                {
+                    "item_type": "text",
+                    "item_content": [
+                        {"type": "text", "content": "Author A. Paper title."},
+                        {"type": "text", "content": "Journal 2024."},
+                    ],
+                }
+            ],
+        },
+        "bbox": [100, 100, 500, 160],
+    }
+
+    assert extract_text(block) == "Author A. Paper title. Journal 2024."
+
+
+def test_reference_list_is_preserved_as_reference_type_in_visual_order():
+    pages = [
+        [
+            title("References", [100, 80, 250, 110]),
+            {
+                "type": "list",
+                "content": {
+                    "list_type": "reference_list",
+                    "list_items": [{"item_content": [{"content": "Author A. Paper title."}]}],
+                },
+                "bbox": [100, 120, 500, 170],
+            },
+        ]
+    ]
+
+    result = sort_content_list_v2(pages)
+    page = result["pages"][0]
+
+    assert [item["type"] for item in page] == ["title", "reference"]
+    assert page[1]["raw_type"] == "list"
+    assert page[1]["text_for_embedding"] == "Author A. Paper title."
+
+
 def test_two_column_page_is_sorted_left_column_then_right_column():
     pages = [
         [

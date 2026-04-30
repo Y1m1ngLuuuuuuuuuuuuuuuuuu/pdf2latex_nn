@@ -74,6 +74,8 @@ FULL_WIDTH_TYPES = {
     "code",
 }
 
+REFERENCE_LIST_TYPE = "reference_list"
+
 
 @dataclass(frozen=True)
 class SortConfig:
@@ -367,6 +369,7 @@ def extract_text(block: dict[str, Any]) -> str:
                 "math_content",
                 "code_content",
                 "algorithm_content",
+                "item_content",
                 "list_items",
                 "table_caption",
                 "chart_caption",
@@ -528,7 +531,8 @@ def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
                 "page_idx": view.page_idx,
                 "visual_order": visual_order,
                 "original_index": view.original_index,
-                "type": view.block.get("type"),
+                "type": _logical_block_type(view.block),
+                "raw_type": view.block.get("type"),
                 "bbox": list(view.bbox),
                 "column_id": view.column_id,
                 "is_full_width": view.is_full_width,
@@ -547,12 +551,24 @@ def _count_columns(ordered: list[BlockView]) -> int:
     return len(columns)
 
 
+def _logical_block_type(block: dict[str, Any]) -> Any:
+    content = block.get("content")
+    if (
+        block.get("type") == "list"
+        and isinstance(content, dict)
+        and content.get("list_type") == REFERENCE_LIST_TYPE
+    ):
+        return "reference"
+    return block.get("type")
+
+
 def _new_v3_item(item: dict[str, Any], global_order: int) -> dict[str, Any]:
     bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else []
     text = item.get("text_for_embedding") or ""
     return {
         "global_order": global_order,
         "type": item.get("type"),
+        "raw_type": item.get("raw_type"),
         "page_idx": item.get("page_idx"),
         "visual_order": item.get("visual_order"),
         "original_index": item.get("original_index"),
