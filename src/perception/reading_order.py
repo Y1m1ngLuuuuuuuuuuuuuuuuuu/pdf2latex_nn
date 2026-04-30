@@ -250,7 +250,7 @@ def build_content_v4(
     x_alignment_tolerance: float = 28.0,
     parent_indent_threshold: float = 20.0,
 ) -> dict[str, Any]:
-    """Add list-aware continuation merging and parent/list annotations."""
+    """Add list-aware marker and parent annotations without merging marked blocks."""
 
     raw_items = content_v3_payload.get("items")
     if not isinstance(raw_items, list):
@@ -258,8 +258,6 @@ def build_content_v4(
 
     items = [dict(item) for item in raw_items if isinstance(item, dict)]
     output: list[dict[str, Any]] = []
-    active_list_item_idx: int | None = None
-    active_list_x: float | None = None
     active_parent_idx: int | None = None
     list_item_counter = 0
 
@@ -283,23 +281,10 @@ def build_content_v4(
                 output[active_parent_idx].get("global_order", active_parent_idx) if active_parent_idx is not None else None
             )
             output.append(item)
-            active_list_item_idx = len(output) - 1
-            first_bbox = _first_bbox(item.get("bbox"))
-            active_list_x = first_bbox[0] if first_bbox is not None else None
-            continue
-
-        if (
-            active_list_item_idx is not None
-            and _is_list_continuation(output[active_list_item_idx], item, active_list_x, x_alignment_tolerance)
-        ):
-            _merge_v3_item(output[active_list_item_idx], _new_v3_item_like(item))
-            output[active_list_item_idx]["list_continuation_count"] = int(output[active_list_item_idx].get("list_continuation_count", 0)) + 1
             continue
 
         output.append(item)
         if item.get("type") not in MERGEABLE_TYPES:
-            active_list_item_idx = None
-            active_list_x = None
             active_parent_idx = None
 
     for idx, item in enumerate(output):
@@ -311,6 +296,7 @@ def build_content_v4(
         "config": {
             "x_alignment_tolerance": x_alignment_tolerance,
             "parent_indent_threshold": parent_indent_threshold,
+            "merge_marked_items": False,
         },
         "items": output,
     }
@@ -645,21 +631,6 @@ def _new_v3_item_like(item: dict[str, Any]) -> dict[str, Any]:
         "source_visual_orders": list(item.get("source_visual_orders") or [item.get("visual_order")]),
         "source_original_indexes": list(item.get("source_original_indexes") or [item.get("original_index")]),
     }
-
-
-def _is_list_continuation(previous: dict[str, Any], current: dict[str, Any], active_x: float | None, tolerance: float) -> bool:
-    if previous.get("list_item_id") is None:
-        return False
-    if current.get("type") != previous.get("type"):
-        return False
-    if detect_list_marker(str(current.get("text_for_embedding") or "")) is not None:
-        return False
-    if not current.get("text_for_embedding"):
-        return False
-    current_bbox = _first_bbox(current.get("bbox"))
-    if current_bbox is None or active_x is None:
-        return False
-    return abs(current_bbox[0] - active_x) <= tolerance
 
 
 def _find_list_parent(output: list[dict[str, Any]], item: dict[str, Any], indent_threshold: float) -> int | None:

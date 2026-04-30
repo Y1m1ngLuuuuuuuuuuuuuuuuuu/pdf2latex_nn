@@ -146,7 +146,7 @@ def test_detect_list_marker_variants():
     assert detect_list_marker("plain paragraph") is None
 
 
-def test_content_v4_list_marker_starts_new_item_and_continuation_merges_by_x_start():
+def test_content_v4_list_marker_stays_independent_without_continuation_merge():
     payload = {
         "items": [
             visual_item("1. First item starts", 0, 0, [100, 100, 450, 140], 0),
@@ -158,11 +158,13 @@ def test_content_v4_list_marker_starts_new_item_and_continuation_merges_by_x_sta
     result = build_content_v4(payload)
     items = result["items"]
 
-    assert len(items) == 2
+    assert len(items) == 3
     assert items[0]["list_item_id"] == "li_00000"
-    assert items[0]["list_continuation_count"] == 1
-    assert items[0]["text_for_embedding"] == "1. First item starts continues without marker"
-    assert items[1]["list_item_id"] == "li_00001"
+    assert "list_continuation_count" not in items[0]
+    assert items[0]["text_for_embedding"] == "1. First item starts"
+    assert items[1]["list_item_id"] is None
+    assert items[1]["text_for_embedding"] == "continues without marker"
+    assert items[2]["list_item_id"] == "li_00001"
 
 
 def test_content_v4_parent_colon_sets_list_parent_without_merging_parent():

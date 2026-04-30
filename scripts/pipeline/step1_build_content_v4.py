@@ -35,16 +35,14 @@ def main() -> int:
     write_json(args.output, v4)
     items = v4["items"]
     list_items = [item for item in items if item.get("list_item_id")]
-    continued = [item for item in items if item.get("list_continuation_count")]
     print(f"wrote {args.output}")
-    print(f"items={len(items)} list_items={len(list_items)} continued_list_items={len(continued)}")
+    print(f"items={len(items)} list_items={len(list_items)} marked_item_merge=False")
     for item in list_items[:20]:
         print(
-            "order={global_order} id={list_item_id} marker={marker} cont={cont} text={text}".format(
+            "order={global_order} id={list_item_id} marker={marker} text={text}".format(
                 global_order=item.get("global_order"),
                 list_item_id=item.get("list_item_id"),
                 marker=(item.get("list_marker") or {}).get("marker"),
-                cont=item.get("list_continuation_count", 0),
                 text=str(item.get("text_for_embedding") or "")[:120].replace("\n", " "),
             )
         )
