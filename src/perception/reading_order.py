@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,16 @@ TERMINAL_PUNCTUATION = {
     ";",
     "；",
 }
+LIST_MARKER_PATTERNS = (
+    ("arabic", re.compile(r"^\s*(\d+)[\.\)]\s+")),
+    ("alpha", re.compile(r"^\s*([a-zA-Z])[\.\)]\s+")),
+    ("roman", re.compile(r"^\s*([ivxlcdmIVXLCDM]+)[\.\)]\s+")),
+    ("bullet", re.compile(r"^\s*[\u2022\-\*\>]\s+")),
+    ("paren_arabic", re.compile(r"^\s*[\(\uff08](\d+)[\)\uff09]\s*")),
+    ("paren_cjk", re.compile(r"^\s*[\(\uff08]([一二三四五六七八九十]+)[\)\uff09]\s*")),
+    ("cjk_comma", re.compile(r"^\s*([一二三四五六七八九十]+)[、.．]\s*")),
+    ("ordinal_cjk", re.compile(r"^\s*第[一二三四五六七八九十]+[，,、.．]\s*")),
+)
 
 FULL_WIDTH_TYPES = {
     "title",
@@ -233,6 +244,78 @@ def build_content_v3(
     }
 
 
+def build_content_v4(
+    content_v3_payload: dict[str, Any],
+    *,
+    x_alignment_tolerance: float = 28.0,
+    parent_indent_threshold: float = 20.0,
+) -> dict[str, Any]:
+    """Add list-aware continuation merging and parent/list annotations."""
+
+    raw_items = content_v3_payload.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("Expected content v3 payload with an items list")
+
+    items = [dict(item) for item in raw_items if isinstance(item, dict)]
+    output: list[dict[str, Any]] = []
+    active_list_item_idx: int | None = None
+    active_list_x: float | None = None
+    active_parent_idx: int | None = None
+    list_item_counter = 0
+
+    for item in items:
+        text = str(item.get("text_for_embedding") or "")
+        marker = detect_list_marker(text)
+        item["list_marker"] = marker
+        item["list_level"] = None
+        item["list_item_id"] = None
+        item["list_parent_global_order"] = None
+
+        if marker is not None:
+            parent_idx = _find_list_parent(output, item, parent_indent_threshold)
+            if parent_idx is not None:
+                active_parent_idx = parent_idx
+            list_item_id = f"li_{list_item_counter:05d}"
+            list_item_counter += 1
+            item["list_level"] = 1 if active_parent_idx is not None else 0
+            item["list_item_id"] = list_item_id
+            item["list_parent_global_order"] = (
+                output[active_parent_idx].get("global_order", active_parent_idx) if active_parent_idx is not None else None
+            )
+            output.append(item)
+            active_list_item_idx = len(output) - 1
+            first_bbox = _first_bbox(item.get("bbox"))
+            active_list_x = first_bbox[0] if first_bbox is not None else None
+            continue
+
+        if (
+            active_list_item_idx is not None
+            and _is_list_continuation(output[active_list_item_idx], item, active_list_x, x_alignment_tolerance)
+        ):
+            _merge_v3_item(output[active_list_item_idx], _new_v3_item_like(item))
+            output[active_list_item_idx]["list_continuation_count"] = int(output[active_list_item_idx].get("list_continuation_count", 0)) + 1
+            continue
+
+        output.append(item)
+        if item.get("type") not in MERGEABLE_TYPES:
+            active_list_item_idx = None
+            active_list_x = None
+            active_parent_idx = None
+
+    for idx, item in enumerate(output):
+        item["global_order"] = idx
+
+    return {
+        "schema_version": "content_v4_listaware",
+        "source_format": content_v3_payload.get("schema_version", "content_v3"),
+        "config": {
+            "x_alignment_tolerance": x_alignment_tolerance,
+            "parent_indent_threshold": parent_indent_threshold,
+        },
+        "items": output,
+    }
+
+
 def extract_text(block: dict[str, Any]) -> str:
     """Extract readable text from MinerU v2 nested content structures."""
 
@@ -277,6 +360,20 @@ def has_terminal_punctuation(text: str) -> bool:
     if not stripped:
         return False
     return stripped[-1] in TERMINAL_PUNCTUATION
+
+
+def detect_list_marker(text: str) -> dict[str, str] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    for marker_type, pattern in LIST_MARKER_PATTERNS:
+        match = pattern.match(stripped)
+        if match:
+            return {
+                "type": marker_type,
+                "marker": match.group(0).strip(),
+            }
+    return None
 
 
 def _make_block_view(block: dict[str, Any], index: int, page_idx: int, cfg: SortConfig) -> BlockView:
@@ -536,4 +633,48 @@ def _first_bbox(value: Any) -> tuple[float, float, float, float] | None:
 def _last_value(value: Any) -> Any:
     if isinstance(value, list) and value:
         return value[-1]
+    return None
+
+
+def _new_v3_item_like(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bbox": list(item.get("bbox") or []),
+        "text_for_embedding": item.get("text_for_embedding") or "",
+        "merge_count": item.get("merge_count", 1),
+        "source_page_idxs": list(item.get("source_page_idxs") or [item.get("page_idx")]),
+        "source_visual_orders": list(item.get("source_visual_orders") or [item.get("visual_order")]),
+        "source_original_indexes": list(item.get("source_original_indexes") or [item.get("original_index")]),
+    }
+
+
+def _is_list_continuation(previous: dict[str, Any], current: dict[str, Any], active_x: float | None, tolerance: float) -> bool:
+    if previous.get("list_item_id") is None:
+        return False
+    if current.get("type") != previous.get("type"):
+        return False
+    if detect_list_marker(str(current.get("text_for_embedding") or "")) is not None:
+        return False
+    if not current.get("text_for_embedding"):
+        return False
+    current_bbox = _first_bbox(current.get("bbox"))
+    if current_bbox is None or active_x is None:
+        return False
+    return abs(current_bbox[0] - active_x) <= tolerance
+
+
+def _find_list_parent(output: list[dict[str, Any]], item: dict[str, Any], indent_threshold: float) -> int | None:
+    item_bbox = _first_bbox(item.get("bbox"))
+    if item_bbox is None:
+        return None
+    for idx in range(len(output) - 1, -1, -1):
+        candidate = output[idx]
+        text = str(candidate.get("text_for_embedding") or "").rstrip()
+        if not text.endswith((':', '：')):
+            continue
+        candidate_bbox = _first_bbox(candidate.get("bbox"))
+        if candidate_bbox is None:
+            continue
+        if item_bbox[0] > candidate_bbox[0] + indent_threshold:
+            return idx
+        return None
     return None

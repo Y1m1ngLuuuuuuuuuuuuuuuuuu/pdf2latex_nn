@@ -1,4 +1,4 @@
-from src.perception.reading_order import build_content_v3, extract_text, sort_content_list_v2
+from src.perception.reading_order import build_content_v3, build_content_v4, detect_list_marker, extract_text, sort_content_list_v2
 
 
 def para(text, bbox):
@@ -134,3 +134,48 @@ def test_content_v3_merges_cross_page_continuation():
 
     assert len(result["items"]) == 1
     assert result["items"][0]["source_page_idxs"] == [0, 1]
+
+
+def test_detect_list_marker_variants():
+    assert detect_list_marker("1. first")["type"] == "arabic"
+    assert detect_list_marker("a) first")["type"] == "alpha"
+    assert detect_list_marker("iv. first")["type"] == "roman"
+    assert detect_list_marker("• first")["type"] == "bullet"
+    assert detect_list_marker("（一） first")["type"] == "paren_cjk"
+    assert detect_list_marker("一、first")["type"] == "cjk_comma"
+    assert detect_list_marker("plain paragraph") is None
+
+
+def test_content_v4_list_marker_starts_new_item_and_continuation_merges_by_x_start():
+    payload = {
+        "items": [
+            visual_item("1. First item starts", 0, 0, [100, 100, 450, 140], 0),
+            visual_item("continues without marker", 0, 1, [102, 145, 450, 180], 0),
+            visual_item("2. Second item starts", 0, 2, [100, 190, 450, 230], 0),
+        ]
+    }
+
+    result = build_content_v4(payload)
+    items = result["items"]
+
+    assert len(items) == 2
+    assert items[0]["list_item_id"] == "li_00000"
+    assert items[0]["list_continuation_count"] == 1
+    assert items[0]["text_for_embedding"] == "1. First item starts continues without marker"
+    assert items[1]["list_item_id"] == "li_00001"
+
+
+def test_content_v4_parent_colon_sets_list_parent_without_merging_parent():
+    payload = {
+        "items": [
+            visual_item("The contributions are:", 0, 0, [80, 100, 450, 140], 0),
+            visual_item("1. First contribution", 0, 1, [120, 150, 450, 180], 0),
+        ]
+    }
+
+    result = build_content_v4(payload)
+    items = result["items"]
+
+    assert len(items) == 2
+    assert items[1]["list_parent_global_order"] == 0
+    assert items[1]["list_level"] == 1
