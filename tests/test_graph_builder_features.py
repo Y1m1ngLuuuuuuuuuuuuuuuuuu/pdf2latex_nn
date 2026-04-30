@@ -64,7 +64,7 @@ def test_geometry_matrix_uses_first_start_and_last_end_local_coordinates():
     geom = build_geometry_matrix(items)
 
     assert tuple(geom.shape) == (5, 4)
-    assert geom[0].tolist() == [0.0, 0.1, 1.0, 0.2]
+    assert [round(float(value), 4) for value in geom[0].tolist()] == [0.0, 0.1, 1.0, 0.2]
     assert round(float(geom[4][0]), 4) == 0.0
     assert round(float(geom[4][2]), 4) == 1.0
 
