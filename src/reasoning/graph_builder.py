@@ -300,6 +300,8 @@ def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "global_order": item.get("global_order"),
                 "type": item.get("type"),
+                "raw_type": item.get("raw_type"),
+                "list_type": item.get("list_type"),
                 "canonical_type": canonical_type(item.get("type")),
                 "page_idx": item.get("page_idx"),
                 "visual_order": item.get("visual_order"),
@@ -308,6 +310,7 @@ def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "source_visual_orders": item.get("source_visual_orders"),
                 "bbox": item.get("bbox"),
                 "text_preview": str(item.get("text_for_embedding") or "")[:200],
+                "reference_items": item.get("reference_items"),
             }
         )
     return records

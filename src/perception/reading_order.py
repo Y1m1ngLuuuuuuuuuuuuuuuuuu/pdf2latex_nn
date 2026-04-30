@@ -346,6 +346,10 @@ def build_content_v4(
 def extract_text(block: dict[str, Any]) -> str:
     """Extract readable text from MinerU v2 nested content structures."""
 
+    return _join_text_parts(_extract_text_parts(block.get("content")))
+
+
+def _extract_text_parts(value: Any) -> list[str]:
     parts: list[str] = []
 
     def visit(value: Any) -> None:
@@ -379,8 +383,30 @@ def extract_text(block: dict[str, Any]) -> str:
                 if key in value:
                     visit(value[key])
 
-    visit(block.get("content"))
+    visit(value)
+    return parts
+
+
+def _join_text_parts(parts: list[str]) -> str:
     return " ".join(parts)
+
+
+def _extract_reference_items(block: dict[str, Any]) -> list[str]:
+    content = block.get("content")
+    if not isinstance(content, dict) or content.get("list_type") != REFERENCE_LIST_TYPE:
+        return []
+    items = content.get("list_items")
+    if not isinstance(items, list):
+        return []
+
+    reference_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = _join_text_parts(_extract_text_parts(item.get("item_content")))
+        if text:
+            reference_items.append(text)
+    return reference_items
 
 
 def has_terminal_punctuation(text: str) -> bool:
@@ -511,6 +537,10 @@ def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
     previous_column: int | None = None
 
     for visual_order, view in enumerate(ordered):
+        logical_type = _logical_block_type(view.block)
+        content = view.block.get("content")
+        list_type = content.get("list_type") if isinstance(content, dict) else None
+        reference_items = _extract_reference_items(view.block)
         run_id = None
         run_index = None
         if view.is_textual and view.text:
@@ -531,8 +561,10 @@ def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
                 "page_idx": view.page_idx,
                 "visual_order": visual_order,
                 "original_index": view.original_index,
-                "type": _logical_block_type(view.block),
+                "type": logical_type,
                 "raw_type": view.block.get("type"),
+                "list_type": list_type,
+                "reference_items": reference_items,
                 "bbox": list(view.bbox),
                 "column_id": view.column_id,
                 "is_full_width": view.is_full_width,
@@ -569,6 +601,8 @@ def _new_v3_item(item: dict[str, Any], global_order: int) -> dict[str, Any]:
         "global_order": global_order,
         "type": item.get("type"),
         "raw_type": item.get("raw_type"),
+        "list_type": item.get("list_type"),
+        "reference_items": list(item.get("reference_items") or []),
         "page_idx": item.get("page_idx"),
         "visual_order": item.get("visual_order"),
         "original_index": item.get("original_index"),

@@ -44,7 +44,10 @@ def test_reference_list_is_preserved_as_reference_type_in_visual_order():
                 "type": "list",
                 "content": {
                     "list_type": "reference_list",
-                    "list_items": [{"item_content": [{"content": "Author A. Paper title."}]}],
+                    "list_items": [
+                        {"item_content": [{"content": "Author A. Paper title."}]},
+                        {"item_content": [{"content": "Author B. Another paper."}]},
+                    ],
                 },
                 "bbox": [100, 120, 500, 170],
             },
@@ -56,7 +59,9 @@ def test_reference_list_is_preserved_as_reference_type_in_visual_order():
 
     assert [item["type"] for item in page] == ["title", "reference"]
     assert page[1]["raw_type"] == "list"
-    assert page[1]["text_for_embedding"] == "Author A. Paper title."
+    assert page[1]["list_type"] == "reference_list"
+    assert page[1]["reference_items"] == ["Author A. Paper title.", "Author B. Another paper."]
+    assert page[1]["text_for_embedding"] == "Author A. Paper title. Author B. Another paper."
 
 
 def test_two_column_page_is_sorted_left_column_then_right_column():
