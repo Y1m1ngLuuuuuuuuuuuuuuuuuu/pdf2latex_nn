@@ -129,6 +129,8 @@ def compile_one(row: dict, args: argparse.Namespace, accepted_log: JsonlLog, rej
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument("--pool-dir", type=Path, default=None)
+    parser.add_argument("--tmp-dir", type=Path, default=None)
     parser.add_argument("--source-limit", type=int, default=4000)
     parser.add_argument("--target-successes", type=int, default=3000)
     parser.add_argument("--compile-slots", type=int, default=32)
@@ -148,10 +150,10 @@ def write_progress(path: Path, payload: dict) -> None:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    args.pool_dir = args.data_root / "03_tex_source_pool"
+    args.pool_dir = args.pool_dir or args.data_root / "03_tex_source_pool"
     args.final_source_dir = args.data_root / "03_tex_sources"
     args.pdf_dir = args.data_root / "01_raw_pdfs"
-    args.tmp_dir = args.data_root / "_tmp_arxiv_source_pool_compile"
+    args.tmp_dir = args.tmp_dir or args.data_root / "_tmp_arxiv_source_pool_compile"
     args.report_dir = args.data_root / "09_eval_reports" / args.run_name
     download_manifest = args.data_root / "09_eval_reports" / args.download_run_name / "downloaded.jsonl"
     args.tmp_dir.mkdir(parents=True, exist_ok=True)

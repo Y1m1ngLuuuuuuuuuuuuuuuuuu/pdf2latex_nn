@@ -109,6 +109,8 @@ def prepare_one(candidate: dict, args: argparse.Namespace, downloaded_log: Jsonl
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument("--pool-dir", type=Path, default=None)
+    parser.add_argument("--tmp-dir", type=Path, default=None)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--year", type=int, default=2025)
     parser.add_argument("--target-sources", type=int, default=4000)
@@ -120,6 +122,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-sleep", type=float, default=3.0)
     parser.add_argument("--max-unpacked-mb", type=int, default=120)
     parser.add_argument("--run-name", default="arxiv_2025_source_pool_4000")
+    parser.add_argument("--skip-jsonl", action="append", type=Path, default=[])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     return parser
@@ -127,8 +130,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    args.pool_dir = args.data_root / "03_tex_source_pool"
-    args.tmp_dir = args.data_root / "_tmp_arxiv_source_pool"
+    args.pool_dir = args.pool_dir or args.data_root / "03_tex_source_pool"
+    args.tmp_dir = args.tmp_dir or args.data_root / "_tmp_arxiv_source_pool"
     report_dir = args.data_root / "09_eval_reports" / args.run_name
     args.pool_dir.mkdir(parents=True, exist_ok=True)
     args.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +144,8 @@ def main() -> int:
     error_log = JsonlLog(errors_path)
 
     existing_ids = load_ids_from_jsonl(downloaded_path) | load_ids_from_jsonl(errors_path)
+    for skip_path in args.skip_jsonl:
+        existing_ids.update(load_ids_from_jsonl(skip_path))
     ready_sources = count_ready_sources(args.pool_dir)
     status_counts: dict[str, int] = {}
     submitted = 0
@@ -158,6 +163,7 @@ def main() -> int:
                 "pool_dir": str(args.pool_dir),
                 "target_sources": args.target_sources,
                 "existing_ready_sources": ready_sources,
+                "skip_ids": len(existing_ids),
                 "download_slots": args.download_slots,
                 "backlog": args.backlog,
             },
