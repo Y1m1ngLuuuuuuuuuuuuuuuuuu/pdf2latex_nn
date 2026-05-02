@@ -66,7 +66,7 @@ def iter_pool_sources(pool_dir: Path, downloaded_manifest: Path | None) -> list[
 def compile_one(row: dict, args: argparse.Namespace, accepted_log: JsonlLog, rejected_log: JsonlLog) -> dict:
     arxiv_id = str(row["arxiv_id"])
     safe = safe_id(arxiv_id)
-    source_dir = Path(row["source_dir"])
+    source_dir = Path(row["source_dir"]).resolve()
     final_source_dir = args.final_source_dir / safe
     final_pdf_path = args.pdf_dir / f"{safe}.pdf"
     log_path = args.report_dir / "logs" / f"{safe}.log"
