@@ -172,7 +172,7 @@ def inject_bbl(tex_string: str, root_dir: Path, main_filename: str = "main") -> 
     if not bbl_path.exists():
         return tex_string, None
     bbl_content = strip_comments(read_text_lossy(bbl_path))
-    return BIBLIOGRAPHY_RE.sub(bbl_content, tex_string), bbl_path.resolve()
+    return BIBLIOGRAPHY_RE.sub(lambda _match: bbl_content, tex_string), bbl_path.resolve()
 
 
 def expand_simple_macros(tex_string: str) -> tuple[str, dict[str, str]]:
