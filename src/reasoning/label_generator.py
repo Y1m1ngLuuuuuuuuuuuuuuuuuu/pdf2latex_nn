@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from src.reasoning.latex_flattener import MATH_PLACEHOLDER, flatten_latex_file, mask_math_environments
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
 
@@ -154,6 +155,7 @@ class AlignmentLabeler:
         self.tex_nodes: dict[str, TexAlignmentNode] = {}
         self.pdf_nodes: list[PdfAlignmentNode] = []
         self.matches: list[AlignmentMatch] = []
+        self.flattener_summary: dict[str, Any] | None = None
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
         graph = self.load_graph()
@@ -175,6 +177,7 @@ class AlignmentLabeler:
             "similarity_threshold": self.config.similarity_threshold,
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
+            "flattener": self.flattener_summary,
         }
         self.assert_alignment_quality()
         if self.config.output_mapping_json is not None:
@@ -208,8 +211,9 @@ class AlignmentLabeler:
     def parse_tex_nodes(self) -> list[TexAlignmentNode]:
         from TexSoup import TexSoup
 
-        tex = read_tex_with_inputs(self.tex_path)
-        soup = TexSoup(tex)
+        flattened = flatten_latex_file(self.tex_path)
+        self.flattener_summary = flattened.summary()
+        soup = TexSoup(flattened.content)
         builder = _TexSoupPathBuilder(self.config)
         builder.walk_soup(soup)
         return builder.nodes
@@ -280,6 +284,7 @@ class AlignmentLabeler:
             "tex_path": str(self.tex_path),
             "graph_path": str(self.graph_path),
             "similarity_threshold": self.config.similarity_threshold,
+            "flattener": self.flattener_summary,
             "matches": [asdict(match) for match in self.matches],
             "tex_nodes": [asdict(node) for node in self.tex_nodes.values()],
         }
@@ -379,67 +384,11 @@ class _TexSoupPathBuilder:
         return self.section_by_level[max(self.section_by_level)]
 
 
-TEX_INPUT_RE = re.compile(r"\\(?:input|include)\s*\{([^}]+)\}")
-MATH_ENV_RE = re.compile(
-    r"\\begin\{(?P<env>"
-    r"equation\*?|align\*?|gather\*?|multline\*?|flalign\*?|"
-    r"displaymath|math|split|aligned|cases|array|[bBpvV]?matrix"
-    r")\}.*?\\end\{(?P=env)\}",
-    re.DOTALL,
-)
-INLINE_MATH_RE = re.compile(r"\$\$.*?\$\$|\$.*?\$|\\\[.*?\\\]|\\\(.*?\\\)", re.DOTALL)
-MATH_PLACEHOLDER = "mathplaceholder"
-
-
-def read_tex_with_inputs(path: Path, *, visited: set[Path] | None = None) -> str:
-    """Read a TeX file, expand local input/include files, and remove comments."""
-
-    path = Path(path).resolve()
-    seen = visited or set()
-    if path in seen:
-        return ""
-    seen.add(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    raw = path.read_text(encoding="utf-8", errors="ignore")
-    stripped = "\n".join(strip_tex_comment(line) for line in raw.splitlines())
-
-    def replace_input(match: re.Match[str]) -> str:
-        candidate = Path(match.group(1).strip())
-        if not candidate.suffix:
-            candidate = candidate.with_suffix(".tex")
-        if not candidate.is_absolute():
-            candidate = path.parent / candidate
-        if not candidate.exists():
-            return " "
-        return read_tex_with_inputs(candidate, visited=seen)
-
-    return TEX_INPUT_RE.sub(replace_input, stripped)
-
-
-def strip_tex_comment(line: str) -> str:
-    """Strip unescaped TeX comments while preserving escaped percent signs."""
-
-    for index, char in enumerate(line):
-        if char != "%":
-            continue
-        slash_count = 0
-        cursor = index - 1
-        while cursor >= 0 and line[cursor] == "\\":
-            slash_count += 1
-            cursor -= 1
-        if slash_count % 2 == 0:
-            return line[:index]
-    return line
-
-
 def clean_text(text: Any) -> str:
     """Aggressively normalize PDF/TeX text for fuzzy alignment."""
 
-    value = str(text or "")
+    value = mask_math_environments(str(text or ""))
     value = re.sub(r"\[math\]", f" {MATH_PLACEHOLDER} ", value, flags=re.IGNORECASE)
-    value = MATH_ENV_RE.sub(f" {MATH_PLACEHOLDER} ", value)
-    value = INLINE_MATH_RE.sub(f" {MATH_PLACEHOLDER} ", value)
     value = value.lower()
     value = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?", " ", value)
     value = re.sub(r"\\.", " ", value)
