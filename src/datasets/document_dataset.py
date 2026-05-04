@@ -33,6 +33,8 @@ PYG_EXCLUDE_KEYS = [
     "model_path",
     "node_records",
     "pdf_to_tex",
+    "pdf_to_tex_scores",
+    "alignment_schema",
     "source_path",
 ]
 

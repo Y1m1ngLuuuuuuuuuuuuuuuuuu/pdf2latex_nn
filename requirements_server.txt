@@ -54,6 +54,8 @@ pytest-cov==5.0.0
 
 # LaTeX parsing
 pylatexenc==2.10
+TexSoup==0.3.3
+rapidfuzz==3.13.0
 
 # Code quality
 black==24.0.0
