@@ -141,6 +141,11 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
                     data = result.data
                     data.label_counts = result.label_counts
                     data.orphan_count = len(result.orphan_alignments)
+                elif has_valid_edge_labels(data):
+                    data.y = data.y.to(dtype=torch.long)
+                    data.edge_label = data.y
+                    data.label_counts = count_edge_labels(data.y)
+                    data.orphan_count = int(getattr(data, "orphan_count", 0))
                 else:
                     data = attach_default_none_labels(data)
                     data.label_counts = {0: 0, 1: 0, 2: 0, 3: int(data.edge_index.shape[1])}
@@ -204,6 +209,18 @@ def attach_default_none_labels(data: Any) -> Any:
         "orphan_label": 3,
     }
     return data
+
+
+def has_valid_edge_labels(data: Any) -> bool:
+    if not hasattr(data, "y"):
+        return False
+    y = data.y
+    return y is not None and y.ndim == 1 and int(y.shape[0]) == int(data.edge_index.shape[1])
+
+
+def count_edge_labels(labels: Any) -> dict[int, int]:
+    counts = torch.bincount(labels.detach().cpu().long(), minlength=4).tolist()
+    return {label: int(counts[label]) for label in range(4)}
 
 
 def sanitize_graph_data(

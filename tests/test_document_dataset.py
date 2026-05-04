@@ -105,6 +105,33 @@ def test_document_dataset_filters_empty_edge_and_all_orphan_graphs(tmp_path):
     assert "all-orphan graph" in skipped
 
 
+def test_document_dataset_preserves_existing_graph_labels(tmp_path):
+    if not has_torch_and_pyg():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig
+
+    graph_path = tmp_path / "labeled.pt"
+    data = make_graph(torch, Data)
+    data.y = torch.tensor([0, 2], dtype=torch.long)
+    data.edge_label = data.y
+    torch.save(data, graph_path)
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps([{"document_id": "labeled", "graph_path": str(graph_path)}]),
+        encoding="utf-8",
+    )
+
+    dataset = DocumentDataset(DocumentDatasetConfig(root=tmp_path / "dataset", manifest_path=manifest))
+    sample = dataset[0]
+
+    assert sample.y.tolist() == [0, 2]
+    assert sample.label_counts == {0: 1, 1: 0, 2: 1, 3: 0}
+
+
 def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path):
     if not has_torch_and_pyg():
         return
