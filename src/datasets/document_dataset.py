@@ -9,7 +9,7 @@ from typing import Any
 
 from src.perception.schema import FeatureTensorSchema
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v3
-from src.reasoning.label_generator import LabelGeneratorConfig, label_graph_edges_from_paths
+from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges_from_paths
 
 try:
     import torch
@@ -135,7 +135,7 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
                 data.document_id = record.document_id
                 data = sanitize_graph_data(data, config=self.config, require_labels=True)
                 assert_graph_is_trainable(data, config=self.config)
-            except GraphFilterError as exc:
+            except (GraphFilterError, AlignmentQualityError) as exc:
                 append_skip_log(skipped_path, record, reason=str(exc))
                 continue
             torch.save(data, output)

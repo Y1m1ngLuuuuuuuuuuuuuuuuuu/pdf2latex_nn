@@ -103,3 +103,53 @@ def test_document_dataset_filters_empty_edge_and_all_orphan_graphs(tmp_path):
     skipped = (tmp_path / "dataset" / "processed" / "skipped_records.jsonl").read_text(encoding="utf-8")
     assert "empty edge graph" in skipped
     assert "all-orphan graph" in skipped
+
+
+def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path):
+    if not has_torch_and_pyg():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig
+
+    bad_graph = tmp_path / "bad.pt"
+    edge_index = torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long)
+    data = Data(x=torch.zeros((3, 791)), edge_index=edge_index, edge_attr=torch.zeros((3, 10)))
+    data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
+    torch.save(data, bad_graph)
+
+    tex_path = tmp_path / "doc.tex"
+    tex_path.write_text(r"\section{Intro}" + "\n\n" + "A paragraph.", encoding="utf-8")
+    alignment_path = tmp_path / "alignment.json"
+    alignment_path.write_text(
+        json.dumps(
+            {
+                "P0": {"tex_id": "T_1", "score": 0.99},
+                "P1": {"tex_id": "T_2", "score": 0.99},
+                "P2": {"tex_id": "T_2", "score": 0.1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "document_id": "bad_alignment",
+                    "graph_path": str(bad_graph),
+                    "tex_path": str(tex_path),
+                    "pdf_to_tex_path": str(alignment_path),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = DocumentDataset(DocumentDatasetConfig(root=tmp_path / "dataset", manifest_path=manifest))
+
+    assert len(dataset) == 0
+    skipped = (tmp_path / "dataset" / "processed" / "skipped_records.jsonl").read_text(encoding="utf-8")
+    assert "bad alignment quality" in skipped
+    assert "orphan_ratio=33.33%" in skipped

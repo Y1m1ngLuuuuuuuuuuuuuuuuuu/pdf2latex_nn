@@ -1,6 +1,8 @@
 import json
 
-from src.reasoning.label_generator import LabelGeneratorConfig, label_graph_edges
+import pytest
+
+from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges
 from src.reasoning.tex_ast_builder import build_tex_ast, tex_nodes_by_id
 
 
@@ -45,12 +47,52 @@ def test_label_graph_edges_falls_back_to_none_for_low_similarity_orphans(tmp_pat
         data,
         tex_ast=payload,
         pdf_to_tex=mapping,
-        config=LabelGeneratorConfig(similarity_threshold=0.55),
+        config=LabelGeneratorConfig(similarity_threshold=0.55, max_orphan_ratio=1.0),
         orphan_log_path=orphan_log,
     )
 
     assert result.data.y.tolist() == [1, 3, 1]
     assert result.label_counts == {0: 0, 1: 2, 2: 0, 3: 1}
     assert len(result.orphan_alignments) == 1
+    logged = json.loads(orphan_log.read_text(encoding="utf-8").strip())
+    assert logged["reason"] == "low_similarity"
+
+
+def test_label_graph_edges_aborts_when_default_orphan_ratio_exceeds_thirty_percent(tmp_path):
+    if not has_torch_and_pyg():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    payload = build_tex_ast(
+        r"""
+        \section{Intro}
+        A paragraph.
+        """
+    )
+    nodes = tex_nodes_by_id(payload)
+    tex_ids = [node["tex_id"] for node in nodes.values()]
+    data = Data(
+        x=torch.zeros((3, 4)),
+        edge_index=torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((3, 10)),
+    )
+    data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
+    mapping = {
+        "P0": {"tex_id": tex_ids[0], "score": 0.99},
+        "P1": {"tex_id": tex_ids[1], "score": 0.99},
+        "P2": {"tex_id": tex_ids[1], "score": 0.1},
+    }
+    orphan_log = tmp_path / "orphans.jsonl"
+
+    with pytest.raises(AlignmentQualityError, match="orphan_ratio=33.33%"):
+        label_graph_edges(
+            data,
+            tex_ast=payload,
+            pdf_to_tex=mapping,
+            config=LabelGeneratorConfig(similarity_threshold=0.55),
+            orphan_log_path=orphan_log,
+        )
+
     logged = json.loads(orphan_log.read_text(encoding="utf-8").strip())
     assert logged["reason"] == "low_similarity"

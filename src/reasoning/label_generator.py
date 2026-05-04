@@ -17,6 +17,13 @@ class LabelGeneratorConfig:
     adjacent_siblings_only: bool = True
     directed_parent_child: bool = False
     orphan_label: int = int(TexRelationLabel.NONE)
+    max_orphan_ratio: float = 0.30
+    min_aligned_nodes: int = 1
+    abort_on_bad_alignment: bool = True
+
+
+class AlignmentQualityError(RuntimeError):
+    """Raised when PDF-to-TeX alignment is too poor for supervised training."""
 
 
 @dataclass(frozen=True)
@@ -109,6 +116,10 @@ def label_graph_edges(
         node_tex_ids[node_index] = tex_id
         if orphan is not None:
             orphans[node_index] = orphan
+    orphan_list = list(orphans.values())
+    if orphan_log_path is not None:
+        write_orphan_log(orphan_log_path, orphan_list)
+    assert_alignment_quality(num_nodes=int(data.num_nodes), orphan_count=len(orphan_list), config=cfg)
 
     labels: list[int] = []
     edge_index = data.edge_index.detach().cpu()
@@ -146,10 +157,23 @@ def label_graph_edges(
     data.pdf_to_tex = [node_tex_ids.get(idx) for idx in range(int(data.num_nodes))]
 
     label_counts = {label: labels.count(label) for label in range(4)}
-    orphan_list = list(orphans.values())
-    if orphan_log_path is not None:
-        write_orphan_log(orphan_log_path, orphan_list)
     return LabelGenerationResult(data=data, label_counts=label_counts, orphan_alignments=orphan_list)
+
+
+def assert_alignment_quality(*, num_nodes: int, orphan_count: int, config: LabelGeneratorConfig) -> bool:
+    aligned_nodes = max(0, num_nodes - orphan_count)
+    orphan_ratio = orphan_count / max(1, num_nodes)
+    if orphan_ratio > config.max_orphan_ratio or aligned_nodes < config.min_aligned_nodes:
+        message = (
+            "bad alignment quality: "
+            f"orphan_count={orphan_count}, num_nodes={num_nodes}, "
+            f"orphan_ratio={orphan_ratio:.2%}, max_orphan_ratio={config.max_orphan_ratio:.2%}, "
+            f"aligned_nodes={aligned_nodes}, min_aligned_nodes={config.min_aligned_nodes}"
+        )
+        if config.abort_on_bad_alignment:
+            raise AlignmentQualityError(message)
+        return False
+    return True
 
 
 def resolve_node_tex_id(
