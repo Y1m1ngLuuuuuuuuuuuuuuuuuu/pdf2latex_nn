@@ -78,6 +78,7 @@ def test_expand_simple_macros_only_expands_zero_arg_text_aliases():
     \renewcommand{\ours}{PDF-Graph}
     \def\dataset{arXiv}
     \newcommand{\wrap}[1]{#1}
+    \newcommand{\loss}{\lambda}
     \model and \ours on \dataset, but not \models.
     """
 
@@ -87,6 +88,7 @@ def test_expand_simple_macros_only_expands_zero_arg_text_aliases():
     assert "GAT and PDF-Graph on arXiv" in expanded
     assert r"\models" in expanded
     assert r"\wrap" in expanded
+    assert r"\newcommand{\loss}{\lambda}" in expanded
 
 
 def test_mask_math_environments_before_texsoup():

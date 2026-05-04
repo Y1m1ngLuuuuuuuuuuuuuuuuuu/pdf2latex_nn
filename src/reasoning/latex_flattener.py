@@ -199,7 +199,7 @@ def expand_simple_macros(tex_string: str) -> tuple[str, dict[str, str]]:
     tex_without_defs = NEWCOMMAND_RE.sub(collect_newcommand, tex_string)
     tex_without_defs = DEF_RE.sub(collect_def, tex_without_defs)
     for alias, value in macros.items():
-        tex_without_defs = re.sub(rf"\\{re.escape(alias)}(?![a-zA-Z@])", value, tex_without_defs)
+        tex_without_defs = re.sub(rf"\\{re.escape(alias)}(?![a-zA-Z@])", lambda _match, replacement=value: replacement, tex_without_defs)
     return tex_without_defs, macros
 
 
@@ -207,7 +207,7 @@ def is_safe_macro_value(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
-    if any(token in stripped for token in ("#", "{", "}", "\n\n")):
+    if any(token in stripped for token in ("\\", "#", "{", "}", "\n\n")):
         return False
     return True
 
