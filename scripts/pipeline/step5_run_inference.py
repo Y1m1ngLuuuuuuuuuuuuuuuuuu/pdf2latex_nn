@@ -10,9 +10,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.generation.latex_renderer import RenderConfig, render_latex_document  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
-from src.reasoning.postprocess import build_resolved_tree, decode_relations_with_arborescence  # noqa: E402
+from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -38,13 +37,22 @@ def main() -> int:
     model.eval()
     with torch.no_grad():
         logits = model(data.to(device)).detach().cpu()
-    decoded = decode_relations_with_arborescence(data.edge_index.detach().cpu(), logits, threshold=args.threshold, num_nodes=data.num_nodes)
-    root = build_resolved_tree(list(getattr(data, "node_records", [])), decoded)
-    tex = render_latex_document(root, RenderConfig())
+    node_records = list(getattr(data, "node_records", []))
+    if not node_records:
+        node_records = [{} for _ in range(int(data.num_nodes))]
+    decoder = TreeDecoder(
+        TreeDecoderConfig(
+            merge_threshold=args.threshold,
+            parent_threshold=args.threshold,
+            sibling_threshold=args.threshold,
+        )
+    )
+    root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
+    tex = decoder.render_document(root)
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
     print(f"wrote {args.output_tex}")
-    print(f"decoded_edges={len(decoded)}")
+    print(f"decoded_nodes={len(node_records)}")
     return 0
 
 
