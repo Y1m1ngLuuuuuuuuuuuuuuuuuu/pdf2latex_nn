@@ -114,7 +114,7 @@ class EdgeRelationGAT(_MODULE_BASE):
             in_dim = self.config.hidden_dim * self.config.heads
         self.convs = nn.ModuleList(convs)
         self.edge_head = nn.Sequential(
-            nn.Linear(in_dim * 2 + self.config.edge_dim, self.config.hidden_dim),
+            nn.Linear(in_dim * 4 + self.config.edge_dim, self.config.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.config.dropout),
             nn.Linear(self.config.hidden_dim, self.config.num_classes),
@@ -135,5 +135,22 @@ class EdgeRelationGAT(_MODULE_BASE):
             h = F.dropout(h, p=self.config.dropout, training=self.training)
 
         source, target = edge_index
-        edge_features = torch.cat([h[source], h[target], edge_attr], dim=-1)
+        edge_features = self._build_edge_features(h, source, target, edge_attr)
         return self.edge_head(edge_features)
+
+    @staticmethod
+    def _build_edge_features(h, source, target, edge_attr):  # type: ignore[no-untyped-def]
+        """Build directional edge features with symmetry-breaking terms."""
+
+        h_source = h[source]
+        h_target = h[target]
+        return torch.cat(
+            [
+                h_source,
+                h_target,
+                h_target - h_source,
+                h_source * h_target,
+                edge_attr,
+            ],
+            dim=-1,
+        )
