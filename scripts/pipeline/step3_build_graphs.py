@@ -43,8 +43,10 @@ def main() -> int:
     print(f"wrote {args.output}")
     print(f"x_shape={tuple(data.x.shape)}")
     print(f"edge_index_shape={tuple(data.edge_index.shape)}")
+    print(f"edge_attr_shape={tuple(data.edge_attr.shape)}")
     print(f"nodes={data.num_nodes} edges={data.edge_index.shape[1]}")
     print(f"feature_schema={data.feature_schema}")
+    print(f"edge_attr_schema={data.edge_attr_schema}")
     return 0
 
 

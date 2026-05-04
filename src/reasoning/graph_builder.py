@@ -9,6 +9,7 @@ from typing import Any
 
 from src.perception.schema import (
     DERIVED_STAT_FIELDS,
+    EDGE_ATTR_FIELDS,
     FEATURE_TYPE_VOCAB,
     GEOMETRY_FIELDS,
     NON_TEXT_DENSITY_TYPES,
@@ -18,6 +19,7 @@ from src.perception.schema import (
 
 PAGE_SIZE = 1000.0
 TYPE_VOCAB = FEATURE_TYPE_VOCAB
+TERMINAL_PUNCTUATION = {".", "?", "!", "。", "？", "！", ";", "；"}
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,8 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
     stats = build_derived_stats_matrix(items)
     x = torch.cat([semantic, type_onehot, geometry, stats], dim=1)
     edge_index = build_sequential_edge_index(len(items), bidirectional=config.bidirectional_edges)
-    data = Data(x=x, edge_index=edge_index)
+    edge_attr = build_edge_attr_matrix(items, semantic, geometry, bidirectional=config.bidirectional_edges)
+    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     data.node_records = make_node_records(items)
     data.feature_schema = {
         "semantic": {"start": 0, "end": SCIBERT_DIM, "dim": SCIBERT_DIM, "source": "SciBERT CLS window mean"},
@@ -92,6 +95,10 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
             "dim": len(DERIVED_STAT_FIELDS),
             "fields": DERIVED_STAT_FIELDS,
         },
+    }
+    data.edge_attr_schema = {
+        "dim": len(EDGE_ATTR_FIELDS),
+        "fields": EDGE_ATTR_FIELDS,
     }
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
@@ -278,14 +285,66 @@ def normalize_x_in_local_frame(
 def build_sequential_edge_index(node_count: int, *, bidirectional: bool = True) -> Any:
     import torch
 
+    edges = build_sequential_edge_pairs(node_count, bidirectional=bidirectional)
+    if not edges:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def build_sequential_edge_pairs(node_count: int, *, bidirectional: bool = True) -> list[tuple[int, int]]:
     edges = []
     for idx in range(max(0, node_count - 1)):
         edges.append((idx, idx + 1))
         if bidirectional:
             edges.append((idx + 1, idx))
-    if not edges:
-        return torch.empty((2, 0), dtype=torch.long)
-    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return edges
+
+
+def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, geometry: Any, *, bidirectional: bool = True) -> Any:
+    """Return directed sequential edge features aligned with edge_index."""
+
+    import torch
+    import torch.nn.functional as F
+
+    rows = []
+    for source_idx, target_idx in build_sequential_edge_pairs(len(items), bidirectional=bidirectional):
+        source = items[source_idx]
+        target = items[target_idx]
+        semantic_cosine = float(F.cosine_similarity(semantic[source_idx], semantic[target_idx], dim=0).item())
+        source_geom = geometry[source_idx]
+        target_geom = geometry[target_idx]
+        source_page = _last_item_page(source)
+        target_page = _first_item_page(target)
+        source_bbox = _last_bbox(source.get("bbox"))
+        target_bbox = _first_bbox(target.get("bbox"))
+        same_page = source_page is not None and target_page is not None and source_page == target_page
+        cross_page = source_page is not None and target_page is not None and source_page != target_page
+        same_column = source.get("column_id") is not None and source.get("column_id") == target.get("column_id")
+        cross_column = source.get("column_id") is not None and target.get("column_id") is not None and source.get("column_id") != target.get("column_id")
+
+        rows.append(
+            [
+                semantic_cosine,
+                float(target_geom[0] - source_geom[0]),
+                float(target_geom[1] - source_geom[1]),
+                float(target_geom[2] - source_geom[2]),
+                float(target_geom[3] - source_geom[3]),
+                _vertical_gap(source_bbox, target_bbox, same_page),
+                _horizontal_overlap(source_bbox, target_bbox),
+                float(same_page),
+                float(same_column),
+                float(cross_page),
+                float(cross_column),
+                float(canonical_type(source.get("type")) == canonical_type(target.get("type"))),
+                float(_ends_with_hyphen(str(source.get("text_for_embedding") or ""))),
+                float(_has_terminal_punctuation(str(source.get("text_for_embedding") or ""))),
+                float(_starts_lowercase(str(target.get("text_for_embedding") or ""))),
+                float(target_idx > source_idx),
+            ]
+        )
+    if not rows:
+        return torch.empty((0, len(EDGE_ATTR_FIELDS)), dtype=torch.float32)
+    return torch.tensor(rows, dtype=torch.float32)
 
 
 def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -320,6 +379,68 @@ def iter_bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:
         chunk = value[idx : idx + 4]
         chunks.append((float(chunk[0]), float(chunk[1]), float(chunk[2]), float(chunk[3])))
     return chunks
+
+
+def _first_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    chunks = iter_bbox_chunks(value)
+    return chunks[0] if chunks else None
+
+
+def _last_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    chunks = iter_bbox_chunks(value)
+    return chunks[-1] if chunks else None
+
+
+def _first_item_page(item: dict[str, Any]) -> int | None:
+    pages = item.get("source_page_idxs")
+    if isinstance(pages, list) and pages and isinstance(pages[0], int):
+        return pages[0]
+    page = item.get("page_idx")
+    return page if isinstance(page, int) else None
+
+
+def _last_item_page(item: dict[str, Any]) -> int | None:
+    pages = item.get("source_page_idxs")
+    if isinstance(pages, list) and pages and isinstance(pages[-1], int):
+        return pages[-1]
+    page = item.get("page_idx")
+    return page if isinstance(page, int) else None
+
+
+def _vertical_gap(
+    source_bbox: tuple[float, float, float, float] | None,
+    target_bbox: tuple[float, float, float, float] | None,
+    same_page: bool,
+) -> float:
+    if not same_page or source_bbox is None or target_bbox is None:
+        return 0.0
+    return max(0.0, target_bbox[1] - source_bbox[3]) / PAGE_SIZE
+
+
+def _horizontal_overlap(
+    source_bbox: tuple[float, float, float, float] | None,
+    target_bbox: tuple[float, float, float, float] | None,
+) -> float:
+    if source_bbox is None or target_bbox is None:
+        return 0.0
+    overlap = max(0.0, min(source_bbox[2], target_bbox[2]) - max(source_bbox[0], target_bbox[0]))
+    source_width = max(1.0, source_bbox[2] - source_bbox[0])
+    target_width = max(1.0, target_bbox[2] - target_bbox[0])
+    return overlap / min(source_width, target_width)
+
+
+def _ends_with_hyphen(text: str) -> bool:
+    return text.rstrip().endswith("-")
+
+
+def _has_terminal_punctuation(text: str) -> bool:
+    stripped = text.rstrip()
+    return bool(stripped) and stripped[-1] in TERMINAL_PUNCTUATION
+
+
+def _starts_lowercase(text: str) -> bool:
+    stripped = text.lstrip()
+    return bool(stripped) and stripped[0].islower()
 
 
 def canonical_type(value: Any) -> str:

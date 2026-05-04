@@ -53,6 +53,24 @@ class EdgeRelation(str, Enum):
 FEATURE_TYPE_VOCAB = [block_type.value for block_type in BlockType]
 GEOMETRY_FIELDS = ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
 DERIVED_STAT_FIELDS = ["macro_position", "aspect_ratio", "text_density"]
+EDGE_ATTR_FIELDS = [
+    "semantic_cosine",
+    "delta_x_start",
+    "delta_y_start",
+    "delta_x_end",
+    "delta_y_end",
+    "vertical_gap",
+    "horizontal_overlap",
+    "same_page",
+    "same_column",
+    "cross_page",
+    "cross_column",
+    "same_type",
+    "source_ends_with_hyphen",
+    "source_has_terminal_punctuation",
+    "target_starts_lowercase",
+    "is_forward_edge",
+]
 NON_TEXT_DENSITY_TYPES = {
     BlockType.EQUATION.value,
     BlockType.TABLE.value,
@@ -180,6 +198,14 @@ class FeatureTensorSchema:
     @property
     def node_feature_dim(self) -> int:
         return self.semantic_dim + self.type_dim + len(self.geometry_fields) + len(self.derived_stat_fields)
+
+    @property
+    def edge_attr_fields(self) -> list[str]:
+        return list(EDGE_ATTR_FIELDS)
+
+    @property
+    def edge_attr_dim(self) -> int:
+        return len(self.edge_attr_fields)
 
 
 @dataclass(frozen=True)

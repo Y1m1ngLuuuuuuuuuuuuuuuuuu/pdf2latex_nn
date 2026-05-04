@@ -1,6 +1,7 @@
 from src.reasoning.graph_builder import (
     TYPE_VOCAB,
     build_derived_stats_matrix,
+    build_edge_attr_matrix,
     build_geometry_matrix,
     build_sequential_edge_index,
     build_type_onehot_matrix,
@@ -80,6 +81,34 @@ def test_sequential_edges_are_bidirectional_by_default():
     edge_index = build_sequential_edge_index(3)
 
     assert edge_index.tolist() == [[0, 1, 1, 2], [1, 0, 2, 1]]
+
+
+def test_edge_attr_matrix_captures_semantic_and_relative_layout_features():
+    if not has_torch():
+        return
+    import torch
+
+    items = [
+        item("For CI-", [80, 100, 480, 200], page=0, column=0),
+        item("continues here.", [80, 220, 480, 300], page=0, column=0),
+    ]
+    semantic = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+    geometry = torch.tensor([[0.0, 0.1, 1.0, 0.2], [0.0, 0.22, 1.0, 0.3]], dtype=torch.float32)
+
+    edge_attr = build_edge_attr_matrix(items, semantic, geometry)
+
+    assert tuple(edge_attr.shape) == (2, 16)
+    forward = edge_attr[0].tolist()
+    reverse = edge_attr[1].tolist()
+    assert round(float(forward[0]), 4) == 1.0
+    assert round(float(forward[2]), 4) == 0.12
+    assert round(float(forward[5]), 4) == 0.02
+    assert float(forward[7]) == 1.0
+    assert float(forward[8]) == 1.0
+    assert float(forward[12]) == 1.0
+    assert float(forward[14]) == 1.0
+    assert float(forward[15]) == 1.0
+    assert float(reverse[15]) == 0.0
 
 
 def test_canonical_type_maps_mineru_names_to_fixed_vocab():
