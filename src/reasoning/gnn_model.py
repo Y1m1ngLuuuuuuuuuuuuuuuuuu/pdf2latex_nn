@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.perception.schema import DERIVED_STAT_FIELDS, GEOMETRY_FIELDS, SCIBERT_DIM
+from src.perception.schema import DERIVED_STAT_FIELDS, GEOMETRY_FIELDS, SCIBERT_DIM, STYLE_STAT_FIELDS
 
 try:
     import torch
@@ -24,7 +24,7 @@ class FeatureProjectorConfig:
 
     @property
     def layout_input_dim(self) -> int:
-        return self.type_dim + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS)
+        return self.type_dim + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS) + len(STYLE_STAT_FIELDS)
 
     @property
     def output_dim(self) -> int:

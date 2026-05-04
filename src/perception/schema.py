@@ -53,6 +53,14 @@ class EdgeRelation(str, Enum):
 FEATURE_TYPE_VOCAB = [block_type.value for block_type in BlockType]
 GEOMETRY_FIELDS = ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
 DERIVED_STAT_FIELDS = ["macro_position", "aspect_ratio", "text_density"]
+STYLE_STAT_FIELDS = [
+    "baseline_font_size_norm",
+    "font_size_vs_doc_body",
+    "bold_char_ratio",
+    "italic_char_ratio",
+    "inline_math_char_ratio",
+    "inline_code_char_ratio",
+]
 EDGE_ATTR_FIELDS = [
     "semantic_cosine",
     "delta_y_gap",
@@ -184,6 +192,7 @@ class FeatureTensorSchema:
     type_vocab: list[str] = field(default_factory=lambda: list(FEATURE_TYPE_VOCAB))
     geometry_fields: list[str] = field(default_factory=lambda: list(GEOMETRY_FIELDS))
     derived_stat_fields: list[str] = field(default_factory=lambda: list(DERIVED_STAT_FIELDS))
+    style_stat_fields: list[str] = field(default_factory=lambda: list(STYLE_STAT_FIELDS))
 
     @property
     def type_dim(self) -> int:
@@ -191,7 +200,13 @@ class FeatureTensorSchema:
 
     @property
     def node_feature_dim(self) -> int:
-        return self.semantic_dim + self.type_dim + len(self.geometry_fields) + len(self.derived_stat_fields)
+        return (
+            self.semantic_dim
+            + self.type_dim
+            + len(self.geometry_fields)
+            + len(self.derived_stat_fields)
+            + len(self.style_stat_fields)
+        )
 
     @property
     def edge_attr_fields(self) -> list[str]:

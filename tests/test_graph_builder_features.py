@@ -5,8 +5,10 @@ from src.reasoning.graph_builder import (
     build_edge_attr_matrix,
     build_geometry_matrix,
     build_sequential_edge_index,
+    build_style_stats_matrix,
     build_type_onehot_matrix,
     canonical_type,
+    infer_document_body_font_size,
     infer_page_frames,
     iter_bbox_chunks,
     text_for_embedding,
@@ -207,3 +209,37 @@ def test_derived_stats_masks_density_for_non_text_types_and_uses_area_sum():
     assert round(float(stats[0][2]), 4) == round(5 / 300, 4)
     assert float(stats[1][2]) == 0.0
     assert float(stats[2][2]) == 0.0
+
+
+def test_style_stats_matrix_summarizes_pymupdf_style_spans():
+    if not has_torch():
+        return
+    items = [
+        {
+            **item("body", [0, 0, 10, 10]),
+            "style_baseline_size": 10.0,
+            "style_spans": [
+                {"text": "bo", "font_size": 10.0, "is_bold": True, "is_italic": False, "is_inline_math": False, "is_inline_code": False, "char_count": 2},
+                {"text": "dy", "font_size": 10.0, "is_bold": False, "is_italic": True, "is_inline_math": False, "is_inline_code": False, "char_count": 2},
+            ],
+        },
+        {
+            **item("title", [0, 20, 10, 30]),
+            "type": "title",
+            "style_baseline_size": 12.0,
+            "style_spans": [
+                {"text": "x", "font_size": 12.0, "is_bold": True, "is_italic": False, "is_inline_math": True, "is_inline_code": False, "char_count": 1}
+            ],
+        },
+    ]
+
+    assert infer_document_body_font_size(items) == 10.0
+    stats = build_style_stats_matrix(items)
+
+    assert tuple(stats.shape) == (2, 6)
+    assert round(float(stats[0][0]), 4) == 0.1
+    assert round(float(stats[0][1]), 4) == 0.0
+    assert round(float(stats[0][2]), 4) == 0.5
+    assert round(float(stats[0][3]), 4) == 0.5
+    assert round(float(stats[1][1]), 4) == 0.2
+    assert round(float(stats[1][4]), 4) == 1.0

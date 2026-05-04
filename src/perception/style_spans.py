@@ -40,8 +40,8 @@ class StyleConfig:
     size_bucket: float = 0.5
 
 
-def enrich_content_v3_with_styles(input_path: Path, pdf_path: Path, output_path: Path, config: StyleConfig | None = None) -> dict[str, Any]:
-    """Write a v3 JSON copy with style span sequences added per item."""
+def enrich_content_with_styles(input_path: Path, pdf_path: Path, output_path: Path, config: StyleConfig | None = None) -> dict[str, Any]:
+    """Write a content JSON copy with PyMuPDF style span sequences added per item."""
 
     import fitz
 
@@ -63,7 +63,8 @@ def enrich_content_v3_with_styles(input_path: Path, pdf_path: Path, output_path:
     finally:
         doc.close()
 
-    payload["schema_version"] = "content_v3_with_styles"
+    source_schema = str(payload.get("schema_version") or "content")
+    payload["schema_version"] = source_schema if source_schema.endswith("_with_styles") else f"{source_schema}_with_styles"
     payload["style_source_pdf"] = str(pdf_path)
     payload["style_config"] = {
         "clip_margin": cfg.clip_margin,
@@ -73,6 +74,12 @@ def enrich_content_v3_with_styles(input_path: Path, pdf_path: Path, output_path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
+
+
+def enrich_content_v3_with_styles(input_path: Path, pdf_path: Path, output_path: Path, config: StyleConfig | None = None) -> dict[str, Any]:
+    """Backward-compatible wrapper for older v3 style enrichment callers."""
+
+    return enrich_content_with_styles(input_path, pdf_path, output_path, config)
 
 
 def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConfig) -> list[dict[str, Any]]:

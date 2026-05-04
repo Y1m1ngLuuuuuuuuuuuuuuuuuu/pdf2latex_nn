@@ -7,7 +7,7 @@
 ```text
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
-node_feature_dim: 785
+node_feature_dim: 791
 edge_attr_dim: 10
 ```
 
@@ -203,7 +203,8 @@ reference_item_of
 10 type one-hot
 4 geometry
 3 derived stats
-= 785
+6 style stats
+= 791
 ```
 
 切片固定为：
@@ -214,6 +215,7 @@ reference_item_of
 | `type_onehot` | `[768, 778)` | 10 | Block Type 独热 |
 | `geometry` | `[778, 782)` | 4 | 首尾锚点几何 |
 | `derived_stats` | `[782, 785)` | 3 | 宏观位置、宽高比、文本密度 |
+| `style_stats` | `[785, 791)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
 
 ### Geometry Fields
 
@@ -235,6 +237,19 @@ text_density = char_count / sum_bbox_area
 ```
 
 `equation/table/figure/algorithm/code` 的 `text_density` 强制为 `0.0`。`reference` 的 BERT 输入使用 `[REFERENCE]`，但 JSON 仍保留完整 `reference_items`。
+
+### Style Stats
+
+```text
+baseline_font_size_norm = baseline_font_size / 100
+font_size_vs_doc_body = (baseline_font_size - document_body_font_size) / document_body_font_size
+bold_char_ratio = bold_chars / styled_chars
+italic_char_ratio = italic_chars / styled_chars
+inline_math_char_ratio = inline_math_chars / styled_chars
+inline_code_char_ratio = inline_code_chars / styled_chars
+```
+
+这些字段来自 PyMuPDF 的状态机合并 `style_spans`。如果某个节点没有样式抽取结果，对应 style stats 使用 `0.0`。`document_body_font_size` 从正文类节点的 char-weighted baseline size 中推断。
 
 ## Edge Attribute Tensor
 
@@ -287,7 +302,7 @@ edge_attr_dim = 10
 
 ```text
 semantic_768 -> Linear -> semantic_64 -> LayerNorm
-layout/type/stats_17 -> Linear -> layout_32 -> LayerNorm
+layout/type/stats_23 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 

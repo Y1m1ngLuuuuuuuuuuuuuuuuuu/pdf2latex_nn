@@ -16,6 +16,7 @@ from src.perception.schema import (
     NON_TEXT_DENSITY_TYPES,
     PLACEHOLDER_TEXT,
     SCIBERT_DIM,
+    STYLE_STAT_FIELDS,
 )
 
 PAGE_SIZE = 1000.0
@@ -72,7 +73,8 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
     type_onehot = build_type_onehot_matrix(items)
     geometry = build_geometry_matrix(items)
     stats = build_derived_stats_matrix(items)
-    x = torch.cat([semantic, type_onehot, geometry, stats], dim=1)
+    style_stats = build_style_stats_matrix(items)
+    x = torch.cat([semantic, type_onehot, geometry, stats, style_stats], dim=1)
     edge_pairs = build_candidate_edge_pairs(
         items,
         sequential_window=config.sequential_window,
@@ -103,6 +105,12 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
             "end": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS),
             "dim": len(DERIVED_STAT_FIELDS),
             "fields": DERIVED_STAT_FIELDS,
+        },
+        "style_stats": {
+            "start": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS),
+            "end": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS) + len(STYLE_STAT_FIELDS),
+            "dim": len(STYLE_STAT_FIELDS),
+            "fields": STYLE_STAT_FIELDS,
         },
     }
     data.edge_attr_schema = {
@@ -225,6 +233,43 @@ def build_derived_stats_matrix(items: list[dict[str, Any]]) -> Any:
             text_density = char_count / max(area_sum, 1.0)
         rows.append([macro_position, aspect_ratio, text_density])
     return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_style_stats_matrix(items: list[dict[str, Any]]) -> Any:
+    import torch
+
+    body_size = infer_document_body_font_size(items)
+    rows = []
+    for item in items:
+        baseline = _item_font_size(item)
+        baseline_norm = baseline / 100.0 if baseline > 0 else 0.0
+        font_size_vs_body = (baseline - body_size) / body_size if baseline > 0 and body_size > 0 else 0.0
+        rows.append(
+            [
+                baseline_norm,
+                font_size_vs_body,
+                _style_char_ratio(item, "is_bold"),
+                _style_char_ratio(item, "is_italic"),
+                _style_char_ratio(item, "is_inline_math"),
+                _style_char_ratio(item, "is_inline_code"),
+            ]
+        )
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def infer_document_body_font_size(items: list[dict[str, Any]]) -> float:
+    weighted: dict[float, int] = {}
+    for item in items:
+        if canonical_type(item.get("type")) != "text":
+            continue
+        size = _item_font_size(item)
+        if size <= 0:
+            continue
+        weight = max(1, len(str(item.get("text_for_embedding") or "")))
+        weighted[size] = weighted.get(size, 0) + weight
+    if not weighted:
+        return 0.0
+    return max(weighted.items(), key=lambda item: item[1])[0]
 
 
 def infer_page_frames(items: list[dict[str, Any]]) -> dict[int, PageFrames]:
@@ -532,6 +577,22 @@ def _item_is_bold(item: dict[str, Any]) -> bool:
         if span.get("is_bold"):
             bold_chars += count
     return total_chars > 0 and bold_chars / total_chars >= 0.5
+
+
+def _style_char_ratio(item: dict[str, Any], flag: str) -> float:
+    spans = item.get("style_spans")
+    if not isinstance(spans, list):
+        return 0.0
+    flagged = 0
+    total = 0
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        count = int(span.get("char_count") or len(str(span.get("text") or "")) or 1)
+        total += count
+        if span.get(flag):
+            flagged += count
+    return flagged / total if total > 0 else 0.0
 
 
 def canonical_type(value: Any) -> str:

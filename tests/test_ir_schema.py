@@ -32,7 +32,15 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
     ]
     assert schema.geometry_fields == ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
     assert schema.derived_stat_fields == ["macro_position", "aspect_ratio", "text_density"]
-    assert schema.node_feature_dim == 785
+    assert schema.style_stat_fields == [
+        "baseline_font_size_norm",
+        "font_size_vs_doc_body",
+        "bold_char_ratio",
+        "italic_char_ratio",
+        "inline_math_char_ratio",
+        "inline_code_char_ratio",
+    ]
+    assert schema.node_feature_dim == 791
     assert schema.edge_attr_dim == 10
     assert schema.edge_attr_fields == [
         "semantic_cosine",

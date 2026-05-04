@@ -17,7 +17,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True, help="content v3/v4 JSON")
     parser.add_argument("--pdf", type=Path, required=True, help="Original PDF")
-    parser.add_argument("--output", type=Path, required=True, help="Output style-enriched v3 JSON")
+    parser.add_argument("--output", type=Path, required=True, help="Output style-enriched content JSON")
     parser.add_argument("--clip-margin", type=float, default=2.0)
     parser.add_argument("--size-bucket", type=float, default=0.5)
     return parser
@@ -34,7 +34,7 @@ def main() -> int:
     items = payload.get("items", [])
     nonempty = [item for item in items if item.get("style_spans")]
     print(f"wrote {args.output}")
-    print(f"items={len(items)} items_with_styles={len(nonempty)}")
+    print(f"items={len(items)} items_with_styles={len(nonempty)} schema={payload.get('schema_version')}")
     for item in nonempty[:10]:
         preview = item["style_spans"][0]["text"][:80].replace("\n", " ")
         print(
