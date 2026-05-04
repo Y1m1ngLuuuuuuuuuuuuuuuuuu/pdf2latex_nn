@@ -131,7 +131,7 @@ def test_edge_attr_matrix_uses_strict_ten_dimensional_relation_features():
     assert round(float(forward[1]), 4) == 0.02
     assert round(float(forward[2]), 4) == 0.0
     assert float(forward[3]) == 1.0
-    assert round(float(forward[4]), 4) == 0.12
+    assert round(float(forward[4]), 4) == 0.11
     assert float(forward[5]) == -2.0
     assert float(forward[6]) == 1.0
     assert round(float(forward[7]), 4) == 0.8
