@@ -10,6 +10,7 @@ MERGE = 0
 PARENT_CHILD = 1
 SIBLING = 2
 NONE = 3
+VIRTUAL_ROOT = "__ROOT__"
 
 
 @dataclass(frozen=True)
@@ -45,72 +46,100 @@ def greedy_decode_relations(
     threshold: float = 0.5,
     num_nodes: int | None = None,
 ) -> list[DecodedEdge]:
-    """Greedily select non-conflicting Merge/Parent/Sibling edges.
+    """Backward-compatible alias for the NetworkX arborescence decoder."""
 
-    `scores` may be logits or probabilities with shape [E, 4]. The decoder
-    removes cycles from parent-child edges and keeps only one structural label
-    for each unordered pair.
+    return decode_relations_with_arborescence(edge_index, scores, threshold=threshold, num_nodes=num_nodes)
+
+
+def decode_relations_with_arborescence(
+    edge_index: Any,
+    scores: Any,
+    *,
+    threshold: float = 0.5,
+    num_nodes: int | None = None,
+) -> list[DecodedEdge]:
+    """Decode relation probabilities with a maximum spanning arborescence.
+
+    Merge edges are first folded into supernodes. Parent-child probabilities
+    are then used as NetworkX edge weights, and
+    `maximum_spanning_arborescence()` extracts the highest-scoring acyclic
+    directed tree. Sibling edges are kept as auxiliary predictions and do not
+    participate in tree construction.
     """
 
     import torch
     import torch.nn.functional as F
+    import networkx as nx
+    from networkx.algorithms.tree.branchings import maximum_spanning_arborescence
 
     if scores.numel() == 0:
         return []
+    edge_index = edge_index.detach().cpu()
     probs = scores.detach().cpu()
     if probs.ndim != 2 or probs.shape[1] < 4:
         raise ValueError("Expected edge scores with shape [num_edges, 4]")
+    if probs.shape[0] != edge_index.shape[1]:
+        raise ValueError("scores rows must match edge_index edge count")
     row_sums = probs.sum(dim=1)
-    if not torch.all((row_sums > 0.99) & (row_sums < 1.01)):
+    if not (torch.all(probs >= 0.0) and torch.all((row_sums > 0.99) & (row_sums < 1.01))):
         probs = F.softmax(probs, dim=-1)
-    edge_index = edge_index.detach().cpu()
     node_count = num_nodes or int(edge_index.max().item() + 1)
 
-    candidates = []
+    selected: list[DecodedEdge] = []
+    union_find = UnionFind(node_count)
     for edge_pos in range(edge_index.shape[1]):
         source = int(edge_index[0, edge_pos].item())
         target = int(edge_index[1, edge_pos].item())
-        label = int(probs[edge_pos].argmax().item())
-        score = float(probs[edge_pos, label].item())
-        if label == NONE or score < threshold or source == target:
+        score = float(probs[edge_pos, MERGE].item())
+        if source == target or score < threshold or int(probs[edge_pos].argmax().item()) != MERGE:
             continue
-        candidates.append(DecodedEdge(source=source, target=target, label=label, score=score))
-    candidates.sort(key=lambda edge: edge.score, reverse=True)
-
-    union_find = UnionFind(node_count)
-    selected: list[DecodedEdge] = []
-    selected_pairs: set[tuple[int, int]] = set()
-    parent_of: dict[int, int] = {}
-    parent_edges: set[tuple[int, int]] = set()
-
-    for edge in candidates:
-        pair = tuple(sorted((edge.source, edge.target)))
-        if edge.label == MERGE:
-            if union_find.find(edge.source) == union_find.find(edge.target):
-                continue
-            union_find.union(edge.source, edge.target)
-            selected.append(edge)
-            selected_pairs.add(pair)
-
-    for edge in candidates:
-        if edge.label == MERGE:
+        if union_find.find(source) == union_find.find(target):
             continue
-        source = union_find.find(edge.source)
-        target = union_find.find(edge.target)
+        union_find.union(source, target)
+        selected.append(DecodedEdge(source=source, target=target, label=MERGE, score=score))
+
+    graph = nx.DiGraph()
+    supernodes = sorted({union_find.find(idx) for idx in range(node_count)})
+    graph.add_node(VIRTUAL_ROOT)
+    for node in supernodes:
+        graph.add_node(node)
+        graph.add_edge(VIRTUAL_ROOT, node, weight=0.0, score=0.0, label=NONE, synthetic_root=True)
+
+    for edge_pos in range(edge_index.shape[1]):
+        source = union_find.find(int(edge_index[0, edge_pos].item()))
+        target = union_find.find(int(edge_index[1, edge_pos].item()))
         if source == target:
             continue
-        pair = tuple(sorted((source, target)))
-        if pair in selected_pairs:
+        weight = float(probs[edge_pos, PARENT_CHILD].item())
+        if graph.has_edge(source, target) and float(graph[source][target]["weight"]) >= weight:
             continue
-        if edge.label == PARENT_CHILD:
-            if target in parent_of:
+        graph.add_edge(source, target, weight=weight, score=weight, label=PARENT_CHILD, synthetic_root=False)
+
+    if graph.number_of_nodes() > 1:
+        arborescence = maximum_spanning_arborescence(graph, attr="weight", default=0.0, preserve_attrs=True)
+        for source, target, attrs in arborescence.edges(data=True):
+            if source == VIRTUAL_ROOT or attrs.get("synthetic_root"):
                 continue
-            if creates_cycle(source, target, parent_edges):
-                continue
-            parent_of[target] = source
-            parent_edges.add((source, target))
-        selected.append(DecodedEdge(source=source, target=target, label=edge.label, score=edge.score))
-        selected_pairs.add(pair)
+            selected.append(
+                DecodedEdge(
+                    source=int(source),
+                    target=int(target),
+                    label=PARENT_CHILD,
+                    score=float(attrs.get("score", attrs.get("weight", 0.0))),
+                )
+            )
+
+    selected_parent_pairs = {(edge.source, edge.target) for edge in selected if edge.label == PARENT_CHILD}
+    for edge_pos in range(edge_index.shape[1]):
+        label = int(probs[edge_pos].argmax().item())
+        score = float(probs[edge_pos, SIBLING].item())
+        if label != SIBLING or score < threshold:
+            continue
+        source = union_find.find(int(edge_index[0, edge_pos].item()))
+        target = union_find.find(int(edge_index[1, edge_pos].item()))
+        if source == target or (source, target) in selected_parent_pairs or (target, source) in selected_parent_pairs:
+            continue
+        selected.append(DecodedEdge(source=source, target=target, label=SIBLING, score=score))
 
     return selected
 

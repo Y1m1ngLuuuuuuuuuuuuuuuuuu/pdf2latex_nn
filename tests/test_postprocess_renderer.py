@@ -1,5 +1,11 @@
 from src.generation.latex_renderer import RenderConfig, render_latex_document
-from src.reasoning.postprocess import MERGE, PARENT_CHILD, DecodedEdge, build_resolved_tree, greedy_decode_relations
+from src.reasoning.postprocess import (
+    MERGE,
+    PARENT_CHILD,
+    DecodedEdge,
+    build_resolved_tree,
+    decode_relations_with_arborescence,
+)
 
 
 def has_torch():
@@ -10,7 +16,7 @@ def has_torch():
     return True
 
 
-def test_greedy_decode_relations_drops_parent_cycles():
+def test_arborescence_decode_relations_drops_parent_cycles():
     if not has_torch():
         return
     import torch
@@ -24,7 +30,7 @@ def test_greedy_decode_relations_drops_parent_cycles():
         ]
     )
 
-    decoded = greedy_decode_relations(edge_index, scores, threshold=0.5, num_nodes=3)
+    decoded = decode_relations_with_arborescence(edge_index, scores, threshold=0.5, num_nodes=3)
 
     assert [(edge.source, edge.target, edge.label) for edge in decoded] == [
         (0, 1, PARENT_CHILD),
