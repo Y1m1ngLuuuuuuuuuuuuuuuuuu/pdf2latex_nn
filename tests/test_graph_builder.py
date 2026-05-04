@@ -8,8 +8,40 @@ def test_feature_projector_balances_raw_node_features():
 
     config = FeatureProjectorConfig(semantic_hidden_dim=32, layout_hidden_dim=16, dropout=0.0)
     projector = FeatureProjector(config)
+    with torch.no_grad():
+        projector.semantic_projection.weight.zero_()
+        projector.semantic_projection.bias.fill_(1.0)
     x = torch.randn(4, 791)
 
     projected = projector(x)
 
     assert tuple(projected.shape) == (4, 48)
+    assert torch.allclose(projected[:, :32].norm(p=2, dim=-1), torch.ones(4), atol=1e-5)
+
+
+def test_edge_relation_gat_outputs_one_logit_row_per_edge():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig
+
+    config = EdgeGATConfig(
+        node_projector=FeatureProjectorConfig(semantic_hidden_dim=16, layout_hidden_dim=8, dropout=0.0),
+        hidden_dim=8,
+        heads=2,
+        num_layers=1,
+        dropout=0.0,
+    )
+    model = EdgeRelationGAT(config)
+    data = Data(
+        x=torch.randn(3, 791),
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
+        edge_attr=torch.randn(3, 10),
+    )
+
+    logits = model(data)
+
+    assert tuple(logits.shape) == (3, 4)
