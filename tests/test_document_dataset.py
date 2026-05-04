@@ -10,7 +10,43 @@ def has_torch_and_pyg():
     return True
 
 
-def test_document_dataset_loads_graph_path_and_attaches_default_none_labels(tmp_path):
+def make_graph(torch, Data, *, edge_index=None, x=None, edge_attr=None):
+    if edge_index is None:
+        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    edge_count = int(edge_index.shape[1])
+    data = Data(
+        x=torch.zeros((2, 791), dtype=torch.float64) if x is None else x,
+        edge_index=edge_index,
+        edge_attr=torch.zeros((edge_count, 10), dtype=torch.float64) if edge_attr is None else edge_attr,
+    )
+    data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}]
+    return data
+
+
+def test_sanitize_graph_data_casts_float32_and_clamps_non_finite_values():
+    if not has_torch_and_pyg():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    from src.datasets.document_dataset import sanitize_graph_data
+
+    data = make_graph(
+        torch,
+        Data,
+        x=torch.full((2, 791), float("nan"), dtype=torch.float64),
+        edge_attr=torch.full((2, 10), float("inf"), dtype=torch.float64),
+    )
+
+    sanitized = sanitize_graph_data(data)
+
+    assert sanitized.x.dtype == torch.float32
+    assert sanitized.edge_attr.dtype == torch.float32
+    assert not torch.isnan(sanitized.x).any()
+    assert torch.isfinite(sanitized.edge_attr).all()
+
+
+def test_document_dataset_filters_empty_edge_and_all_orphan_graphs(tmp_path):
     if not has_torch_and_pyg():
         return
     import torch
@@ -18,20 +54,52 @@ def test_document_dataset_loads_graph_path_and_attaches_default_none_labels(tmp_
 
     from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig
 
-    raw_graph = tmp_path / "raw.pt"
-    data = Data(
-        x=torch.zeros((2, 791)),
-        edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((2, 10)),
+    valid_graph = tmp_path / "valid.pt"
+    empty_graph = tmp_path / "empty.pt"
+    orphan_graph = tmp_path / "orphan.pt"
+    torch.save(make_graph(torch, Data), valid_graph)
+    torch.save(make_graph(torch, Data, edge_index=torch.empty((2, 0), dtype=torch.long)), empty_graph)
+    torch.save(make_graph(torch, Data), orphan_graph)
+
+    tex_path = tmp_path / "doc.tex"
+    tex_path.write_text(r"\section{Intro}" + "\n\n" + "A paragraph.", encoding="utf-8")
+    alignment_path = tmp_path / "alignment.json"
+    alignment_path.write_text(
+        json.dumps(
+            {
+                "P0": {"tex_id": "T_1", "score": 0.99},
+                "P1": {"tex_id": "T_2", "score": 0.99},
+            }
+        ),
+        encoding="utf-8",
     )
-    data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}]
-    torch.save(data, raw_graph)
+
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps([{"document_id": "doc1", "graph_path": str(raw_graph)}]), encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "document_id": "valid",
+                    "graph_path": str(valid_graph),
+                    "tex_path": str(tex_path),
+                    "pdf_to_tex_path": str(alignment_path),
+                },
+                {"document_id": "empty", "graph_path": str(empty_graph)},
+                {"document_id": "orphan", "graph_path": str(orphan_graph)},
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     dataset = DocumentDataset(DocumentDatasetConfig(root=tmp_path / "dataset", manifest_path=manifest))
+
+    assert len(dataset) == 1
     sample = dataset[0]
 
-    assert sample.document_id == "doc1"
-    assert sample.y.tolist() == [3, 3]
-    assert sample.label_counts == {0: 0, 1: 0, 2: 0, 3: 2}
+    assert sample.document_id == "valid"
+    assert sample.x.dtype == torch.float32
+    assert sample.edge_attr.dtype == torch.float32
+    assert sample.y.tolist() == [1, 1]
+    skipped = (tmp_path / "dataset" / "processed" / "skipped_records.jsonl").read_text(encoding="utf-8")
+    assert "empty edge graph" in skipped
+    assert "all-orphan graph" in skipped
