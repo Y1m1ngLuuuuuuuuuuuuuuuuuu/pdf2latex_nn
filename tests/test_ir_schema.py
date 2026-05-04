@@ -33,24 +33,18 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
     assert schema.geometry_fields == ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
     assert schema.derived_stat_fields == ["macro_position", "aspect_ratio", "text_density"]
     assert schema.node_feature_dim == 785
-    assert schema.edge_attr_dim == 16
+    assert schema.edge_attr_dim == 10
     assert schema.edge_attr_fields == [
         "semantic_cosine",
-        "delta_x_start",
-        "delta_y_start",
-        "delta_x_end",
-        "delta_y_end",
-        "vertical_gap",
-        "horizontal_overlap",
-        "same_page",
-        "same_column",
-        "cross_page",
-        "cross_column",
-        "same_type",
-        "source_ends_with_hyphen",
-        "source_has_terminal_punctuation",
-        "target_starts_lowercase",
-        "is_forward_edge",
+        "delta_y_gap",
+        "delta_x_left",
+        "left_alignment",
+        "center_distance",
+        "font_size_delta",
+        "bold_to_regular",
+        "line_height_ratio",
+        "index_delta",
+        "is_next",
     ]
 
 

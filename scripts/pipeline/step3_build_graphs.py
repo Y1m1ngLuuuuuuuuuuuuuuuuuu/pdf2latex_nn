@@ -26,7 +26,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=384)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--directed", action="store_true", help="Use only forward sequential edges")
+    parser.add_argument("--sequential-window", type=int, default=3, help="Reading-order neighbors on each side")
+    parser.add_argument("--spatial-k", type=int, default=3, help="Line-of-sight neighbors per down/right direction")
+    parser.add_argument("--directed", action="store_true", help="Use only forward reading-order window edges")
     return parser
 
 
@@ -38,6 +40,8 @@ def main() -> int:
         stride=args.stride,
         batch_size=args.batch_size,
         bidirectional_edges=not args.directed,
+        sequential_window=args.sequential_window,
+        spatial_k=args.spatial_k,
     )
     data = build_graph_from_content_v3(args.input, args.output, config)
     print(f"wrote {args.output}")

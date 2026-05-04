@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,6 @@ from src.perception.schema import (
 
 PAGE_SIZE = 1000.0
 TYPE_VOCAB = FEATURE_TYPE_VOCAB
-TERMINAL_PUNCTUATION = {".", "?", "!", "。", "？", "！", ";", "；"}
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,8 @@ class GraphBuildConfig:
     stride: int = 384
     batch_size: int = 16
     bidirectional_edges: bool = True
+    sequential_window: int = 3
+    spatial_k: int = 3
 
 
 def load_content_v3(path: Path) -> list[dict[str, Any]]:
@@ -71,9 +73,16 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
     geometry = build_geometry_matrix(items)
     stats = build_derived_stats_matrix(items)
     x = torch.cat([semantic, type_onehot, geometry, stats], dim=1)
-    edge_index = build_sequential_edge_index(len(items), bidirectional=config.bidirectional_edges)
-    edge_attr = build_edge_attr_matrix(items, semantic, geometry, bidirectional=config.bidirectional_edges)
+    edge_pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=config.sequential_window,
+        spatial_k=config.spatial_k,
+        bidirectional=config.bidirectional_edges,
+    )
+    edge_index = build_edge_index_from_pairs(edge_pairs)
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    data.edge_source_types = [source_type for _, _, source_type in edge_pairs]
     data.node_records = make_node_records(items)
     data.feature_schema = {
         "semantic": {"start": 0, "end": SCIBERT_DIM, "dim": SCIBERT_DIM, "source": "SciBERT CLS window mean"},
@@ -99,6 +108,12 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
     data.edge_attr_schema = {
         "dim": len(EDGE_ATTR_FIELDS),
         "fields": EDGE_ATTR_FIELDS,
+        "topology": {
+            "strategy": "dual_view_knn",
+            "sequential_window": config.sequential_window,
+            "spatial_k": config.spatial_k,
+            "edge_source_types": ["sequential", "spatial_down", "spatial_right"],
+        },
     }
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
@@ -291,6 +306,14 @@ def build_sequential_edge_index(node_count: int, *, bidirectional: bool = True) 
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 
 
+def build_edge_index_from_pairs(edge_pairs: list[tuple[int, int, str]]) -> Any:
+    import torch
+
+    if not edge_pairs:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor([(source, target) for source, target, _ in edge_pairs], dtype=torch.long).t().contiguous()
+
+
 def build_sequential_edge_pairs(node_count: int, *, bidirectional: bool = True) -> list[tuple[int, int]]:
     edges = []
     for idx in range(max(0, node_count - 1)):
@@ -300,46 +323,98 @@ def build_sequential_edge_pairs(node_count: int, *, bidirectional: bool = True) 
     return edges
 
 
-def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, geometry: Any, *, bidirectional: bool = True) -> Any:
-    """Return directed sequential edge features aligned with edge_index."""
+def build_candidate_edge_pairs(
+    items: list[dict[str, Any]],
+    *,
+    sequential_window: int = 3,
+    spatial_k: int = 3,
+    bidirectional: bool = True,
+) -> list[tuple[int, int, str]]:
+    """Build dual-view candidate edges: reading-order window plus spatial sight lines."""
+
+    edge_pairs: list[tuple[int, int, str]] = []
+    seen: set[tuple[int, int]] = set()
+
+    def add_edge(source_idx: int, target_idx: int, source_type: str) -> None:
+        if source_idx == target_idx:
+            return
+        key = (source_idx, target_idx)
+        if key in seen:
+            return
+        seen.add(key)
+        edge_pairs.append((source_idx, target_idx, source_type))
+
+    node_count = len(items)
+    window = max(0, int(sequential_window))
+    for source_idx in range(node_count):
+        start = max(0, source_idx - window) if bidirectional else source_idx + 1
+        end = min(node_count, source_idx + window + 1)
+        for target_idx in range(start, end):
+            add_edge(source_idx, target_idx, "sequential")
+
+    if spatial_k <= 0:
+        return edge_pairs
+
+    centers = [_node_center(item) for item in items]
+    pages = [_first_item_page(item) for item in items]
+    for source_idx, (source_center, source_page) in enumerate(zip(centers, pages)):
+        if source_center is None or source_page is None:
+            continue
+        down_candidates = []
+        right_candidates = []
+        for target_idx, (target_center, target_page) in enumerate(zip(centers, pages)):
+            if target_idx == source_idx or target_center is None or target_page != source_page:
+                continue
+            distance = _center_distance(source_center, target_center)
+            if target_center[1] > source_center[1]:
+                down_candidates.append((distance, target_idx))
+            if target_center[0] > source_center[0]:
+                right_candidates.append((distance, target_idx))
+        for _, target_idx in sorted(down_candidates)[:spatial_k]:
+            add_edge(source_idx, target_idx, "spatial_down")
+        for _, target_idx in sorted(right_candidates)[:spatial_k]:
+            add_edge(source_idx, target_idx, "spatial_right")
+
+    return edge_pairs
+
+
+def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, *, edge_pairs: list[tuple[int, int, str]] | None = None) -> Any:
+    """Return 10-dimensional edge features aligned with candidate edge_index."""
 
     import torch
     import torch.nn.functional as F
 
+    if edge_pairs is None:
+        edge_pairs = build_candidate_edge_pairs(items)
+
     rows = []
-    for source_idx, target_idx in build_sequential_edge_pairs(len(items), bidirectional=bidirectional):
+    for source_idx, target_idx, _ in edge_pairs:
         source = items[source_idx]
         target = items[target_idx]
         semantic_cosine = float(F.cosine_similarity(semantic[source_idx], semantic[target_idx], dim=0).item())
-        source_geom = geometry[source_idx]
-        target_geom = geometry[target_idx]
-        source_page = _last_item_page(source)
-        target_page = _first_item_page(target)
         source_bbox = _last_bbox(source.get("bbox"))
         target_bbox = _first_bbox(target.get("bbox"))
-        same_page = source_page is not None and target_page is not None and source_page == target_page
-        cross_page = source_page is not None and target_page is not None and source_page != target_page
-        same_column = source.get("column_id") is not None and source.get("column_id") == target.get("column_id")
-        cross_column = source.get("column_id") is not None and target.get("column_id") is not None and source.get("column_id") != target.get("column_id")
+        source_bbox = source_bbox or (0.0, 0.0, 0.0, 0.0)
+        target_bbox = target_bbox or (0.0, 0.0, 0.0, 0.0)
+        delta_y_gap = (target_bbox[1] - source_bbox[3]) / PAGE_SIZE
+        delta_x_left = (target_bbox[0] - source_bbox[0]) / PAGE_SIZE
+        source_center = _bbox_center(source_bbox)
+        target_center = _bbox_center(target_bbox)
+        source_height = max(1.0, source_bbox[3] - source_bbox[1])
+        target_height = max(1.0, target_bbox[3] - target_bbox[1])
 
         rows.append(
             [
                 semantic_cosine,
-                float(target_geom[0] - source_geom[0]),
-                float(target_geom[1] - source_geom[1]),
-                float(target_geom[2] - source_geom[2]),
-                float(target_geom[3] - source_geom[3]),
-                _vertical_gap(source_bbox, target_bbox, same_page),
-                _horizontal_overlap(source_bbox, target_bbox),
-                float(same_page),
-                float(same_column),
-                float(cross_page),
-                float(cross_column),
-                float(canonical_type(source.get("type")) == canonical_type(target.get("type"))),
-                float(_ends_with_hyphen(str(source.get("text_for_embedding") or ""))),
-                float(_has_terminal_punctuation(str(source.get("text_for_embedding") or ""))),
-                float(_starts_lowercase(str(target.get("text_for_embedding") or ""))),
-                float(target_idx > source_idx),
+                delta_y_gap,
+                delta_x_left,
+                float(abs(delta_x_left) < 0.01),
+                _center_distance(source_center, target_center) / PAGE_SIZE,
+                _item_font_size(target) - _item_font_size(source),
+                float(_item_is_bold(source) and not _item_is_bold(target)),
+                target_height / source_height,
+                float(target_idx - source_idx),
+                float(target_idx - source_idx == 1),
             ]
         )
     if not rows:
@@ -391,6 +466,21 @@ def _last_bbox(value: Any) -> tuple[float, float, float, float] | None:
     return chunks[-1] if chunks else None
 
 
+def _node_center(item: dict[str, Any]) -> tuple[float, float] | None:
+    bbox = _first_bbox(item.get("bbox"))
+    if bbox is None:
+        return None
+    return _bbox_center(bbox)
+
+
+def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
+    return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+
+
+def _center_distance(source: tuple[float, float], target: tuple[float, float]) -> float:
+    return math.sqrt((target[0] - source[0]) ** 2 + (target[1] - source[1]) ** 2)
+
+
 def _first_item_page(item: dict[str, Any]) -> int | None:
     pages = item.get("source_page_idxs")
     if isinstance(pages, list) and pages and isinstance(pages[0], int):
@@ -407,40 +497,41 @@ def _last_item_page(item: dict[str, Any]) -> int | None:
     return page if isinstance(page, int) else None
 
 
-def _vertical_gap(
-    source_bbox: tuple[float, float, float, float] | None,
-    target_bbox: tuple[float, float, float, float] | None,
-    same_page: bool,
-) -> float:
-    if not same_page or source_bbox is None or target_bbox is None:
+def _item_font_size(item: dict[str, Any]) -> float:
+    value = item.get("style_baseline_size")
+    if isinstance(value, (int, float)):
+        return float(value)
+    spans = item.get("style_spans")
+    if not isinstance(spans, list):
         return 0.0
-    return max(0.0, target_bbox[1] - source_bbox[3]) / PAGE_SIZE
-
-
-def _horizontal_overlap(
-    source_bbox: tuple[float, float, float, float] | None,
-    target_bbox: tuple[float, float, float, float] | None,
-) -> float:
-    if source_bbox is None or target_bbox is None:
+    weighted: dict[float, int] = {}
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        size = span.get("font_size")
+        if not isinstance(size, (int, float)):
+            continue
+        weight = int(span.get("char_count") or len(str(span.get("text") or "")) or 1)
+        weighted[float(size)] = weighted.get(float(size), 0) + max(1, weight)
+    if not weighted:
         return 0.0
-    overlap = max(0.0, min(source_bbox[2], target_bbox[2]) - max(source_bbox[0], target_bbox[0]))
-    source_width = max(1.0, source_bbox[2] - source_bbox[0])
-    target_width = max(1.0, target_bbox[2] - target_bbox[0])
-    return overlap / min(source_width, target_width)
+    return max(weighted.items(), key=lambda item: item[1])[0]
 
 
-def _ends_with_hyphen(text: str) -> bool:
-    return text.rstrip().endswith("-")
-
-
-def _has_terminal_punctuation(text: str) -> bool:
-    stripped = text.rstrip()
-    return bool(stripped) and stripped[-1] in TERMINAL_PUNCTUATION
-
-
-def _starts_lowercase(text: str) -> bool:
-    stripped = text.lstrip()
-    return bool(stripped) and stripped[0].islower()
+def _item_is_bold(item: dict[str, Any]) -> bool:
+    spans = item.get("style_spans")
+    if not isinstance(spans, list):
+        return False
+    bold_chars = 0
+    total_chars = 0
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        count = int(span.get("char_count") or len(str(span.get("text") or "")) or 1)
+        total_chars += count
+        if span.get("is_bold"):
+            bold_chars += count
+    return total_chars > 0 and bold_chars / total_chars >= 0.5
 
 
 def canonical_type(value: Any) -> str:

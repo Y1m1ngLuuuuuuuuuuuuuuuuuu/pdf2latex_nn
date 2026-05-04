@@ -1,5 +1,6 @@
 from src.reasoning.graph_builder import (
     TYPE_VOCAB,
+    build_candidate_edge_pairs,
     build_derived_stats_matrix,
     build_edge_attr_matrix,
     build_geometry_matrix,
@@ -83,32 +84,60 @@ def test_sequential_edges_are_bidirectional_by_default():
     assert edge_index.tolist() == [[0, 1, 1, 2], [1, 0, 2, 1]]
 
 
-def test_edge_attr_matrix_captures_semantic_and_relative_layout_features():
+def test_candidate_edges_use_dual_view_neighbors():
+    items = [
+        item("a", [0, 0, 10, 10], page=0),
+        item("b", [0, 20, 10, 30], page=0),
+        item("c", [20, 0, 30, 10], page=0),
+        item("d", [0, 40, 10, 50], page=0),
+    ]
+
+    pairs = build_candidate_edge_pairs(items, sequential_window=1, spatial_k=1)
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 1, "sequential") in typed
+    assert (1, 0, "sequential") in typed
+    assert any(source == 0 and target == 1 and source_type == "spatial_down" for source, target, source_type in pairs) is False
+    assert any(source == 0 and target == 2 and source_type in {"spatial_right", "sequential"} for source, target, source_type in pairs)
+    assert len({(source, target) for source, target, _ in pairs}) == len(pairs)
+
+
+def test_edge_attr_matrix_uses_strict_ten_dimensional_relation_features():
     if not has_torch():
         return
     import torch
 
     items = [
-        item("For CI-", [80, 100, 480, 200], page=0, column=0),
-        item("continues here.", [80, 220, 480, 300], page=0, column=0),
+        {
+            **item("For CI-", [80, 100, 480, 200], page=0, column=0),
+            "style_baseline_size": 12.0,
+            "style_spans": [{"text": "For CI-", "font_size": 12.0, "is_bold": True, "char_count": 7}],
+        },
+        {
+            **item("continues here.", [80, 220, 480, 300], page=0, column=0),
+            "style_baseline_size": 10.0,
+            "style_spans": [{"text": "continues here.", "font_size": 10.0, "is_bold": False, "char_count": 15}],
+        },
     ]
     semantic = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
-    geometry = torch.tensor([[0.0, 0.1, 1.0, 0.2], [0.0, 0.22, 1.0, 0.3]], dtype=torch.float32)
+    edge_pairs = [(0, 1, "sequential"), (1, 0, "sequential")]
 
-    edge_attr = build_edge_attr_matrix(items, semantic, geometry)
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
 
-    assert tuple(edge_attr.shape) == (2, 16)
+    assert tuple(edge_attr.shape) == (2, 10)
     forward = edge_attr[0].tolist()
     reverse = edge_attr[1].tolist()
     assert round(float(forward[0]), 4) == 1.0
-    assert round(float(forward[2]), 4) == 0.12
-    assert round(float(forward[5]), 4) == 0.02
-    assert float(forward[7]) == 1.0
+    assert round(float(forward[1]), 4) == 0.02
+    assert round(float(forward[2]), 4) == 0.0
+    assert float(forward[3]) == 1.0
+    assert round(float(forward[4]), 4) == 0.12
+    assert float(forward[5]) == -2.0
+    assert float(forward[6]) == 1.0
+    assert round(float(forward[7]), 4) == 0.8
     assert float(forward[8]) == 1.0
-    assert float(forward[12]) == 1.0
-    assert float(forward[14]) == 1.0
-    assert float(forward[15]) == 1.0
-    assert float(reverse[15]) == 0.0
+    assert float(forward[9]) == 1.0
+    assert float(reverse[9]) == 0.0
 
 
 def test_canonical_type_maps_mineru_names_to_fixed_vocab():

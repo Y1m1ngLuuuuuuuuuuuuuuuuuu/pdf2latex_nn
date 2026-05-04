@@ -8,7 +8,7 @@
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
 node_feature_dim: 785
-edge_attr_dim: 16
+edge_attr_dim: 10
 ```
 
 坐标统一使用 MinerU 当前输出的页面归一化坐标，页面左上角是 `(0, 0)`，右下角近似是 `(1000, 1000)`。如果后续需要保留 PDF 原始点坐标，应新增字段，不覆盖现有归一化坐标。
@@ -244,34 +244,42 @@ text_density = char_count / sum_bbox_area
 Data(x, edge_index, edge_attr)
 ```
 
-`edge_attr` 是 directed sequential edge 的关系特征。双向边会各自计算一份 directed feature，所以 `i -> i+1` 和 `i+1 -> i` 的 `delta_*`、文本信号和 `is_forward_edge` 不相同。
+`edge_attr` 是候选边的 directed relation feature。建图使用双重视角邻居采样：
+
+```text
+sequential_window = 3
+spatial_k = 3
+```
+
+候选边来自两类视角：
+
+```text
+reading-order neighbors: 每个节点连接扁平视觉阅读序列前后各 k 个节点
+line-of-sight neighbors: 每个节点在同页向下、向右各寻找最近 k 个空间邻居
+```
+
+重复边只保留第一条，优先级为 reading-order，再是 `spatial_down`，最后是 `spatial_right`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。
 
 固定维度：
 
 ```text
-edge_attr_dim = 16
+edge_attr_dim = 10
 ```
 
 | index | 字段 | 说明 |
 | --- | --- | --- |
 | 0 | `semantic_cosine` | 源节点和目标节点 SciBERT 768 维向量的余弦相似度 |
-| 1 | `delta_x_start` | `target.x_start_local - source.x_start_local` |
-| 2 | `delta_y_start` | `target.y_start_page - source.y_start_page` |
-| 3 | `delta_x_end` | `target.x_end_local - source.x_end_local` |
-| 4 | `delta_y_end` | `target.y_end_page - source.y_end_page` |
-| 5 | `vertical_gap` | 同页时 `target.y0 - source.y1`，小于 0 记 0，再除以页面高 |
-| 6 | `horizontal_overlap` | 源/目标 bbox 的水平重叠比例 |
-| 7 | `same_page` | 源尾页和目标首页是否相同 |
-| 8 | `same_column` | `column_id` 是否相同且已知 |
-| 9 | `cross_page` | 源尾页和目标首页是否不同 |
-| 10 | `cross_column` | `column_id` 是否不同且已知 |
-| 11 | `same_type` | canonical block type 是否相同 |
-| 12 | `source_ends_with_hyphen` | 源文本是否以 `-` 结尾 |
-| 13 | `source_has_terminal_punctuation` | 源文本是否以句号、问号、感叹号、分号等终止符结尾 |
-| 14 | `target_starts_lowercase` | 目标文本首个非空字符是否为小写 |
-| 15 | `is_forward_edge` | 目标 index 是否大于源 index |
+| 1 | `delta_y_gap` | `(target.y_min - source.y_max) / page_height`，允许负数表达跨栏/回跳 |
+| 2 | `delta_x_left` | `(target.x_min - source.x_min) / page_width` |
+| 3 | `left_alignment` | 若 `abs(delta_x_left) < 0.01` 则为 `1.0`，否则 `0.0` |
+| 4 | `center_distance` | 源/目标中心欧氏距离除以 `max(page_width, page_height)` |
+| 5 | `font_size_delta` | `target_font_size - source_font_size`，缺失样式时为 `0.0` |
+| 6 | `bold_to_regular` | 源节点多数文本为粗体且目标节点不是粗体时为 `1.0` |
+| 7 | `line_height_ratio` | `target_bbox_height / source_bbox_height` |
+| 8 | `index_delta` | `target_index - source_index` |
+| 9 | `is_next` | 若 `target_index - source_index == 1` 则为 `1.0` |
 
-这些边特征不替代节点特征，而是显式告诉 GNN “相邻块之间的关系”。尤其是 `semantic_cosine`、`delta_*`、`same_column/cross_page` 和断词标记，服务于 merge、continuation、parent-child、caption 等结构判断。
+这 10 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
 
 ## Model-Side Projection
 
@@ -283,7 +291,7 @@ layout/type/stats_17 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 
-当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=16)`、`TransformerConv(edge_dim=16)` 或 `GINEConv`。
+当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=10)`、`TransformerConv(edge_dim=10)` 或 `GINEConv`。
 
 ## Validator 最低要求
 
