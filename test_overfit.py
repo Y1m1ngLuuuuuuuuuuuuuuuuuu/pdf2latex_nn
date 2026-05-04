@@ -21,7 +21,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig  # noqa: E402
+from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig, build_document_dataloader  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig  # noqa: E402
 from src.reasoning.training import FocalLoss, compute_inverse_frequency_weights, edge_precision_recall_f1  # noqa: E402
 
@@ -90,7 +90,6 @@ def main() -> int:
 
 def run_overfit(args: argparse.Namespace) -> OverfitResult:
     import torch
-    from torch_geometric.loader import DataLoader
 
     set_seed(args.seed, torch=torch)
     dataset = DocumentDataset(
@@ -98,7 +97,7 @@ def run_overfit(args: argparse.Namespace) -> OverfitResult:
     )
     samples = select_dataset_samples(dataset, min_docs=args.min_docs, max_docs=args.max_docs)
     document_ids = [str(getattr(sample, "document_id", f"doc_{idx}")) for idx, sample in enumerate(samples)]
-    loader = DataLoader(samples, batch_size=len(samples), shuffle=False)
+    loader = build_document_dataloader(samples, batch_size=len(samples), shuffle=False)
     batch = next(iter(loader))
 
     device = resolve_device(args.device, torch=torch)

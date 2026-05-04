@@ -24,6 +24,17 @@ except ModuleNotFoundError:  # pragma: no cover - local lightweight env may omit
 FEATURE_SCHEMA = FeatureTensorSchema()
 PROCESSED_INDEX_NAME = "index.json"
 SKIPPED_RECORDS_NAME = "skipped_records.jsonl"
+PYG_EXCLUDE_KEYS = [
+    "edge_attr_schema",
+    "edge_source_types",
+    "feature_schema",
+    "label_counts",
+    "label_schema",
+    "model_path",
+    "node_records",
+    "pdf_to_tex",
+    "source_path",
+]
 
 
 class GraphFilterError(ValueError):
@@ -258,6 +269,7 @@ def safe_filename(value: str) -> str:
 def build_document_dataloader(dataset: DocumentDataset, *, batch_size: int = 8, shuffle: bool = True, **kwargs: Any) -> Any:
     if DataLoader is None:
         raise ModuleNotFoundError("PyG DataLoader requires torch-geometric to be installed")
+    kwargs.setdefault("exclude_keys", list(PYG_EXCLUDE_KEYS))
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **kwargs)
 
 
