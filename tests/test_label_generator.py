@@ -37,7 +37,7 @@ def test_label_graph_edges_falls_back_to_none_for_low_similarity_orphans(tmp_pat
     mapping = {
         "P0": {"tex_id": tex_ids[0], "score": 0.99},
         "P1": {"tex_id": tex_ids[1], "score": 0.99},
-        "P2": {"tex_id": tex_ids[2], "score": 0.1},
+        "P2": {"tex_id": tex_ids[1], "score": 0.1},
     }
     orphan_log = tmp_path / "orphans.jsonl"
 
