@@ -8,6 +8,7 @@ from src.reasoning.postprocess import (
     build_resolved_tree,
     decode_relations_with_arborescence,
     escape_latex,
+    safe_verbatim_text,
 )
 
 
@@ -144,6 +145,16 @@ def test_tree_decoder_wraps_inner_math_environments():
     tex = TreeDecoder().render_document(build_resolved_tree(records, []))
 
     assert "\\[\n\\begin{array}{r}x_1\\\\x_2\\end{array}\n\\]" in tex
+
+
+def test_safe_verbatim_text_removes_raw_unicode_math():
+    safe = safe_verbatim_text("theta θ ± café")
+
+    assert "θ" not in safe
+    assert "±" not in safe
+    assert r"\ensuremath{\theta}" in safe
+    assert r"\ensuremath{\pm}" in safe
+    assert "cafe" in safe
 
 
 def test_build_resolved_tree_merges_text_and_renderer_emits_tex_document():

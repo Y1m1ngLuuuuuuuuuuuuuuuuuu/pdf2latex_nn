@@ -579,7 +579,7 @@ def render_references(record: dict[str, Any], fallback_text: str) -> str:
 def render_verbatim_like(text: str, label: str) -> str:
     if not text:
         return f"% empty {label} block"
-    return "\\begin{verbatim}\n" + text.strip() + "\n\\end{verbatim}"
+    return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}"
 
 
 def escape_latex(text: str) -> str:
@@ -609,6 +609,19 @@ def _escape_latex_char(char: str, replacements: dict[str, str]) -> str:
     if ascii_fallback:
         return "".join(replacements.get(fallback_char, fallback_char) for fallback_char in ascii_fallback)
     return "?"
+
+
+def safe_verbatim_text(text: str) -> str:
+    return "".join(_safe_verbatim_char(char) for char in str(text))
+
+
+def _safe_verbatim_char(char: str) -> str:
+    if ord(char) < 128:
+        return char
+    if char in UNICODE_LATEX_REPLACEMENTS:
+        return UNICODE_LATEX_REPLACEMENTS[char]
+    ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+    return ascii_fallback or "?"
 
 
 UNICODE_LATEX_REPLACEMENTS = {
