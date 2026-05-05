@@ -33,8 +33,11 @@ class TreeDecoderConfig:
     parent_threshold: float = 0.0
     sibling_threshold: float = 0.5
     require_merge_argmax: bool = True
-    require_parent_argmax: bool = True
+    require_parent_argmax: bool = False
     include_sibling_edges: bool = True
+    abstract_root_weight: float = 100.0
+    text_text_parent_weight_scale: float = 0.05
+    text_text_parent_weight_bias: float = -0.05
     document_class: str = "article"
     packages: tuple[str, ...] = ("graphicx", "amsmath", "amssymb", "booktabs", "hyperref")
 
@@ -185,14 +188,16 @@ class TreeDecoder:
         graph = nx.DiGraph()
         graph.add_node(VIRTUAL_ROOT)
         for node_id in sorted(contracted.nodes):
+            root_score = self.root_prior_score(contracted.nodes[node_id])
             graph.add_node(node_id)
             graph.add_edge(
                 VIRTUAL_ROOT,
                 node_id,
-                weight=0.0,
-                score=0.0,
+                weight=root_score,
+                score=root_score,
                 label=NONE,
                 synthetic_root=True,
+                domain_prior="abstract_root" if root_score > 0.0 else None,
             )
 
         edge_index = normalize_edge_index(edge_index)
@@ -203,7 +208,8 @@ class TreeDecoder:
             target = contracted.old_to_super.get(raw_target)
             if source is None or target is None or source == target:
                 continue
-            parent_score = float(probs[edge_pos, PARENT_CHILD].item())
+            raw_parent_score = float(probs[edge_pos, PARENT_CHILD].item())
+            parent_score = self.parent_prior_score(contracted.nodes[source], contracted.nodes[target], raw_parent_score)
             label = int(probs[edge_pos].argmax().item())
             if parent_score < self.config.parent_threshold:
                 continue
@@ -216,6 +222,7 @@ class TreeDecoder:
                 target,
                 weight=parent_score,
                 score=parent_score,
+                raw_score=raw_parent_score,
                 label=PARENT_CHILD,
                 synthetic_root=False,
             )
@@ -237,6 +244,19 @@ class TreeDecoder:
             )
         decoded.sort(key=lambda edge: (min(contracted.nodes[edge.target].merged_node_ids), edge.source, edge.target))
         return decoded
+
+    def root_prior_score(self, node: ResolvedNode) -> float:
+        if is_abstract_root_candidate(node):
+            return self.config.abstract_root_weight
+        return 0.0
+
+    def parent_prior_score(self, source: ResolvedNode, target: ResolvedNode, raw_score: float) -> float:
+        if canonical_render_type(source.record) == "text" and canonical_render_type(target.record) == "text":
+            return (
+                raw_score * self.config.text_text_parent_weight_scale
+                + self.config.text_text_parent_weight_bias
+            )
+        return raw_score
 
     def decode_sibling_edges(self, contracted: ContractedGraph, edge_index: Any, probs: Any) -> list[DecodedEdge]:
         if not self.config.include_sibling_edges:
@@ -563,6 +583,14 @@ def can_contract_merge_records(left: dict[str, Any], right: dict[str, Any]) -> b
     left_type = canonical_render_type(left)
     right_type = canonical_render_type(right)
     return left_type == right_type and left_type in MERGE_COMPATIBLE_TYPES
+
+
+def is_abstract_root_candidate(node: ResolvedNode) -> bool:
+    block_type = canonical_render_type(node.record)
+    if block_type not in {"title", "text"}:
+        return False
+    text = " ".join(node.text.split())
+    return bool(re.search(r"\babstract\b", text[:120], flags=re.IGNORECASE))
 
 
 def render_title(text: str, *, depth: int) -> str:

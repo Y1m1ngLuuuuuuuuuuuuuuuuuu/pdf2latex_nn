@@ -109,6 +109,51 @@ def test_tree_decoder_msa_keeps_forest_roots_under_virtual_root():
     assert [child.node_id for child in root.children[0].children] == [1]
 
 
+def test_tree_decoder_forces_abstract_title_to_virtual_root():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "Paper Title"},
+        {"type": "title", "text": "Abstract"},
+    ]
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    scores = torch.tensor([[0.01, 0.99, 0.0, 0.0]], dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.0)).decode(records, edge_index, scores)
+
+    assert [child.text for child in root.children] == ["Paper Title", "Abstract"]
+    assert root.children[0].children == []
+
+
+def test_tree_decoder_suppresses_text_to_text_parent_edges():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "Introduction"},
+        {"type": "paragraph", "text": "First body paragraph."},
+        {"type": "paragraph", "text": "Second body paragraph."},
+    ]
+    edge_index = torch.tensor([[1, 0], [2, 2]], dtype=torch.long)
+    scores = torch.tensor(
+        [
+            [0.01, 0.95, 0.01, 0.03],
+            [0.01, 0.10, 0.01, 0.88],
+        ],
+        dtype=torch.float32,
+    )
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.0)).decode(records, edge_index, scores)
+
+    title = root.children[0]
+    assert title.text == "Introduction"
+    assert [child.text for child in title.children] == ["Second body paragraph."]
+    assert root.children[1].text == "First body paragraph."
+
+
 def test_tree_decoder_dfs_renderer_escapes_text_but_not_equations():
     records = [
         {"type": "title", "text": "Intro_50%"},
