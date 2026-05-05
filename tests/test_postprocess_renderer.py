@@ -114,6 +114,13 @@ def test_escape_latex_covers_reserved_characters():
     assert escape_latex(r"a_b & 50% #1") == r"a\_b \& 50\% \#1"
 
 
+def test_escape_latex_maps_unicode_math_and_falls_back_to_ascii():
+    assert escape_latex("ϵ γ ≤ ∈ • café") == (
+        r"\ensuremath{\epsilon} \ensuremath{\gamma} \ensuremath{\leq} "
+        r"\ensuremath{\in} \textbullet{} cafe"
+    )
+
+
 def test_build_resolved_tree_merges_text_and_renderer_emits_tex_document():
     records = [
         {"type": "title", "text": "Introduction"},

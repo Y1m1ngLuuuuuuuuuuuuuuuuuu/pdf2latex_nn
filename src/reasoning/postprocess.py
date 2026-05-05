@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -580,4 +581,133 @@ def escape_latex(text: str) -> str:
         "~": r"\textasciitilde{}",
         "^": r"\textasciicircum{}",
     }
-    return "".join(replacements.get(char, char) for char in str(text))
+    return "".join(_escape_latex_char(char, replacements) for char in str(text))
+
+
+def _escape_latex_char(char: str, replacements: dict[str, str]) -> str:
+    if char in UNICODE_LATEX_REPLACEMENTS:
+        return UNICODE_LATEX_REPLACEMENTS[char]
+    if char in replacements:
+        return replacements[char]
+    if ord(char) < 128:
+        return char
+    ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+    if ascii_fallback:
+        return "".join(replacements.get(fallback_char, fallback_char) for fallback_char in ascii_fallback)
+    return "?"
+
+
+UNICODE_LATEX_REPLACEMENTS = {
+    "α": r"\ensuremath{\alpha}",
+    "β": r"\ensuremath{\beta}",
+    "γ": r"\ensuremath{\gamma}",
+    "δ": r"\ensuremath{\delta}",
+    "ϵ": r"\ensuremath{\epsilon}",
+    "ε": r"\ensuremath{\epsilon}",
+    "ζ": r"\ensuremath{\zeta}",
+    "η": r"\ensuremath{\eta}",
+    "θ": r"\ensuremath{\theta}",
+    "ι": r"\ensuremath{\iota}",
+    "κ": r"\ensuremath{\kappa}",
+    "λ": r"\ensuremath{\lambda}",
+    "μ": r"\ensuremath{\mu}",
+    "ν": r"\ensuremath{\nu}",
+    "ξ": r"\ensuremath{\xi}",
+    "π": r"\ensuremath{\pi}",
+    "ρ": r"\ensuremath{\rho}",
+    "σ": r"\ensuremath{\sigma}",
+    "τ": r"\ensuremath{\tau}",
+    "υ": r"\ensuremath{\upsilon}",
+    "φ": r"\ensuremath{\phi}",
+    "χ": r"\ensuremath{\chi}",
+    "ψ": r"\ensuremath{\psi}",
+    "ω": r"\ensuremath{\omega}",
+    "Γ": r"\ensuremath{\Gamma}",
+    "Δ": r"\ensuremath{\Delta}",
+    "Θ": r"\ensuremath{\Theta}",
+    "Λ": r"\ensuremath{\Lambda}",
+    "Ξ": r"\ensuremath{\Xi}",
+    "Π": r"\ensuremath{\Pi}",
+    "Σ": r"\ensuremath{\Sigma}",
+    "Φ": r"\ensuremath{\Phi}",
+    "Ψ": r"\ensuremath{\Psi}",
+    "Ω": r"\ensuremath{\Omega}",
+    "≤": r"\ensuremath{\leq}",
+    "≥": r"\ensuremath{\geq}",
+    "≠": r"\ensuremath{\neq}",
+    "≈": r"\ensuremath{\approx}",
+    "±": r"\ensuremath{\pm}",
+    "×": r"\ensuremath{\times}",
+    "÷": r"\ensuremath{\div}",
+    "∞": r"\ensuremath{\infty}",
+    "∂": r"\ensuremath{\partial}",
+    "∇": r"\ensuremath{\nabla}",
+    "∑": r"\ensuremath{\sum}",
+    "∫": r"\ensuremath{\int}",
+    "∈": r"\ensuremath{\in}",
+    "∉": r"\ensuremath{\notin}",
+    "∋": r"\ensuremath{\ni}",
+    "⊂": r"\ensuremath{\subset}",
+    "⊆": r"\ensuremath{\subseteq}",
+    "⊃": r"\ensuremath{\supset}",
+    "⊇": r"\ensuremath{\supseteq}",
+    "∪": r"\ensuremath{\cup}",
+    "∩": r"\ensuremath{\cap}",
+    "∧": r"\ensuremath{\wedge}",
+    "∨": r"\ensuremath{\vee}",
+    "¬": r"\ensuremath{\neg}",
+    "∀": r"\ensuremath{\forall}",
+    "∃": r"\ensuremath{\exists}",
+    "∅": r"\ensuremath{\emptyset}",
+    "∝": r"\ensuremath{\propto}",
+    "∼": r"\ensuremath{\sim}",
+    "≃": r"\ensuremath{\simeq}",
+    "≅": r"\ensuremath{\cong}",
+    "≡": r"\ensuremath{\equiv}",
+    "≪": r"\ensuremath{\ll}",
+    "≫": r"\ensuremath{\gg}",
+    "⋅": r"\ensuremath{\cdot}",
+    "·": r"\ensuremath{\cdot}",
+    "∗": r"\ensuremath{*}",
+    "√": r"\ensuremath{\sqrt{\ }}",
+    "→": r"\ensuremath{\rightarrow}",
+    "←": r"\ensuremath{\leftarrow}",
+    "↔": r"\ensuremath{\leftrightarrow}",
+    "⟶": r"\ensuremath{\longrightarrow}",
+    "⟵": r"\ensuremath{\longleftarrow}",
+    "⇔": r"\ensuremath{\Leftrightarrow}",
+    "⇒": r"\ensuremath{\Rightarrow}",
+    "⇐": r"\ensuremath{\Leftarrow}",
+    "′": r"\ensuremath{'}",
+    "″": r"\ensuremath{''}",
+    "°": r"\ensuremath{^\circ}",
+    "¹": r"\ensuremath{^1}",
+    "²": r"\ensuremath{^2}",
+    "³": r"\ensuremath{^3}",
+    "⁰": r"\ensuremath{^0}",
+    "⁴": r"\ensuremath{^4}",
+    "⁵": r"\ensuremath{^5}",
+    "⁶": r"\ensuremath{^6}",
+    "⁷": r"\ensuremath{^7}",
+    "⁸": r"\ensuremath{^8}",
+    "⁹": r"\ensuremath{^9}",
+    "₀": r"\ensuremath{_0}",
+    "₁": r"\ensuremath{_1}",
+    "₂": r"\ensuremath{_2}",
+    "₃": r"\ensuremath{_3}",
+    "₄": r"\ensuremath{_4}",
+    "₅": r"\ensuremath{_5}",
+    "₆": r"\ensuremath{_6}",
+    "₇": r"\ensuremath{_7}",
+    "₈": r"\ensuremath{_8}",
+    "₉": r"\ensuremath{_9}",
+    "–": "--",
+    "—": "---",
+    "−": r"\ensuremath{-}",
+    "•": r"\textbullet{}",
+    "“": "``",
+    "”": "''",
+    "‘": "`",
+    "’": "'",
+    "´": "'",
+}
