@@ -86,6 +86,7 @@ class TreeDecoder:
 
         probs = self.edge_probabilities(scores)
         contracted = self.contract_merge_nodes(node_records, edge_index, probs)
+        contracted = self.semantic_title_deduplication(contracted)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs)
         sibling_edges = self.decode_sibling_edges(contracted, edge_index, probs)
         return self.build_tree(contracted, parent_edges + sibling_edges)
@@ -97,6 +98,7 @@ class TreeDecoder:
         node_count = resolve_num_nodes(edge_index, scores, num_nodes=num_nodes)
         node_records = [{"type": "text", "text": "", "_disable_domain_priors": True} for _ in range(node_count)]
         contracted = self.contract_merge_nodes(node_records, edge_index, probs)
+        contracted = self.semantic_title_deduplication(contracted)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs)
         sibling_edges = self.decode_sibling_edges(contracted, edge_index, probs)
         return contracted.merge_edges + parent_edges + sibling_edges
@@ -173,6 +175,54 @@ class TreeDecoder:
                 old_to_super[member] = canonical_id
 
         return ContractedGraph(nodes=nodes, old_to_super=old_to_super, merge_edges=merge_edges)
+
+    def semantic_title_deduplication(self, contracted: ContractedGraph) -> ContractedGraph:
+        """Alias duplicate title supernodes before NetworkX tree decoding."""
+
+        seen_titles: dict[str, int] = {}
+        alias_map: dict[int, int] = {}
+
+        ordered_node_ids = sorted(
+            contracted.nodes,
+            key=lambda node_id: min(contracted.nodes[node_id].merged_node_ids or [node_id]),
+        )
+        for node_id in ordered_node_ids:
+            node = contracted.nodes[node_id]
+            if canonical_render_type(node.record) != "title":
+                continue
+            normalized_title = normalize_title_text_for_dedup(node.text)
+            if len(normalized_title.replace(" ", "")) < 3:
+                continue
+            if normalized_title in seen_titles:
+                alias_map[node_id] = seen_titles[normalized_title]
+            else:
+                seen_titles[normalized_title] = node_id
+
+        if not alias_map:
+            return contracted
+
+        def resolve_alias(node_id: int) -> int:
+            seen: set[int] = set()
+            while node_id in alias_map and node_id not in seen:
+                seen.add(node_id)
+                node_id = alias_map[node_id]
+            return node_id
+
+        pruned_nodes = {
+            node_id: node
+            for node_id, node in contracted.nodes.items()
+            if node_id not in alias_map
+        }
+        rerouted_old_to_super = {
+            raw_node_id: resolve_alias(super_node_id)
+            for raw_node_id, super_node_id in contracted.old_to_super.items()
+        }
+        rerouted_merge_edges = reroute_decoded_edges(contracted.merge_edges, alias_map, resolve_alias)
+        return ContractedGraph(
+            nodes=pruned_nodes,
+            old_to_super=rerouted_old_to_super,
+            merge_edges=rerouted_merge_edges,
+        )
 
     def maximum_parent_arborescence(
         self,
@@ -587,6 +637,29 @@ def can_contract_merge_records(left: dict[str, Any], right: dict[str, Any]) -> b
     left_type = canonical_render_type(left)
     right_type = canonical_render_type(right)
     return left_type == right_type and left_type in MERGE_COMPATIBLE_TYPES
+
+
+def normalize_title_text_for_dedup(text: str) -> str:
+    lowered = str(text or "").casefold().strip()
+    without_punctuation = "".join(
+        char for char in lowered if not unicodedata.category(char).startswith("P")
+    )
+    return " ".join(without_punctuation.split())
+
+
+def reroute_decoded_edges(
+    edges: list[DecodedEdge],
+    alias_map: dict[int, int],
+    resolve_alias: Any,
+) -> list[DecodedEdge]:
+    rerouted: list[DecodedEdge] = []
+    for edge in edges:
+        source = resolve_alias(edge.source) if edge.source in alias_map else edge.source
+        target = resolve_alias(edge.target) if edge.target in alias_map else edge.target
+        if source == target:
+            continue
+        rerouted.append(DecodedEdge(source=source, target=target, label=edge.label, score=edge.score))
+    return rerouted
 
 
 def is_abstract_root_candidate(node: ResolvedNode) -> bool:

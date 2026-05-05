@@ -154,6 +154,34 @@ def test_tree_decoder_suppresses_text_to_text_parent_edges():
     assert root.children[1].text == "First body paragraph."
 
 
+def test_tree_decoder_deduplicates_semantic_ghost_titles_and_reroutes_edges():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "References."},
+        {"type": "title", "text": "REFERENCES"},
+        {"type": "paragraph", "text": "A cited work."},
+    ]
+    edge_index = torch.tensor([[1, 1], [0, 2]], dtype=torch.long)
+    scores = torch.tensor(
+        [
+            [0.01, 0.99, 0.0, 0.0],
+            [0.01, 0.98, 0.0, 0.01],
+        ],
+        dtype=torch.float32,
+    )
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.0)).decode(records, edge_index, scores)
+    tex = TreeDecoder().render_document(root)
+
+    assert [child.text for child in root.children] == ["References."]
+    assert [child.text for child in root.children[0].children] == ["A cited work."]
+    assert tex.count(r"\section{References.}") == 1
+    assert "REFERENCES" not in tex
+
+
 def test_tree_decoder_dfs_renderer_escapes_text_but_not_equations():
     records = [
         {"type": "title", "text": "Intro_50%"},
