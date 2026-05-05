@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,7 @@ SIBLING = 2
 NONE = 3
 VIRTUAL_ROOT = "__ROOT__"
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
+DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 
 
 @dataclass(frozen=True)
@@ -542,7 +544,10 @@ def render_equation(text: str) -> str:
     stripped = text.strip()
     if not stripped:
         return "\\[\n\n\\]"
-    if stripped.startswith("\\begin{") or stripped.startswith("\\[") or stripped.startswith("$$"):
+    if stripped.startswith("\\[") or stripped.startswith("$$"):
+        return stripped
+    begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
+    if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
         return stripped
     return "\\[\n" + stripped + "\n\\]"
 
