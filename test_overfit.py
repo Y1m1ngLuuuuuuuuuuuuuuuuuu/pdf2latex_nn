@@ -53,6 +53,8 @@ class OverfitRunArtifacts:
     model_state_dict: Any
     model_config: Any
     args: dict[str, Any]
+    best_epoch: int
+    best_macro_f1_present_classes: float
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -131,6 +133,9 @@ def run_overfit(args: argparse.Namespace) -> OverfitRunArtifacts:
     final_loss = float("inf")
     final_all_macro = 0.0
     final_present_macro = 0.0
+    best_epoch = 0
+    best_present_macro = -1.0
+    best_state_dict: dict[str, Any] | None = None
     for epoch in range(1, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -147,9 +152,18 @@ def run_overfit(args: argparse.Namespace) -> OverfitRunArtifacts:
         if epoch == 1 or epoch == args.epochs or epoch % max(1, args.log_every) == 0:
             final_loss, final_all_macro, final_present_macro, per_class = evaluate_on_batch(model, batch, loss_fn)
             print_epoch(epoch, final_loss, final_all_macro, final_present_macro, per_class)
+            if final_present_macro > best_present_macro:
+                best_present_macro = final_present_macro
+                best_epoch = epoch
+                best_state_dict = {key: value.detach().cpu() for key, value in model.state_dict().items()}
 
     final_loss, final_all_macro, final_present_macro, per_class = evaluate_on_batch(model, batch, loss_fn)
     print_epoch(args.epochs, final_loss, final_all_macro, final_present_macro, per_class, prefix="final")
+    if final_present_macro > best_present_macro or best_state_dict is None:
+        best_present_macro = final_present_macro
+        best_epoch = args.epochs
+        best_state_dict = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+    print(f"best_checkpoint_epoch={best_epoch} best_macro_f1_present={best_present_macro:.4f}")
     passed = final_loss <= args.loss_threshold and final_present_macro >= args.f1_threshold
     result = OverfitResult(
         final_loss=final_loss,
@@ -164,9 +178,11 @@ def run_overfit(args: argparse.Namespace) -> OverfitRunArtifacts:
     )
     return OverfitRunArtifacts(
         result=result,
-        model_state_dict={key: value.detach().cpu() for key, value in model.state_dict().items()},
+        model_state_dict=best_state_dict,
         model_config=model.config,
         args=serializable_args(args),
+        best_epoch=best_epoch,
+        best_macro_f1_present_classes=best_present_macro,
     )
 
 
@@ -180,7 +196,10 @@ def save_overfit_checkpoint(path: Path, artifacts: OverfitRunArtifacts) -> None:
             "config": artifacts.model_config,
             "result": asdict(artifacts.result),
             "args": artifacts.args,
+            "best_epoch": artifacts.best_epoch,
+            "best_macro_f1_present_classes": artifacts.best_macro_f1_present_classes,
             "checkpoint_type": "single_batch_overfit",
+            "checkpoint_selection": "best_logged_macro_f1_present",
         },
         path,
     )
