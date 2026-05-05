@@ -12,6 +12,7 @@ DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref"]
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 DEFAULT_PREAMBLE_COMMANDS = [r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}"]
+LIST_MARKER_RE = re.compile(r"^\s*(?:\u2022|\u25E6|\-|\*|[0-9]+\.|[a-zA-Z]\.)\s+")
 
 
 @dataclass
@@ -34,8 +35,7 @@ def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
     if cfg.title:
         lines.append(r"\maketitle")
         lines.append("")
-    for child in getattr(root, "children", []):
-        rendered = render_node(child, depth=0)
+    for rendered in render_child_blocks_with_dynamic_lists(getattr(root, "children", []), depth=0):
         if rendered:
             lines.append(rendered)
             lines.append("")
@@ -51,7 +51,7 @@ def render_node(node: Any, *, depth: int = 0) -> str:
 
     if block_type == "title":
         body = [render_title(text, depth=depth)] if text else []
-        body.extend(render_child_block(child, depth=depth + 1) for child in children)
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
         return "\n\n".join(part for part in body if part)
     if block_type == "equation":
         return render_equation(text)
@@ -70,15 +70,59 @@ def render_node(node: Any, *, depth: int = 0) -> str:
         return render_list_node(node, depth=depth)
 
     paragraph = render_textual_content(record, text) if text else ""
-    rendered_children = [render_child_block(child, depth=depth + 1) for child in children]
+    rendered_children = render_child_blocks_with_dynamic_lists(children, depth=depth + 1)
     parts = [paragraph] if paragraph else []
     parts.extend(part for part in rendered_children if part)
     return "\n\n".join(parts)
 
 
+def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list[str]:
+    child_list = list(children or [])
+    rendered: list[str] = []
+    index = 0
+    while index < len(child_list):
+        child = child_list[index]
+        if is_bullet_list_candidate(child):
+            run: list[Any] = []
+            while index < len(child_list) and is_bullet_list_candidate(child_list[index]):
+                run.append(child_list[index])
+                index += 1
+            rendered.append(render_dynamic_itemize(run, depth=depth))
+            continue
+        block = render_child_block(child, depth=depth)
+        if block:
+            rendered.append(block)
+        index += 1
+    return rendered
+
+
 def render_child_block(child: Any, *, depth: int) -> str:
     rendered = render_node(child, depth=depth)
     return rendered.strip()
+
+
+def is_bullet_list_candidate(node: Any) -> bool:
+    record = getattr(node, "record", node if isinstance(node, dict) else {})
+    if canonical_render_type(record) != "text":
+        return False
+    return bool(LIST_MARKER_RE.match(node_text(node)))
+
+
+def render_dynamic_itemize(items: list[Any], *, depth: int) -> str:
+    lines = [r"\begin{itemize}"]
+    for item in items:
+        item_text = strip_list_marker(node_text(item))
+        item_body = escape_latex(item_text) if item_text else ""
+        nested = render_child_blocks_with_dynamic_lists(getattr(item, "children", []), depth=depth + 1)
+        if nested:
+            item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
+        lines.append(rf"\item {item_body}".rstrip())
+    lines.append(r"\end{itemize}")
+    return "\n".join(lines)
+
+
+def strip_list_marker(text: str) -> str:
+    return LIST_MARKER_RE.sub("", str(text or ""), count=1).strip()
 
 
 def render_list_node(node: Any, *, depth: int) -> str:

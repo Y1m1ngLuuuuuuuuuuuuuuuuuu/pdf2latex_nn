@@ -17,6 +17,7 @@ SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subp
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
 DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
+LIST_MARKER_RE = re.compile(r"^\s*(?:\u2022|\u25E6|\-|\*|[0-9]+\.|[a-zA-Z]\.)\s+")
 
 
 @dataclass(frozen=True)
@@ -382,8 +383,8 @@ class TreeDecoder:
         if is_root:
             return "\n\n".join(
                 rendered
-                for child in node.children
-                if (rendered := self.render_node(child, depth=0).strip())
+                for rendered in self.render_child_blocks_with_dynamic_lists(node.children, depth=0)
+                if rendered
             )
 
         block_type = canonical_render_type(node.record)
@@ -391,7 +392,7 @@ class TreeDecoder:
         children = list(node.children)
         if block_type == "title":
             parts = [render_title(text, depth=depth)] if text else []
-            parts.extend(self.render_node(child, depth=depth + 1).strip() for child in children)
+            parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
             return "\n\n".join(part for part in parts if part)
         if block_type == "equation":
             return render_equation(text)
@@ -408,8 +409,39 @@ class TreeDecoder:
             return self.render_list(node, depth=depth)
 
         parts = [render_textual_node(node)] if text else []
-        parts.extend(self.render_node(child, depth=depth + 1).strip() for child in children)
+        parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
         return "\n\n".join(part for part in parts if part)
+
+    def render_child_blocks_with_dynamic_lists(self, children: list[ResolvedNode], *, depth: int) -> list[str]:
+        rendered: list[str] = []
+        index = 0
+        child_list = list(children or [])
+        while index < len(child_list):
+            child = child_list[index]
+            if is_bullet_list_candidate(child):
+                run: list[ResolvedNode] = []
+                while index < len(child_list) and is_bullet_list_candidate(child_list[index]):
+                    run.append(child_list[index])
+                    index += 1
+                rendered.append(self.render_dynamic_itemize(run, depth=depth))
+                continue
+            block = self.render_node(child, depth=depth).strip()
+            if block:
+                rendered.append(block)
+            index += 1
+        return rendered
+
+    def render_dynamic_itemize(self, items: list[ResolvedNode], *, depth: int) -> str:
+        lines = [r"\begin{itemize}"]
+        for item in items:
+            item_text = strip_list_marker(item.text)
+            item_body = escape_latex(item_text) if item_text else ""
+            nested = self.render_child_blocks_with_dynamic_lists(item.children, depth=depth + 1)
+            if nested:
+                item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
+            lines.append(rf"\item {item_body}".rstrip())
+        lines.append(r"\end{itemize}")
+        return "\n".join(lines)
 
     def render_list(self, node: ResolvedNode, *, depth: int = 0) -> str:
         if not node.children:
@@ -637,6 +669,16 @@ def can_contract_merge_records(left: dict[str, Any], right: dict[str, Any]) -> b
     left_type = canonical_render_type(left)
     right_type = canonical_render_type(right)
     return left_type == right_type and left_type in MERGE_COMPATIBLE_TYPES
+
+
+def is_bullet_list_candidate(node: ResolvedNode) -> bool:
+    if canonical_render_type(node.record) != "text":
+        return False
+    return bool(LIST_MARKER_RE.match(node.text))
+
+
+def strip_list_marker(text: str) -> str:
+    return LIST_MARKER_RE.sub("", str(text or ""), count=1).strip()
 
 
 def normalize_title_text_for_dedup(text: str) -> str:

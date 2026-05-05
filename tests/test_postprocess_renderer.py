@@ -255,6 +255,31 @@ def test_tree_decoder_renders_list_children_as_items_with_raw_equations():
     assert r"\theta\_i" not in tex
 
 
+def test_tree_decoder_wraps_consecutive_bullet_text_siblings_in_itemize():
+    records = [
+        {"type": "title", "text": "Contributions"},
+        {"type": "paragraph", "text": "Lead paragraph."},
+        {"type": "paragraph", "text": "• First_item"},
+        {"type": "paragraph", "text": "2. Second item"},
+        {"type": "paragraph", "text": "After paragraph."},
+    ]
+    decoded = [
+        DecodedEdge(source=0, target=1, label=PARENT_CHILD, score=0.9),
+        DecodedEdge(source=0, target=2, label=PARENT_CHILD, score=0.9),
+        DecodedEdge(source=0, target=3, label=PARENT_CHILD, score=0.9),
+        DecodedEdge(source=0, target=4, label=PARENT_CHILD, score=0.9),
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, decoded))
+
+    assert "Lead paragraph.\n\n\\begin{itemize}" in tex
+    assert tex.count(r"\begin{itemize}") == 1
+    assert r"\item First\_item" in tex
+    assert r"\item Second item" in tex
+    assert "\\end{itemize}\n\nAfter paragraph." in tex
+    assert r"\textbullet{} First" not in tex
+
+
 def test_generation_renderer_uses_node_type_dispatch_for_titles_and_math():
     root = type("Root", (), {})()
     title = {"type": "title", "text": "Method_1", "children": [{"type": "title", "text": "Details_2"}]}
@@ -267,6 +292,24 @@ def test_generation_renderer_uses_node_type_dispatch_for_titles_and_math():
     assert "\\[\n\\theta_i = x_i\n\\]" in tex
     assert r"$a_b$" in tex
     assert r"\theta\_i" not in tex
+
+
+def test_generation_renderer_wraps_mixed_bullet_sibling_runs():
+    root = type("Root", (), {})()
+    root.children = [
+        {"type": "paragraph", "text": "Before."},
+        {"type": "paragraph", "text": "- Alpha_item"},
+        {"type": "paragraph", "text": "b. Beta item"},
+        {"type": "paragraph", "text": "After."},
+    ]
+
+    tex = render_latex_document(root)
+
+    assert "Before.\n\n\\begin{itemize}" in tex
+    assert tex.count(r"\begin{itemize}") == 1
+    assert r"\item Alpha\_item" in tex
+    assert r"\item Beta item" in tex
+    assert "\\end{itemize}\n\nAfter." in tex
 
 
 def test_generation_renderer_preserves_structured_inline_formula_segments():
