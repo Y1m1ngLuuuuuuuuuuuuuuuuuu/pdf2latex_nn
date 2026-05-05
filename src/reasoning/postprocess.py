@@ -314,12 +314,13 @@ class TreeDecoder:
         text = node.text
         children = list(node.children)
         if block_type == "title":
-            command = SECTION_COMMANDS[min(depth, len(SECTION_COMMANDS) - 1)]
-            parts = [rf"\{command}{{{escape_latex(text)}}}"] if text else []
+            parts = [render_title(text, depth=depth)] if text else []
             parts.extend(self.render_node(child, depth=depth + 1).strip() for child in children)
             return "\n\n".join(part for part in parts if part)
         if block_type == "equation":
             return render_equation(text)
+        if block_type == "inline_math":
+            return render_inline_math(text)
         if block_type in {"table", "algorithm", "code"}:
             return render_verbatim_like(text, block_type)
         if block_type == "figure":
@@ -339,12 +340,23 @@ class TreeDecoder:
             return "\\begin{itemize}\n" + rf"\item {escape_latex(node.text)}" + "\n\\end{itemize}"
         lines = [r"\begin{itemize}"]
         for child in node.children:
-            child_text = escape_latex(child.text) if child.text else ""
-            nested = [self.render_node(grandchild, depth=depth + 1).strip() for grandchild in child.children]
-            item = (child_text + ("\n" + "\n".join(part for part in nested if part) if nested else "")).strip()
+            item = self.render_list_item(child, depth=depth + 1)
             lines.append(rf"\item {item}".rstrip())
         lines.append(r"\end{itemize}")
         return "\n".join(lines)
+
+    def render_list_item(self, node: ResolvedNode, *, depth: int = 0) -> str:
+        block_type = canonical_render_type(node.record)
+        if block_type == "equation":
+            item_body = render_equation(node.text)
+        elif block_type == "inline_math":
+            item_body = render_inline_math(node.text)
+        else:
+            item_body = escape_latex(node.text) if node.text else ""
+        nested = [self.render_node(grandchild, depth=depth + 1).strip() for grandchild in node.children]
+        if nested:
+            item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
+        return item_body
 
 
 def greedy_decode_relations(
@@ -526,8 +538,10 @@ def canonical_render_type(record: dict[str, Any]) -> str:
         return "text"
     if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
         return "title"
-    if raw in {"equation", "equation_interline", "display_formula", "formula"}:
+    if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
         return "equation"
+    if raw in {"inline_math", "inline_formula", "math_inline"}:
+        return "inline_math"
     if raw == "table":
         return "table"
     if raw in {"figure", "image", "chart"}:
@@ -549,8 +563,13 @@ def can_contract_merge_records(left: dict[str, Any], right: dict[str, Any]) -> b
     return left_type == right_type and left_type in MERGE_COMPATIBLE_TYPES
 
 
+def render_title(text: str, *, depth: int) -> str:
+    command = SECTION_COMMANDS[min(depth, len(SECTION_COMMANDS) - 1)]
+    return rf"\{command}{{{escape_latex(text)}}}"
+
+
 def render_equation(text: str) -> str:
-    stripped = text.strip()
+    stripped = str(text or "").strip()
     if not stripped:
         return "\\[\n\n\\]"
     if stripped.startswith("\\[") or stripped.startswith("$$"):
@@ -559,6 +578,15 @@ def render_equation(text: str) -> str:
     if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
         return stripped
     return "\\[\n" + stripped + "\n\\]"
+
+
+def render_inline_math(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return "$$"
+    if stripped.startswith("$") or stripped.startswith(r"\("):
+        return stripped
+    return "$" + stripped + "$"
 
 
 def render_references(record: dict[str, Any], fallback_text: str) -> str:

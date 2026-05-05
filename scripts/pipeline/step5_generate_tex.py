@@ -102,6 +102,8 @@ def canonical_content_type(value: Any) -> str:
         return "title"
     if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
         return "equation"
+    if raw in {"inline_math", "inline_formula", "math_inline"}:
+        return "inline_math"
     if raw in {"table"}:
         return "table"
     if raw in {"figure", "image", "chart"}:

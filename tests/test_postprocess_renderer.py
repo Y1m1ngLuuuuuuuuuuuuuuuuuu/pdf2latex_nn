@@ -129,6 +129,50 @@ def test_tree_decoder_dfs_renderer_escapes_text_but_not_equations():
     assert "mc\\textasciicircum{}2" not in tex
 
 
+def test_tree_decoder_renders_inline_math_without_escaping():
+    records = [
+        {"type": "title", "text": "Math"},
+        {"type": "inline_math", "text": r"x_i + y_j"},
+    ]
+    decoded = [DecodedEdge(source=0, target=1, label=PARENT_CHILD, score=0.9)]
+    tex = TreeDecoder().render_document(build_resolved_tree(records, decoded))
+
+    assert r"$x_i + y_j$" in tex
+    assert r"x\_i" not in tex
+
+
+def test_tree_decoder_renders_list_children_as_items_with_raw_equations():
+    records = [
+        {"type": "list", "text": "Contributions"},
+        {"type": "paragraph", "text": "Plain_item"},
+        {"type": "equation", "text": r"\theta_i = x_i"},
+    ]
+    decoded = [
+        DecodedEdge(source=0, target=1, label=PARENT_CHILD, score=0.9),
+        DecodedEdge(source=0, target=2, label=PARENT_CHILD, score=0.8),
+    ]
+    tex = TreeDecoder().render_document(build_resolved_tree(records, decoded))
+
+    assert r"\begin{itemize}" in tex
+    assert r"\item Plain\_item" in tex
+    assert "\\item \\[\n\\theta_i = x_i\n\\]" in tex
+    assert r"\theta\_i" not in tex
+
+
+def test_generation_renderer_uses_node_type_dispatch_for_titles_and_math():
+    root = type("Root", (), {})()
+    title = {"type": "title", "text": "Method_1", "children": [{"type": "title", "text": "Details_2"}]}
+    root.children = [title, {"type": "equation", "text": r"\theta_i = x_i"}, {"type": "inline_math", "text": r"a_b"}]
+
+    tex = render_latex_document(root)
+
+    assert r"\section{Method\_1}" in tex
+    assert r"\subsection{Details\_2}" in tex
+    assert "\\[\n\\theta_i = x_i\n\\]" in tex
+    assert r"$a_b$" in tex
+    assert r"\theta\_i" not in tex
+
+
 def test_escape_latex_covers_reserved_characters():
     assert escape_latex(r"a_b & 50% #1") == r"a\_b \& 50\% \#1"
 
