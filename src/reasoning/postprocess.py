@@ -95,7 +95,7 @@ class TreeDecoder:
 
         probs = self.edge_probabilities(scores)
         node_count = resolve_num_nodes(edge_index, scores, num_nodes=num_nodes)
-        node_records = [{"type": "text", "text": ""} for _ in range(node_count)]
+        node_records = [{"type": "text", "text": "", "_disable_domain_priors": True} for _ in range(node_count)]
         contracted = self.contract_merge_nodes(node_records, edge_index, probs)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs)
         sibling_edges = self.decode_sibling_edges(contracted, edge_index, probs)
@@ -246,11 +246,15 @@ class TreeDecoder:
         return decoded
 
     def root_prior_score(self, node: ResolvedNode) -> float:
+        if node.record.get("_disable_domain_priors"):
+            return 0.0
         if is_abstract_root_candidate(node):
             return self.config.abstract_root_weight
         return 0.0
 
     def parent_prior_score(self, source: ResolvedNode, target: ResolvedNode, raw_score: float) -> float:
+        if source.record.get("_disable_domain_priors") or target.record.get("_disable_domain_priors"):
+            return raw_score
         if canonical_render_type(source.record) == "text" and canonical_render_type(target.record) == "text":
             return (
                 raw_score * self.config.text_text_parent_weight_scale
