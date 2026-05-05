@@ -47,6 +47,14 @@ class OverfitResult:
     passed: bool
 
 
+@dataclass(frozen=True)
+class OverfitRunArtifacts:
+    result: OverfitResult
+    model_state_dict: Any
+    model_config: Any
+    args: dict[str, Any]
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="DocumentDataset root")
@@ -71,16 +79,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--report-json", type=Path, help="Optional path to write final metrics")
+    parser.add_argument("--checkpoint-output", type=Path, help="Optional path to save the overfit model checkpoint")
     parser.add_argument("--no-fail", action="store_true", help="Return 0 even if the overfit criterion fails")
     return parser
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    result = run_overfit(args)
+    artifacts = run_overfit(args)
+    result = artifacts.result
     if args.report_json:
         args.report_json.parent.mkdir(parents=True, exist_ok=True)
         args.report_json.write_text(json.dumps(asdict(result), ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.checkpoint_output:
+        save_overfit_checkpoint(args.checkpoint_output, artifacts)
     if result.passed:
         print("PASS: single-batch overfit criterion reached.")
         return 0
@@ -88,7 +100,7 @@ def main() -> int:
     return 0 if args.no_fail else 2
 
 
-def run_overfit(args: argparse.Namespace) -> OverfitResult:
+def run_overfit(args: argparse.Namespace) -> OverfitRunArtifacts:
     import torch
 
     set_seed(args.seed, torch=torch)
@@ -139,7 +151,7 @@ def run_overfit(args: argparse.Namespace) -> OverfitResult:
     final_loss, final_all_macro, final_present_macro, per_class = evaluate_on_batch(model, batch, loss_fn)
     print_epoch(args.epochs, final_loss, final_all_macro, final_present_macro, per_class, prefix="final")
     passed = final_loss <= args.loss_threshold and final_present_macro >= args.f1_threshold
-    return OverfitResult(
+    result = OverfitResult(
         final_loss=final_loss,
         macro_f1_all_classes=final_all_macro,
         macro_f1_present_classes=final_present_macro,
@@ -150,6 +162,36 @@ def run_overfit(args: argparse.Namespace) -> OverfitResult:
         class_counts=class_counts,
         passed=passed,
     )
+    return OverfitRunArtifacts(
+        result=result,
+        model_state_dict={key: value.detach().cpu() for key, value in model.state_dict().items()},
+        model_config=model.config,
+        args=serializable_args(args),
+    )
+
+
+def save_overfit_checkpoint(path: Path, artifacts: OverfitRunArtifacts) -> None:
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": artifacts.model_state_dict,
+            "config": artifacts.model_config,
+            "result": asdict(artifacts.result),
+            "args": artifacts.args,
+            "checkpoint_type": "single_batch_overfit",
+        },
+        path,
+    )
+    print(f"wrote checkpoint {path}")
+
+
+def serializable_args(args: argparse.Namespace) -> dict[str, Any]:
+    payload = {}
+    for key, value in vars(args).items():
+        payload[key] = str(value) if isinstance(value, Path) else value
+    return payload
 
 
 def build_overfit_model(args: argparse.Namespace) -> EdgeRelationGAT:

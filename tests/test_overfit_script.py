@@ -98,8 +98,10 @@ def test_overfit_script_runs_one_epoch_on_tiny_valid_graph(tmp_path):
         ]
     )
 
-    result = test_overfit.run_overfit(args)
+    artifacts = test_overfit.run_overfit(args)
+    result = artifacts.result
 
     assert result.num_documents == 1
     assert result.num_edges == 2
     assert result.class_counts["parent_child"] == 2
+    assert artifacts.model_state_dict
