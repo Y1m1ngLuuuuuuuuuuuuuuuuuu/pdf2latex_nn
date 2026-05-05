@@ -67,7 +67,7 @@ def render_node(node: Any, *, depth: int = 0) -> str:
     if block_type == "list":
         return render_list_node(node, depth=depth)
 
-    paragraph = escape_latex(text) if text else ""
+    paragraph = render_textual_content(record, text) if text else ""
     rendered_children = [render_child_block(child, depth=depth + 1) for child in children]
     parts = [paragraph] if paragraph else []
     parts.extend(part for part in rendered_children if part)
@@ -101,7 +101,7 @@ def render_list_item(node: Any, *, depth: int) -> str:
     elif block_type == "inline_math":
         item_body = render_inline_math(text)
     else:
-        item_body = escape_latex(text) if text else ""
+        item_body = render_textual_content(record, text) if text else ""
     nested = [render_node(grandchild, depth=depth + 1) for grandchild in getattr(node, "children", [])]
     if nested:
         item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
@@ -153,6 +153,44 @@ def render_inline_math(text: str) -> str:
     if stripped.startswith("$") or stripped.startswith(r"\("):
         return stripped
     return "$" + stripped + "$"
+
+
+def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
+    segments = extract_content_segments(record)
+    if not segments:
+        return escape_latex(fallback_text)
+    rendered: list[str] = []
+    for segment in segments:
+        segment_type = str(segment.get("type") or "").lower()
+        content = str(segment.get("content") or segment.get("text") or "")
+        if not content:
+            continue
+        if segment_type in {"equation_inline", "inline_equation", "inline_math", "inline_formula"}:
+            rendered.append(render_inline_math(content))
+        elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
+            rendered.append("\n\n" + render_equation(content) + "\n\n")
+        else:
+            rendered.append(escape_latex(content))
+    return normalize_latex_text("".join(rendered))
+
+
+def extract_content_segments(record: dict[str, Any]) -> list[dict[str, Any]]:
+    block = record.get("block")
+    if not isinstance(block, dict):
+        return []
+    content = block.get("content")
+    if isinstance(content, dict):
+        for key in ("paragraph_content", "title_content", "content"):
+            value = content.get(key)
+            if isinstance(value, list):
+                return [segment for segment in value if isinstance(segment, dict)]
+    if isinstance(content, list):
+        return [segment for segment in content if isinstance(segment, dict)]
+    return []
+
+
+def normalize_latex_text(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def node_text(node: Any) -> str:

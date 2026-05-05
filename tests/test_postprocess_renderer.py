@@ -141,6 +141,29 @@ def test_tree_decoder_renders_inline_math_without_escaping():
     assert r"x\_i" not in tex
 
 
+def test_tree_decoder_preserves_inline_formula_segments_in_paragraph_blocks():
+    records = [
+        {
+            "type": "paragraph",
+            "text": r"Given x _ { i } and y.",
+            "block": {
+                "content": {
+                    "paragraph_content": [
+                        {"type": "text", "content": "Given "},
+                        {"type": "equation_inline", "content": r"x _ { i }"},
+                        {"type": "text", "content": " and y_1."},
+                    ]
+                }
+            },
+        }
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"Given $x _ { i }$ and y\_1." in tex
+    assert r"\textbackslash{}" not in tex
+
+
 def test_tree_decoder_renders_list_children_as_items_with_raw_equations():
     records = [
         {"type": "list", "text": "Contributions"},
@@ -171,6 +194,30 @@ def test_generation_renderer_uses_node_type_dispatch_for_titles_and_math():
     assert "\\[\n\\theta_i = x_i\n\\]" in tex
     assert r"$a_b$" in tex
     assert r"\theta\_i" not in tex
+
+
+def test_generation_renderer_preserves_structured_inline_formula_segments():
+    root = type("Root", (), {})()
+    root.children = [
+        {
+            "type": "paragraph",
+            "text": r"Given x _ { i }.",
+            "block": {
+                "content": {
+                    "paragraph_content": [
+                        {"type": "text", "content": "Given "},
+                        {"type": "equation_inline", "content": r"x _ { i }"},
+                        {"type": "text", "content": "."},
+                    ]
+                }
+            },
+        }
+    ]
+
+    tex = render_latex_document(root)
+
+    assert r"Given $x _ { i }$." in tex
+    assert r"x \_ \{ i \}" not in tex
 
 
 def test_escape_latex_covers_reserved_characters():

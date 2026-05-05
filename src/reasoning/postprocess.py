@@ -331,7 +331,7 @@ class TreeDecoder:
         if block_type == "list":
             return self.render_list(node, depth=depth)
 
-        parts = [escape_latex(text)] if text else []
+        parts = [render_textual_node(node)] if text else []
         parts.extend(self.render_node(child, depth=depth + 1).strip() for child in children)
         return "\n\n".join(part for part in parts if part)
 
@@ -352,7 +352,7 @@ class TreeDecoder:
         elif block_type == "inline_math":
             item_body = render_inline_math(node.text)
         else:
-            item_body = escape_latex(node.text) if node.text else ""
+            item_body = render_textual_node(node) if node.text else ""
         nested = [self.render_node(grandchild, depth=depth + 1).strip() for grandchild in node.children]
         if nested:
             item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
@@ -587,6 +587,75 @@ def render_inline_math(text: str) -> str:
     if stripped.startswith("$") or stripped.startswith(r"\("):
         return stripped
     return "$" + stripped + "$"
+
+
+def render_textual_node(node: ResolvedNode) -> str:
+    records = [node.record] + [record for record in node.record.get("merged_records", []) if isinstance(record, dict)]
+    rendered_parts: list[str] = []
+    used_structured_content = False
+    for record in records:
+        rendered = render_textual_content(record, node_record_text(record))
+        if extract_content_segments(record):
+            used_structured_content = True
+        if rendered:
+            rendered_parts.append(rendered)
+    if used_structured_content and rendered_parts:
+        return merge_latex_fragments(rendered_parts)
+    return escape_latex(node.text)
+
+
+def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
+    segments = extract_content_segments(record)
+    if not segments:
+        return escape_latex(fallback_text)
+    rendered: list[str] = []
+    for segment in segments:
+        segment_type = str(segment.get("type") or "").lower()
+        content = str(segment.get("content") or segment.get("text") or "")
+        if not content:
+            continue
+        if segment_type in {"equation_inline", "inline_equation", "inline_math", "inline_formula"}:
+            rendered.append(render_inline_math(content))
+        elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
+            rendered.append("\n\n" + render_equation(content) + "\n\n")
+        else:
+            rendered.append(escape_latex(content))
+    return normalize_latex_text("".join(rendered))
+
+
+def extract_content_segments(record: dict[str, Any]) -> list[dict[str, Any]]:
+    block = record.get("block")
+    if not isinstance(block, dict):
+        return []
+    content = block.get("content")
+    if isinstance(content, dict):
+        for key in ("paragraph_content", "title_content", "content"):
+            value = content.get(key)
+            if isinstance(value, list):
+                return [segment for segment in value if isinstance(segment, dict)]
+    if isinstance(content, list):
+        return [segment for segment in content if isinstance(segment, dict)]
+    return []
+
+
+def merge_latex_fragments(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        part = normalize_latex_text(part)
+        if not part:
+            continue
+        if not text:
+            text = part
+            continue
+        if should_join_without_space(text, part):
+            text += part
+        else:
+            text += " " + part
+    return normalize_latex_text(text)
+
+
+def normalize_latex_text(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", str(text)).strip()
 
 
 def render_references(record: dict[str, Any], fallback_text: str) -> str:
