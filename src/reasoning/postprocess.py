@@ -16,6 +16,7 @@ VIRTUAL_ROOT = "__ROOT__"
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
+DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,7 @@ class TreeDecoder:
         lines = [rf"\documentclass{{{self.config.document_class}}}"]
         for package in self.config.packages:
             lines.append(rf"\usepackage{{{package}}}")
+        lines.extend(DEFAULT_PREAMBLE_COMMANDS)
         lines.append("")
         if title:
             lines.extend([rf"\title{{{escape_latex(title)}}}", r"\date{}", ""])

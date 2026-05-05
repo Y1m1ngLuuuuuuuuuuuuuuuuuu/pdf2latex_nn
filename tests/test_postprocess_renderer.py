@@ -263,6 +263,7 @@ def test_build_resolved_tree_merges_text_and_renderer_emits_tex_document():
     tex = render_latex_document(root, RenderConfig(title="Demo"))
 
     assert r"\documentclass{article}" in tex
+    assert r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}" in tex
     assert r"\section{Introduction}" in tex
     assert "Cybersecurity matters." in tex
     assert r"\usepackage{amsmath}" in tex

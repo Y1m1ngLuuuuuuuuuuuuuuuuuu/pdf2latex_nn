@@ -11,6 +11,7 @@ from typing import Any
 DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref"]
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
+DEFAULT_PREAMBLE_COMMANDS = [r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}"]
 
 
 @dataclass
@@ -25,6 +26,7 @@ def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
     lines = [rf"\documentclass{{{cfg.document_class}}}"]
     for package in cfg.packages:
         lines.append(rf"\usepackage{{{package}}}")
+    lines.extend(DEFAULT_PREAMBLE_COMMANDS)
     lines.append("")
     if cfg.title:
         lines.extend([rf"\title{{{escape_latex(cfg.title)}}}", r"\date{}", ""])
