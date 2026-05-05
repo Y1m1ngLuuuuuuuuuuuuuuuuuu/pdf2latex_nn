@@ -15,6 +15,7 @@ NONE = 3
 VIRTUAL_ROOT = "__ROOT__"
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
+MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,8 @@ class TreeDecoder:
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
             if not valid_node_pair(source, target, len(node_records)) or source == target:
+                continue
+            if not can_contract_merge_records(node_records[source], node_records[target]):
                 continue
             merge_score = float(probs[edge_pos, MERGE].item())
             label = int(probs[edge_pos].argmax().item())
@@ -538,6 +541,12 @@ def canonical_render_type(record: dict[str, Any]) -> str:
     if raw in {"reference", "references", "bibliography"}:
         return "reference"
     return "text"
+
+
+def can_contract_merge_records(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_type = canonical_render_type(left)
+    right_type = canonical_render_type(right)
+    return left_type == right_type and left_type in MERGE_COMPATIBLE_TYPES
 
 
 def render_equation(text: str) -> str:

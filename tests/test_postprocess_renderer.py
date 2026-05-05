@@ -71,6 +71,24 @@ def test_tree_decoder_contracts_merge_nodes_and_repoints_parent_edges():
     assert title.children[0].text == "Cybersecurity, matters."
 
 
+def test_tree_decoder_refuses_cross_type_merge_contraction():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text_for_embedding": "Introduction"},
+        {"type": "paragraph", "text_for_embedding": "Body text."},
+    ]
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    scores = torch.tensor([[0.99, 0.0, 0.0, 0.01]], dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
+
+    assert [child.text for child in root.children] == ["Introduction", "Body text."]
+    assert all(child.merged_node_ids == [idx] for idx, child in enumerate(root.children))
+
+
 def test_tree_decoder_msa_keeps_forest_roots_under_virtual_root():
     if not has_torch():
         return
