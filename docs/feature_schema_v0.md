@@ -7,8 +7,8 @@
 ```text
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
-node_feature_dim: 791
-edge_attr_dim: 10
+node_feature_dim: 813
+edge_attr_dim: 11
 ```
 
 坐标统一使用 MinerU 当前输出的页面归一化坐标，页面左上角是 `(0, 0)`，右下角近似是 `(1000, 1000)`。如果后续需要保留 PDF 原始点坐标，应新增字段，不覆盖现有归一化坐标。
@@ -65,10 +65,10 @@ Python 结构定义在 `src/perception/schema.py`。文档说明和代码定义�
 
 合法 bbox 必须满足 `x0 <= x1`、`y0 <= y1`。坐标允许因为解析误差略微超出 `[0, 1000]`，validator 应报警但不直接静默截断。
 
-当前 v4 JSON 为了兼容已有脚本仍使用扁平字段：
+当前 v7 JSON 使用 MinerU 原始单块 bbox，不在预处理阶段做跨段或跨页合并：
 
 ```text
-bbox: [x0, y0, x1, y1, x0, y0, x1, y1, ...]
+bbox: [x0, y0, x1, y1]
 ```
 
 稳定 IR 中等价字段是：
@@ -77,7 +77,7 @@ bbox: [x0, y0, x1, y1, x0, y0, x1, y1, ...]
 bboxes: list[BBox]
 ```
 
-后续适配器负责两者转换。
+后续如果 generator 决定合并多个节点，应在生成阶段维护 `bboxes: list[BBox]`，不回写污染 v7 输入。
 
 ## Block
 
@@ -204,7 +204,10 @@ reference_item_of
 4 geometry
 3 derived stats
 6 style stats
-= 791
+16 sequence position
+3 column-aware features
+3 title structure features
+= 813
 ```
 
 切片固定为：
@@ -216,6 +219,9 @@ reference_item_of
 | `geometry` | `[778, 782)` | 4 | 首尾锚点几何 |
 | `derived_stats` | `[782, 785)` | 3 | 宏观位置、宽高比、文本密度 |
 | `style_stats` | `[785, 791)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
+| `sequence_position` | `[791, 807)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
+| `column_features` | `[807, 810)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
+| `title_structure` | `[810, 813)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
 
 ### Geometry Fields
 
@@ -269,16 +275,17 @@ spatial_k = 3
 候选边来自两类视角：
 
 ```text
-reading-order neighbors: 每个节点连接扁平视觉阅读序列前后各 k 个节点
+forced sequential neighbors: 按单双栏状态机阅读序强制连接 `i -> i+1`，默认同时连接 `i+1 -> i`
+reading-order neighbors: 每个节点连接单双栏状态机阅读序列前后各 k 个节点
 line-of-sight neighbors: 每个节点在同页向下、向右各寻找最近 k 个空间邻居
 ```
 
-重复边只保留第一条，优先级为 reading-order，再是 `spatial_down`，最后是 `spatial_right`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。
+重复边只保留第一条，优先级为 `sequential_forced`、reading-order，再是 `spatial_down`，最后是 `spatial_right`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。
 
 固定维度：
 
 ```text
-edge_attr_dim = 10
+edge_attr_dim = 11
 ```
 
 | index | 字段 | 说明 |
@@ -287,26 +294,27 @@ edge_attr_dim = 10
 | 1 | `delta_y_gap` | `(target.y_min - source.y_max) / page_height`，允许负数表达跨栏/回跳 |
 | 2 | `delta_x_left` | `(target.x_min - source.x_min) / page_width` |
 | 3 | `left_alignment` | 若 `abs(delta_x_left) < 0.01` 则为 `1.0`，否则 `0.0` |
-| 4 | `center_distance` | 源/目标中心欧氏距离除以 `max(page_width, page_height)` |
+| 4 | `center_distance` | 源/目标在逻辑阅读坐标系中的中心距离。双栏区域会被展开：左栏占该区域阅读进度前半段，右栏占后半段；X 使用栏内相对坐标，避免左栏底部与右栏顶部被物理沟壑误判为远距离 |
 | 5 | `font_size_delta` | `target_font_size - source_font_size`，缺失样式时为 `0.0` |
 | 6 | `bold_to_regular` | 源节点多数文本为粗体且目标节点不是粗体时为 `1.0` |
 | 7 | `line_height_ratio` | `target_bbox_height / source_bbox_height` |
 | 8 | `index_delta` | `target_index - source_index` |
 | 9 | `is_next` | 若 `target_index - source_index == 1` 则为 `1.0` |
+| 10 | `is_sequential_edge` | 若边来自强制/窗口阅读流连边则为 `1.0` |
 
-这 10 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
+这 11 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
 
 ## Model-Side Projection
 
 原始 `.pt` 继续保存完整 768 维 SciBERT 节点语义，不在数据层降维。降维和归一化属于模型层：
 
 ```text
-semantic_768 -> Linear -> semantic_64 -> LayerNorm
-layout/type/stats_23 -> Linear -> layout_32 -> LayerNorm
+semantic_768 -> Linear -> semantic_64 -> L2 normalize
+layout/type/stats/sequence/column/title_45 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 
-当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=10)`、`TransformerConv(edge_dim=10)` 或 `GINEConv`。
+当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=11)`、`TransformerConv(edge_dim=11)` 或 `GINEConv`。
 
 ## Validator 最低要求
 
@@ -328,15 +336,14 @@ edge_attr 行数是否等于 edge_index 列数
 
 ## 当前兼容层
 
-当前生产 JSON 文件仍是：
+当前生产 JSON 文件固定为：
 
 ```text
-*_content_list_v2_visual_order.json
-*_content_list_v3.json
-*_content_list_v4.json
+*_content_list_v7.json
+*_content_list_v7_styles.json
 ```
 
-其中 v4 是最接近本契约的结构，但仍保留若干兼容字段：
+其中 v7 保留 MinerU 原始 bbox 和文本块粒度，只新增 list marker、列修复阅读序和 PyMuPDF 样式字段：
 
 ```text
 type
@@ -344,7 +351,11 @@ raw_type
 bbox
 text_for_embedding
 reference_items
+list_marker
+column_fix_span
+column_fix_column
+style_spans
 block
 ```
 
-下一步应增加 adapter/validator，把 v4 JSON 明确转换成 `Document` IR，并用小批量 PDF 验证所有字段可稳定产出。
+后续 adapter/validator 应以 v7 为唯一输入格式，把 v7 JSON 明确转换成 `Document` IR，并用小批量 PDF 验证所有字段可稳定产出。

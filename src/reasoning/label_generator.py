@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from src.perception.reading_order import fuse_micro_nodes
 from src.reasoning.latex_flattener import MATH_PLACEHOLDER, flatten_latex_file, mask_math_environments
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
@@ -159,7 +160,10 @@ class AlignmentLabeler:
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
         graph = self.load_graph()
-        self.pdf_nodes = self.parse_pdf_nodes()
+        self.pdf_nodes = self.parse_pdf_nodes(
+            expected_node_count=int(graph.num_nodes),
+            force_micro_fusion=bool(getattr(graph, "micro_fusion_applied", False)),
+        )
         if len(self.pdf_nodes) != int(graph.num_nodes):
             raise ValueError(
                 f"content node count ({len(self.pdf_nodes)}) does not match graph.num_nodes ({int(graph.num_nodes)})"
@@ -195,15 +199,27 @@ class AlignmentLabeler:
 
         return torch.load(self.graph_path, map_location="cpu", weights_only=False)
 
-    def parse_pdf_nodes(self) -> list[PdfAlignmentNode]:
+    def parse_pdf_nodes(
+        self,
+        *,
+        expected_node_count: int | None = None,
+        force_micro_fusion: bool = False,
+    ) -> list[PdfAlignmentNode]:
         content = json.loads(self.content_json_path.read_text(encoding="utf-8"))
         items = content.get("items", content if isinstance(content, list) else [])
         if not isinstance(items, list):
             raise ValueError(f"Expected {self.content_json_path} to contain an items list")
+        items = [item if isinstance(item, dict) else {"text_for_embedding": str(item)} for item in items]
+        if force_micro_fusion:
+            fused_items = fuse_micro_nodes(items)
+            if expected_node_count is None or len(fused_items) == expected_node_count:
+                items = fused_items
+        elif expected_node_count is not None and len(items) != expected_node_count:
+            fused_items = fuse_micro_nodes(items)
+            if len(fused_items) == expected_node_count:
+                items = fused_items
         nodes = []
         for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                item = {"text_for_embedding": str(item)}
             text = pdf_item_text(item)
             nodes.append(PdfAlignmentNode(node_index=index, text=text, clean=clean_text(text), item=item))
         return nodes

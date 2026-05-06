@@ -23,14 +23,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.perception.reading_order import (  # noqa: E402
-    build_content_v3,
-    build_content_v4,
+    build_content_v7,
     load_content_list_v2,
-    sort_content_list_v2,
     write_json,
 )
 from src.perception.style_spans import StyleConfig, enrich_content_with_styles  # noqa: E402
-from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v3  # noqa: E402
+from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig, AlignmentQualityError  # noqa: E402
 
 
@@ -277,7 +275,7 @@ def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> 
     ):
         return summarize_processed_sample(candidate, paths)
 
-    content_json = ensure_content_v4_styles(candidate, paths, config)
+    content_json = ensure_content_v7_styles(candidate, paths, config)
     graph_path = ensure_graph(content_json, paths["graph"], config)
     label_graph(candidate, content_json, graph_path, paths["mapping"], config)
     if not graph_is_valid_labeled(graph_path, config):
@@ -290,34 +288,24 @@ def sample_paths(candidate: CandidateSample, config: MiniDatasetConfig) -> dict[
     return {
         "auto_dir": auto_dir,
         "v2": auto_dir / f"{candidate.document_id}_content_list_v2.json",
-        "visual": auto_dir / f"{candidate.document_id}_content_list_v2_visual_order.json",
-        "v3": auto_dir / f"{candidate.document_id}_content_list_v3.json",
-        "v4": auto_dir / f"{candidate.document_id}_content_list_v4.json",
-        "styles": auto_dir / f"{candidate.document_id}_content_list_v4_styles.json",
+        "v7": auto_dir / f"{candidate.document_id}_content_list_v7.json",
+        "styles": auto_dir / f"{candidate.document_id}_content_list_v7_styles.json",
         "graph": config.graph_output_dir / f"{candidate.document_id}_graph.pt",
         "mapping": config.ground_truth_dir / f"{candidate.document_id}_alignment_mapping.json",
     }
 
 
-def ensure_content_v4_styles(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> Path:
+def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> Path:
     styles_path = paths["styles"]
     if config.reuse_existing and not config.force_json and styles_path.exists():
         return styles_path
 
     content_v2 = ensure_mineru_content_v2(candidate, paths, config)
-    visual_payload = sort_content_list_v2(load_content_list_v2(content_v2))
-    visual_payload["source_path"] = str(content_v2)
-    write_json(paths["visual"], visual_payload)
+    v7_payload = build_content_v7(load_content_list_v2(content_v2))
+    v7_payload["source_path"] = str(content_v2)
+    write_json(paths["v7"], v7_payload)
 
-    v3_payload = build_content_v3(visual_payload)
-    v3_payload["source_path"] = str(paths["visual"])
-    write_json(paths["v3"], v3_payload)
-
-    v4_payload = build_content_v4(v3_payload)
-    v4_payload["source_path"] = str(paths["v3"])
-    write_json(paths["v4"], v4_payload)
-
-    enrich_content_with_styles(paths["v4"], candidate.pdf_path, styles_path, StyleConfig())
+    enrich_content_with_styles(paths["v7"], candidate.pdf_path, styles_path, StyleConfig())
     return styles_path
 
 
@@ -417,7 +405,7 @@ def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig
     if config.reuse_existing and not config.force_graph and graph_path.exists():
         return graph_path
     graph_config = GraphBuildConfig(model_path=config.model_path)
-    build_graph_from_content_v3(content_json, graph_path, graph_config)
+    build_graph_from_content_v7(content_json, graph_path, graph_config)
     return graph_path
 
 

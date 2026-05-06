@@ -1,4 +1,4 @@
-"""Extract and merge inline style spans from PDFs for content v3 nodes."""
+"""Extract and merge inline style spans from PDFs for content nodes."""
 
 from __future__ import annotations
 
@@ -74,12 +74,6 @@ def enrich_content_with_styles(input_path: Path, pdf_path: Path, output_path: Pa
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
-
-
-def enrich_content_v3_with_styles(input_path: Path, pdf_path: Path, output_path: Path, config: StyleConfig | None = None) -> dict[str, Any]:
-    """Backward-compatible wrapper for older v3 style enrichment callers."""
-
-    return enrich_content_with_styles(input_path, pdf_path, output_path, config)
 
 
 def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConfig) -> list[dict[str, Any]]:

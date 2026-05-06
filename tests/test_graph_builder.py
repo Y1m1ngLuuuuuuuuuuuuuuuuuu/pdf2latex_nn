@@ -11,7 +11,7 @@ def test_feature_projector_balances_raw_node_features():
     with torch.no_grad():
         projector.semantic_projection.weight.zero_()
         projector.semantic_projection.bias.fill_(1.0)
-    x = torch.randn(4, 791)
+    x = torch.randn(4, 813)
 
     projected = projector(x)
 
@@ -37,9 +37,9 @@ def test_edge_relation_gat_outputs_one_logit_row_per_edge():
     )
     model = EdgeRelationGAT(config)
     data = Data(
-        x=torch.randn(3, 791),
+        x=torch.randn(3, 813),
         edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
-        edge_attr=torch.randn(3, 10),
+        edge_attr=torch.randn(3, 11),
     )
 
     logits = model(data)

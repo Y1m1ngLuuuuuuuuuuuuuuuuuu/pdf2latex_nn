@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.perception.reading_order import fuse_micro_nodes  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
 
@@ -21,7 +24,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph", type=Path, required=True, help="Input PyG graph .pt")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Model checkpoint .pth/.pt")
     parser.add_argument("--output-tex", type=Path, required=True, help="Generated .tex path")
-    parser.add_argument("--content-json", type=Path, help="Optional content_v4_styles.json with full node text")
+    parser.add_argument("--content-json", type=Path, help="Optional content_v7_styles.json with full node text")
     parser.add_argument("--merge-threshold", type=float, default=0.5)
     parser.add_argument("--parent-threshold", type=float, default=0.0)
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
@@ -38,9 +41,10 @@ def main() -> int:
     data = torch.load(args.graph, map_location=device, weights_only=False)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
-    config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
-    model = EdgeRelationGAT(config if isinstance(config, EdgeGATConfig) else EdgeGATConfig()).to(device)
     state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+    config = checkpoint_compatible_config(config if isinstance(config, EdgeGATConfig) else EdgeGATConfig(), state_dict)
+    model = EdgeRelationGAT(config).to(device)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -59,7 +63,8 @@ def main() -> int:
         )
     )
     root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
-    tex = decoder.render_document(root, title=args.title)
+    document_title = args.title or infer_document_title(node_records)
+    tex = decoder.render_document(root, title=document_title)
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
     pred_counts = torch.bincount(logits.argmax(dim=-1), minlength=4).tolist()
@@ -69,20 +74,53 @@ def main() -> int:
     return 0
 
 
+def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> EdgeGATConfig:
+    """Adapt model dimensions to legacy checkpoints without changing weights."""
+
+    layout_weight = state_dict.get("projector.layout.0.weight") if isinstance(state_dict, dict) else None
+    if layout_weight is None:
+        return config
+    checkpoint_layout_dim = int(layout_weight.shape[1])
+    if checkpoint_layout_dim == config.node_projector.layout_input_dim:
+        return config
+    node_projector = replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim)
+    return replace(config, node_projector=node_projector)
+
+
 def load_node_records(content_json: Path | None, data: Any) -> list[dict[str, Any]]:
+    graph_records = [dict(record) for record in list(getattr(data, "node_records", [])) if isinstance(record, dict)]
     if content_json is not None:
         payload = json.loads(content_json.read_text(encoding="utf-8"))
         items = payload.get("items", payload if isinstance(payload, list) else [])
         if not isinstance(items, list):
             raise ValueError(f"Expected content JSON with an items list: {content_json}")
-        records = [record_from_content_item(item) for item in items if isinstance(item, dict)]
+        raw_records = [record_from_content_item(item) for item in items if isinstance(item, dict)]
+        records = select_records_for_graph(raw_records, data)
         if len(records) != int(data.num_nodes):
             raise ValueError(f"content records ({len(records)}) do not match graph.num_nodes ({int(data.num_nodes)})")
+        if len(graph_records) == len(records):
+            records = [merge_graph_node_metadata(content_record, graph_record) for content_record, graph_record in zip(records, graph_records)]
         return records
-    node_records = list(getattr(data, "node_records", []))
-    if node_records:
-        return [dict(record) for record in node_records]
+    if graph_records:
+        return graph_records
     return [{} for _ in range(int(data.num_nodes))]
+
+
+def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[dict[str, Any]]:
+    """Match content JSON records to graph nodes, trying micro-fusion when needed."""
+
+    expected = int(data.num_nodes)
+    fused_records: list[dict[str, Any]] | None = None
+    if bool(getattr(data, "micro_fusion_applied", False)):
+        fused_records = fuse_micro_nodes(records)
+        if len(fused_records) == expected:
+            return fused_records
+    if len(records) == expected:
+        return records
+    fused_records = fused_records if fused_records is not None else fuse_micro_nodes(records)
+    if len(fused_records) == expected:
+        return fused_records
+    return records
 
 
 def record_from_content_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +130,57 @@ def record_from_content_item(item: dict[str, Any]) -> dict[str, Any]:
     if "canonical_type" not in record:
         record["canonical_type"] = canonical_content_type(item.get("type") or item.get("raw_type"))
     return record
+
+
+def merge_graph_node_metadata(content_record: dict[str, Any], graph_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(content_record)
+    for key, value in graph_record.items():
+        if key in {"text", "text_for_embedding", "content", "latex", "html", "reference_items", "merged_records"}:
+            continue
+        if key not in merged or merged[key] in (None, "", []):
+            merged[key] = value
+        elif key in {
+            "regime_reading_order",
+            "dag_reading_order",
+            "xycut_reading_order",
+            "global_order",
+            "reading_order",
+            "original_order",
+            "original_index",
+            "column_id",
+            "is_full_width",
+            "style_baseline_size",
+        }:
+            merged[key] = value
+    return merged
+
+
+def infer_document_title(records: list[dict[str, Any]]) -> str | None:
+    """Use the first real title-like content block as the document title."""
+
+    for record in records[:20]:
+        if canonical_content_type(record.get("type") or record.get("raw_type")) != "title":
+            continue
+        text = str(record.get("text") or record.get("text_for_embedding") or "").strip()
+        if not text:
+            continue
+        normalized = normalized_title_key(text)
+        if normalized in {"abstract", "keywords", "introduction", "references", "bibliography"}:
+            continue
+        if looks_like_arxiv_identifier(text):
+            continue
+        return text
+    return None
+
+
+def normalized_title_key(text: str) -> str:
+    return "".join(char.lower() for char in text if char.isalnum())
+
+
+def looks_like_arxiv_identifier(text: str) -> bool:
+    stripped = text.strip()
+    compact = "".join(char for char in stripped if char.isdigit() or char in ".v")
+    return bool(re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", compact))
 
 
 def canonical_content_type(value: Any) -> str:

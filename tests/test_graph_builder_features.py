@@ -1,13 +1,18 @@
 from src.reasoning.graph_builder import (
     TYPE_VOCAB,
     build_candidate_edge_pairs,
+    build_column_onehot_matrix,
     build_derived_stats_matrix,
     build_edge_attr_matrix,
     build_geometry_matrix,
+    build_logical_center_pairs,
+    build_sequence_position_matrix,
     build_sequential_edge_index,
     build_style_stats_matrix,
+    build_title_structure_matrix,
     build_type_onehot_matrix,
     canonical_type,
+    infer_column_ids,
     infer_document_body_font_size,
     infer_page_frames,
     iter_bbox_chunks,
@@ -86,6 +91,76 @@ def test_sequential_edges_are_bidirectional_by_default():
     assert edge_index.tolist() == [[0, 1, 1, 2], [1, 0, 2, 1]]
 
 
+def test_sequence_position_matrix_adds_sixteen_dimensional_absolute_order_signal():
+    if not has_torch():
+        return
+    pos = build_sequence_position_matrix([item("a", [0, 0, 10, 10]), item("b", [0, 20, 10, 30])])
+
+    assert tuple(pos.shape) == (2, 16)
+    assert float(pos[0][0]) == 0.0
+    assert float(pos[0][1]) == 1.0
+    assert round(float(pos[1][0]), 4) == 0.8415
+    assert round(float(pos[1][1]), 4) == 0.5403
+
+
+def test_column_onehot_matrix_marks_left_right_and_full_width_blocks():
+    if not has_torch():
+        return
+    items = [
+        item("l1", [80, 100, 480, 200]),
+        item("l2", [90, 220, 470, 300]),
+        item("r1", [520, 100, 920, 200], column=1),
+        item("r2", [530, 220, 910, 300], column=1),
+        item("full", [80, 20, 920, 80], full=True),
+    ]
+
+    column_ids = infer_column_ids(items)
+    onehot = build_column_onehot_matrix(items, column_ids=column_ids)
+
+    assert column_ids == [0, 0, 1, 1, 2]
+    assert onehot.tolist() == [
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+
+def test_title_structure_matrix_adds_relative_font_and_heading_patterns():
+    if not has_torch():
+        return
+    items = [
+        {
+            **item("Body text.", [80, 100, 480, 130]),
+            "style_baseline_size": 10.0,
+        },
+        {
+            **item("1. Introduction", [80, 40, 480, 80]),
+            "type": "title",
+            "style_baseline_size": 15.0,
+        },
+        {
+            **item("2.3 Method", [80, 150, 480, 180]),
+            "type": "title",
+            "style_baseline_size": 12.0,
+        },
+        {
+            **item("II. Related Work", [80, 190, 480, 220]),
+            "type": "title",
+            "style_baseline_size": 14.0,
+        },
+    ]
+
+    features = build_title_structure_matrix(items)
+
+    assert tuple(features.shape) == (4, 3)
+    assert [round(float(value), 4) for value in features[0].tolist()] == [1.0, 0.0, 0.0]
+    assert [round(float(value), 4) for value in features[1].tolist()] == [1.5, 1.0, 0.0]
+    assert [round(float(value), 4) for value in features[2].tolist()] == [1.2, 0.0, 1.0]
+    assert [round(float(value), 4) for value in features[3].tolist()] == [1.4, 1.0, 0.0]
+
+
 def test_candidate_edges_use_dual_view_neighbors():
     items = [
         item("a", [0, 0, 10, 10], page=0),
@@ -97,14 +172,15 @@ def test_candidate_edges_use_dual_view_neighbors():
     pairs = build_candidate_edge_pairs(items, sequential_window=1, spatial_k=1)
     typed = {(source, target, source_type) for source, target, source_type in pairs}
 
-    assert (0, 1, "sequential") in typed
-    assert (1, 0, "sequential") in typed
-    assert any(source == 0 and target == 1 and source_type == "spatial_down" for source, target, source_type in pairs) is False
+    assert (0, 1, "sequential_forced") in typed
+    assert (1, 3, "sequential_forced") in typed
+    assert (3, 2, "sequential_forced") in typed
+    assert (2, 1, "spatial_down") in typed
     assert any(source == 0 and target == 2 and source_type in {"spatial_right", "sequential"} for source, target, source_type in pairs)
     assert len({(source, target) for source, target, _ in pairs}) == len(pairs)
 
 
-def test_edge_attr_matrix_uses_strict_ten_dimensional_relation_features():
+def test_edge_attr_matrix_uses_strict_eleven_dimensional_relation_features():
     if not has_torch():
         return
     import torch
@@ -122,11 +198,11 @@ def test_edge_attr_matrix_uses_strict_ten_dimensional_relation_features():
         },
     ]
     semantic = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
-    edge_pairs = [(0, 1, "sequential"), (1, 0, "sequential")]
+    edge_pairs = [(0, 1, "sequential_forced"), (1, 0, "sequential")]
 
     edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
 
-    assert tuple(edge_attr.shape) == (2, 10)
+    assert tuple(edge_attr.shape) == (2, 11)
     forward = edge_attr[0].tolist()
     reverse = edge_attr[1].tolist()
     assert round(float(forward[0]), 4) == 1.0
@@ -139,7 +215,39 @@ def test_edge_attr_matrix_uses_strict_ten_dimensional_relation_features():
     assert round(float(forward[7]), 4) == 0.8
     assert float(forward[8]) == 1.0
     assert float(forward[9]) == 1.0
+    assert float(forward[10]) == 1.0
     assert float(reverse[9]) == 0.0
+    assert float(reverse[10]) == 1.0
+
+
+def test_logical_center_distance_unrolls_double_column_reading_flow():
+    if not has_torch():
+        return
+    import torch
+
+    items = [
+        item("left top", [80, 100, 480, 200], page=0, column=0),
+        item("left bottom", [80, 300, 480, 400], page=0, column=0),
+        item("right top", [520, 100, 920, 200], page=0, column=1),
+        item("right bottom", [520, 300, 920, 400], page=0, column=1),
+    ]
+    semantic = torch.ones((4, 2), dtype=torch.float32)
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=[(1, 2, "sequential_forced")])
+    physical_distance = (((720 - 280) ** 2 + (150 - 350) ** 2) ** 0.5) / 1000.0
+
+    assert physical_distance > 0.48
+    assert round(float(edge_attr[0][4]), 4) == 0.05
+
+
+def test_logical_center_pairs_keep_same_column_relative_x_not_absolute_x():
+    items = [
+        item("left", [80, 100, 480, 200], page=0, column=0),
+        item("right", [520, 100, 920, 200], page=0, column=1),
+    ]
+
+    centers = build_logical_center_pairs(items)
+
+    assert round(centers[0][0][0], 4) == round(centers[1][0][0], 4)
 
 
 def test_canonical_type_maps_mineru_names_to_fixed_vocab():

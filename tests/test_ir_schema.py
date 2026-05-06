@@ -40,8 +40,11 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "inline_math_char_ratio",
         "inline_code_char_ratio",
     ]
-    assert schema.node_feature_dim == 791
-    assert schema.edge_attr_dim == 10
+    assert len(schema.sequence_position_fields) == 16
+    assert schema.column_feature_fields == ["column_left", "column_right", "column_full_or_single"]
+    assert schema.title_structure_fields == ["relative_font_size", "is_h1_pattern", "is_h2_pattern"]
+    assert schema.node_feature_dim == 813
+    assert schema.edge_attr_dim == 11
     assert schema.edge_attr_fields == [
         "semantic_cosine",
         "delta_y_gap",
@@ -53,6 +56,7 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "line_height_ratio",
         "index_delta",
         "is_next",
+        "is_sequential_edge",
     ]
 
 

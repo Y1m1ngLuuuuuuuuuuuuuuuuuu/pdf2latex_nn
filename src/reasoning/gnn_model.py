@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.perception.schema import DERIVED_STAT_FIELDS, EDGE_ATTR_FIELDS, GEOMETRY_FIELDS, SCIBERT_DIM, STYLE_STAT_FIELDS
+from src.perception.schema import (
+    COLUMN_FEATURE_FIELDS,
+    DERIVED_STAT_FIELDS,
+    EDGE_ATTR_FIELDS,
+    GEOMETRY_FIELDS,
+    SCIBERT_DIM,
+    SEQUENCE_POSITION_FIELDS,
+    STYLE_STAT_FIELDS,
+    TITLE_STRUCTURE_FIELDS,
+)
 
 try:
     import torch
@@ -28,10 +37,22 @@ class FeatureProjectorConfig:
     layout_hidden_dim: int = 32
     type_dim: int = 10
     dropout: float = 0.1
+    layout_input_dim_override: int | None = None
 
     @property
     def layout_input_dim(self) -> int:
-        return self.type_dim + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS) + len(STYLE_STAT_FIELDS)
+        override = getattr(self, "layout_input_dim_override", None)
+        if override is not None:
+            return int(override)
+        return (
+            self.type_dim
+            + len(GEOMETRY_FIELDS)
+            + len(DERIVED_STAT_FIELDS)
+            + len(STYLE_STAT_FIELDS)
+            + len(SEQUENCE_POSITION_FIELDS)
+            + len(COLUMN_FEATURE_FIELDS)
+            + len(TITLE_STRUCTURE_FIELDS)
+        )
 
     @property
     def output_dim(self) -> int:
@@ -67,6 +88,11 @@ class FeatureProjector(_MODULE_BASE):
     def forward(self, x):  # type: ignore[no-untyped-def]
         semantic = x[:, : self.config.semantic_dim]
         layout = x[:, self.config.semantic_dim :]
+        expected_layout_dim = self.config.layout_input_dim
+        if layout.shape[1] > expected_layout_dim:
+            layout = layout[:, :expected_layout_dim]
+        elif layout.shape[1] < expected_layout_dim:
+            layout = F.pad(layout, (0, expected_layout_dim - layout.shape[1]))
         semantic_projected = F.relu(self.semantic_projection(semantic))
         semantic_projected = F.normalize(semantic_projected, p=2, dim=-1)
         semantic_projected = self.semantic_dropout(semantic_projected)

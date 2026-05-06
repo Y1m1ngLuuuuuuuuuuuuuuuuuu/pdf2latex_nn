@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.perception.schema import FeatureTensorSchema
-from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v3
+from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7
 from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges_from_paths
 
 try:
@@ -173,7 +173,7 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
             return torch.load(record.graph_path, map_location="cpu", weights_only=False)
         if record.content_json is None:
             raise ValueError(f"Record {record.document_id} must provide graph_path or content_json")
-        return build_graph_from_content_v3(record.content_json, output_path, self.config.graph_config())
+        return build_graph_from_content_v7(record.content_json, output_path, self.config.graph_config())
 
     def _processed_index(self) -> list[dict[str, Any]]:
         index_path = Path(self.processed_dir) / PROCESSED_INDEX_NAME

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build PyG graph feature tensors from content v3 JSON."""
+"""Build PyG graph feature tensors from content v7 JSON."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v3  # noqa: E402
+from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="*_content_list_v3.json file")
+    parser.add_argument("--input", type=Path, required=True, help="*_content_list_v7_styles.json file")
     parser.add_argument("--output", type=Path, required=True, help="Output .pt graph path")
     parser.add_argument(
         "--model-path",
@@ -29,6 +29,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequential-window", type=int, default=3, help="Reading-order neighbors on each side")
     parser.add_argument("--spatial-k", type=int, default=3, help="Line-of-sight neighbors per down/right direction")
     parser.add_argument("--directed", action="store_true", help="Use only forward reading-order window edges")
+    parser.add_argument(
+        "--fuse-micro-nodes",
+        action="store_true",
+        help="Fuse same-line text/math shards before graph construction. Disabled by default.",
+    )
     return parser
 
 
@@ -42,8 +47,9 @@ def main() -> int:
         bidirectional_edges=not args.directed,
         sequential_window=args.sequential_window,
         spatial_k=args.spatial_k,
+        fuse_micro_nodes=args.fuse_micro_nodes,
     )
-    data = build_graph_from_content_v3(args.input, args.output, config)
+    data = build_graph_from_content_v7(args.input, args.output, config)
     print(f"wrote {args.output}")
     print(f"x_shape={tuple(data.x.shape)}")
     print(f"edge_index_shape={tuple(data.edge_index.shape)}")

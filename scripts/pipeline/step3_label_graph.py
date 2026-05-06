@@ -18,7 +18,7 @@ from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConf
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--content-json", type=Path, required=True, help="MinerU content_v4_styles.json")
+    parser.add_argument("--content-json", type=Path, required=True, help="MinerU content_v7_styles.json")
     parser.add_argument("--tex", type=Path, required=True, help="Main TeX source file")
     parser.add_argument("--graph", type=Path, required=True, help="Input graph .pt to label")
     parser.add_argument("--output", type=Path, help="Optional output graph .pt; defaults to overwriting --graph")

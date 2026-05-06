@@ -61,6 +61,14 @@ STYLE_STAT_FIELDS = [
     "inline_math_char_ratio",
     "inline_code_char_ratio",
 ]
+SEQUENCE_POSITION_DIM = 16
+SEQUENCE_POSITION_FIELDS = [
+    field
+    for pair_idx in range(SEQUENCE_POSITION_DIM // 2)
+    for field in (f"seq_pos_sin_{pair_idx}", f"seq_pos_cos_{pair_idx}")
+]
+COLUMN_FEATURE_FIELDS = ["column_left", "column_right", "column_full_or_single"]
+TITLE_STRUCTURE_FIELDS = ["relative_font_size", "is_h1_pattern", "is_h2_pattern"]
 EDGE_ATTR_FIELDS = [
     "semantic_cosine",
     "delta_y_gap",
@@ -72,6 +80,7 @@ EDGE_ATTR_FIELDS = [
     "line_height_ratio",
     "index_delta",
     "is_next",
+    "is_sequential_edge",
 ]
 NON_TEXT_DENSITY_TYPES = {
     BlockType.EQUATION.value,
@@ -193,6 +202,9 @@ class FeatureTensorSchema:
     geometry_fields: list[str] = field(default_factory=lambda: list(GEOMETRY_FIELDS))
     derived_stat_fields: list[str] = field(default_factory=lambda: list(DERIVED_STAT_FIELDS))
     style_stat_fields: list[str] = field(default_factory=lambda: list(STYLE_STAT_FIELDS))
+    sequence_position_fields: list[str] = field(default_factory=lambda: list(SEQUENCE_POSITION_FIELDS))
+    column_feature_fields: list[str] = field(default_factory=lambda: list(COLUMN_FEATURE_FIELDS))
+    title_structure_fields: list[str] = field(default_factory=lambda: list(TITLE_STRUCTURE_FIELDS))
 
     @property
     def type_dim(self) -> int:
@@ -206,6 +218,9 @@ class FeatureTensorSchema:
             + len(self.geometry_fields)
             + len(self.derived_stat_fields)
             + len(self.style_stat_fields)
+            + len(self.sequence_position_fields)
+            + len(self.column_feature_fields)
+            + len(self.title_structure_fields)
         )
 
     @property

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.perception.xy_cut import rebuild_reading_order
 
 AUXILIARY_TYPES = {
     "page_header",
@@ -20,39 +21,51 @@ AUXILIARY_TYPES = {
 TEXTUAL_TYPES = {
     "title",
     "paragraph",
+    "text",
     "list",
     "index",
     "code",
     "algorithm",
 }
 
-MERGEABLE_TYPES = {
+MICRO_TEXT_TYPES = {
     "paragraph",
-    "list",
+    "text",
 }
 
-FLOAT_TYPES = {
+MICRO_INLINE_MATH_TYPES = {
+    "equation_inline",
+    "inline_equation",
+    "inline_formula",
+    "inline_math",
+    "math_inline",
+}
+
+MICRO_EQUATION_TYPES = {
+    "display_formula",
+    "equation",
+    "equation_interline",
+    "formula",
+    "interline_equation",
+}
+
+MICRO_STRUCTURAL_TYPES = {
     "algorithm",
     "chart",
     "code",
-    "equation",
-    "equation_interline",
     "figure",
     "image",
-    "interline_equation",
+    "list",
+    "page_aside_text",
+    "page_footer",
+    "page_footnote",
+    "page_header",
+    "page_number",
+    "reference",
     "table",
+    "title",
 }
 
-TERMINAL_PUNCTUATION = {
-    ".",
-    "?",
-    "!",
-    "。",
-    "？",
-    "！",
-    ";",
-    "；",
-}
 LIST_MARKER_PATTERNS = (
     ("arabic", re.compile(r"^\s*(\d+)[\.\)]\s+")),
     ("alpha", re.compile(r"^\s*([a-zA-Z])[\.\)]\s+")),
@@ -81,7 +94,7 @@ REFERENCE_LIST_TYPE = "reference_list"
 class SortConfig:
     """Thresholds for normalized MinerU v2 coordinates."""
 
-    full_width_ratio: float = 0.62
+    full_width_ratio: float = 0.60
     cross_column_left: float = 380.0
     cross_column_right: float = 620.0
     min_column_gap: float = 130.0
@@ -125,6 +138,39 @@ class BlockView:
     @property
     def cy(self) -> float:
         return (self.y0 + self.y1) / 2.0
+
+    @property
+    def width(self) -> float:
+        return max(0.0, self.x1 - self.x0)
+
+
+@dataclass(frozen=True)
+class ColumnarOrderView:
+    node: dict[str, Any]
+    original_index: int
+    bbox: tuple[float, float, float, float] | None
+    span_label: str
+    column_label: str | None
+
+    @property
+    def x0(self) -> float:
+        return self.bbox[0] if self.bbox is not None else 0.0
+
+    @property
+    def y0(self) -> float:
+        return self.bbox[1] if self.bbox is not None else 0.0
+
+    @property
+    def x1(self) -> float:
+        return self.bbox[2] if self.bbox is not None else 0.0
+
+    @property
+    def y1(self) -> float:
+        return self.bbox[3] if self.bbox is not None else 0.0
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2.0
 
     @property
     def width(self) -> float:
@@ -206,141 +252,265 @@ def sort_content_list_v2(
     }
 
 
-def build_content_v3(
-    visual_order_payload: dict[str, Any],
-    *,
-    same_page_cross_column_y_tolerance: float = 80.0,
-    cross_page_bottom_threshold: float = 780.0,
-    cross_page_top_threshold: float = 260.0,
-) -> dict[str, Any]:
-    """Merge visually ordered text blocks into cross-page logical content."""
+def _build_native_listmarked_content(native_payload: Any) -> dict[str, Any]:
+    """Flatten MinerU native JSON without merging or bbox rewriting."""
 
-    pages = visual_order_payload.get("pages")
-    if not isinstance(pages, list):
-        raise ValueError("Expected visual order payload with a pages list")
-
-    flattened: list[dict[str, Any]] = []
-    for page in pages:
-        if not isinstance(page, list):
-            continue
-        for item in page:
-            if isinstance(item, dict):
-                flattened.append(item)
-
-    merged: list[dict[str, Any]] = []
-    for item in flattened:
-        candidate = _new_v3_item(item, len(merged))
-        if merged and _should_merge_v3(
-            merged[-1],
-            candidate,
-            same_page_cross_column_y_tolerance=same_page_cross_column_y_tolerance,
-            cross_page_bottom_threshold=cross_page_bottom_threshold,
-            cross_page_top_threshold=cross_page_top_threshold,
-        ):
-            _merge_v3_item(merged[-1], candidate)
-        else:
-            merged.append(candidate)
-
-    for idx, item in enumerate(merged):
-        item["global_order"] = idx
-
-    return {
-        "schema_version": "content_v3_paragraph_merge",
-        "source_format": "content_list_v2_visual_order",
-        "config": {
-            "same_page_cross_column_y_tolerance": same_page_cross_column_y_tolerance,
-            "cross_page_bottom_threshold": cross_page_bottom_threshold,
-            "cross_page_top_threshold": cross_page_top_threshold,
-            "mergeable_types": sorted(MERGEABLE_TYPES),
-            "terminal_punctuation": sorted(TERMINAL_PUNCTUATION),
-        },
-        "items": merged,
-    }
-
-
-def build_content_v4(
-    content_v3_payload: dict[str, Any],
-    *,
-    x_alignment_tolerance: float = 28.0,
-    parent_indent_threshold: float = 20.0,
-    max_skipped_float_blocks: int = 3,
-    float_cross_page_top_threshold: float = 760.0,
-) -> dict[str, Any]:
-    """Add list annotations and merge clear paragraph continuations across floats."""
-
-    raw_items = content_v3_payload.get("items")
-    if not isinstance(raw_items, list):
-        raise ValueError("Expected content v3 payload with an items list")
-
-    items = [dict(item) for item in raw_items if isinstance(item, dict)]
+    items = _native_v2_items(native_payload)
     output: list[dict[str, Any]] = []
-    active_parent_idx: int | None = None
     list_item_counter = 0
-    consumed_indexes: set[int] = set()
 
-    for item_index, raw_item in enumerate(items):
-        if item_index in consumed_indexes:
-            continue
-
-        item = raw_item
-        text = str(item.get("text_for_embedding") or "")
+    for global_order, source in enumerate(items):
+        block = source["block"]
+        text = extract_text(block)
         marker = detect_list_marker(text)
-        item["list_marker"] = marker
-        item["list_level"] = None
-        item["list_item_id"] = None
-        item["list_parent_global_order"] = None
-
+        content = block.get("content")
+        list_type = content.get("list_type") if isinstance(content, dict) else None
+        reference_items = _extract_reference_items(block)
+        item = {
+            "global_order": global_order,
+            "page_idx": source["page_idx"],
+            "original_index": source["block_idx"],
+            "mineru_page_idx": source["page_idx"],
+            "mineru_block_idx": source["block_idx"],
+            "type": block.get("type"),
+            "raw_type": block.get("type"),
+            "list_type": list_type,
+            "reference_items": reference_items,
+            "bbox": list(block.get("bbox") or []),
+            "text_for_embedding": text,
+            "text": text,
+            "list_marker": marker,
+            "has_list_marker": marker is not None,
+            "list_item_id": None,
+            "block": block,
+        }
         if marker is not None:
-            parent_idx = _find_list_parent(output, item, parent_indent_threshold)
-            if parent_idx is not None:
-                active_parent_idx = parent_idx
-            list_item_id = f"li_{list_item_counter:05d}"
+            item["list_item_id"] = f"li_{list_item_counter:05d}"
             list_item_counter += 1
-            item["list_level"] = 1 if active_parent_idx is not None else 0
-            item["list_item_id"] = list_item_id
-            item["list_parent_global_order"] = (
-                output[active_parent_idx].get("global_order", active_parent_idx) if active_parent_idx is not None else None
-            )
-            output.append(item)
-            continue
-
-        continuation = _find_float_separated_paragraph_continuation(
-            items,
-            item_index,
-            max_skipped_float_blocks=max_skipped_float_blocks,
-            float_cross_page_top_threshold=float_cross_page_top_threshold,
-        )
-        if continuation is not None:
-            continuation_index, skipped = continuation
-            _merge_v3_item(item, _new_v3_item_like(items[continuation_index]))
-            item["float_continuation_merge_count"] = int(item.get("float_continuation_merge_count", 0)) + 1
-            item["skipped_float_global_orders"] = [
-                skipped_item.get("global_order", items.index(skipped_item))
-                for skipped_item in skipped
-            ]
-            item["skipped_float_types"] = [skipped_item.get("type") for skipped_item in skipped]
-            consumed_indexes.add(continuation_index)
-
         output.append(item)
-        if item.get("type") not in MERGEABLE_TYPES:
-            active_parent_idx = None
-
-    for idx, item in enumerate(output):
-        item["global_order"] = idx
 
     return {
-        "schema_version": "content_v4_listaware",
-        "source_format": content_v3_payload.get("schema_version", "content_v3"),
+        "schema_version": "content_native_listmarkers",
+        "source_format": "mineru_content_list_v2",
         "config": {
-            "x_alignment_tolerance": x_alignment_tolerance,
-            "parent_indent_threshold": parent_indent_threshold,
-            "merge_marked_items": False,
-            "max_skipped_float_blocks": max_skipped_float_blocks,
-            "float_cross_page_top_threshold": float_cross_page_top_threshold,
-            "float_types": sorted(FLOAT_TYPES),
+            "preserve_mineru_page_block_order": True,
+            "preserve_bbox": True,
+            "sort_blocks": False,
+            "merge_paragraphs": False,
+            "merge_across_pages": False,
+            "merge_across_columns": False,
+            "infer_columns": False,
+            "rewrite_layout_positions": False,
+            "list_marker_detection": True,
+            "style_enrichment": "external_pymupdf_step",
         },
         "items": output,
     }
+
+
+def build_content_v7(native_payload: Any) -> dict[str, Any]:
+    """Build list/style-ready content after safe block-level column repair.
+
+    v7 preserves MinerU bbox coordinates and text atomics, adds list-marker
+    metadata, then overwrites global order with `fix_columnar_reading_order`
+    page by page. It does not merge text, append bbox chunks, infer paragraph
+    continuations, or alter coordinates.
+    """
+
+    native = _build_native_listmarked_content(native_payload)
+    page_groups: dict[int, list[dict[str, Any]]] = {}
+    for item in native["items"]:
+        page_idx = item.get("page_idx")
+        page = page_idx if isinstance(page_idx, int) else 0
+        page_groups.setdefault(page, []).append(dict(item))
+
+    ordered: list[dict[str, Any]] = []
+    for page_idx in sorted(page_groups):
+        fixed_page = fix_columnar_reading_order(page_groups[page_idx])
+        for page_order, item in enumerate(fixed_page):
+            item["column_fix_page_order"] = page_order
+            ordered.append(item)
+
+    for global_order, item in enumerate(ordered):
+        item["global_order"] = global_order
+        item["column_fix_global_order"] = global_order
+
+    return {
+        "schema_version": "content_v7_columnfix_listmarkers",
+        "source_format": "mineru_content_list_v2",
+        "config": {
+            **native["config"],
+            "preserve_mineru_page_block_order": False,
+            "safe_columnar_reading_order_fix": True,
+            "sort_blocks": "block_level_full_span_isolated_left_column_then_right_column",
+            "merge_paragraphs": False,
+            "merge_across_pages": False,
+            "merge_across_columns": False,
+            "rewrite_layout_positions": False,
+        },
+        "items": ordered,
+    }
+
+
+def fix_columnar_reading_order(
+    page_nodes: list[dict[str, Any]],
+    *,
+    full_span_width_ratio: float = 0.65,
+    center_margin_ratio: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Repair Z-shaped dual-column order for one page without touching bboxes.
+
+    FULL_SPAN nodes become their own vertical blocks. Consecutive HALF_SPAN
+    nodes between FULL_SPAN separators are sorted as left column top-to-bottom
+    followed by right column top-to-bottom.
+    """
+
+    nodes = [dict(node) for node in page_nodes if isinstance(node, dict)]
+    if len(nodes) <= 1:
+        return _annotate_columnar_order(nodes, page_width=0.0, center_x=0.0, margin=0.0)
+
+    page_width, center_x = _columnar_page_width_and_center(nodes)
+    if page_width <= 0.0:
+        return _annotate_columnar_order(nodes, page_width=0.0, center_x=0.0, margin=0.0)
+    margin = center_margin_ratio * page_width
+
+    views = [
+        _columnar_order_view(
+            node,
+            original_index=index,
+            page_width=page_width,
+            center_x=center_x,
+            margin=margin,
+            full_span_width_ratio=full_span_width_ratio,
+        )
+        for index, node in enumerate(nodes)
+    ]
+    y_ordered = sorted(views, key=_columnar_top_key)
+
+    blocks: list[tuple[str, list[ColumnarOrderView]]] = []
+    current_half_block: list[ColumnarOrderView] = []
+    for view in y_ordered:
+        if view.span_label == "FULL_SPAN":
+            if current_half_block:
+                blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
+                current_half_block = []
+            blocks.append(("FULL_SPAN", [view]))
+            continue
+        current_half_block.append(view)
+    if current_half_block:
+        blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
+
+    ordered_views: list[ColumnarOrderView] = []
+    for block_type, block in blocks:
+        if block_type == "FULL_SPAN":
+            ordered_views.extend(block)
+            continue
+        left_list = [view for view in block if view.column_label == "LEFT_COL"]
+        right_list = [view for view in block if view.column_label == "RIGHT_COL"]
+        left_list.sort(key=_columnar_top_key)
+        right_list.sort(key=_columnar_top_key)
+        ordered_views.extend(left_list + right_list)
+
+    ordered_nodes = []
+    for order, view in enumerate(ordered_views):
+        node = dict(view.node)
+        node["column_fix_index"] = order
+        node["column_fix_span"] = view.span_label
+        node["column_fix_column"] = view.column_label
+        node["column_fix_page_width"] = page_width
+        node["column_fix_center_x"] = center_x
+        node["column_fix_center_margin"] = margin
+        ordered_nodes.append(node)
+    return ordered_nodes
+
+
+def fuse_micro_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    y_center_tolerance_ratio: float = 0.30,
+    small_equation_width_ratio: float = 0.35,
+    small_equation_max_height: float = 48.0,
+    max_inline_gap: float = 80.0,
+) -> list[dict[str, Any]]:
+    """Fuse same-line text/math shards into stable macro text nodes.
+
+    This is intentionally a pre-reading-order pass. MinerU can emit inline
+    formulas and short text fragments as separate physical nodes; feeding those
+    shards directly to a GNN makes same-line order depend on noisy 2D topology.
+    We first cluster mergeable shards by physical text line, sort them by x0,
+    and replace each local run with one text node whose inline math is wrapped
+    in ``$...$``.
+    """
+
+    if not nodes:
+        return []
+
+    normalized_nodes = [dict(node) for node in nodes if isinstance(node, dict)]
+    candidates: list[tuple[int, dict[str, Any], tuple[float, float, float, float], int]] = []
+    candidate_indexes: set[int] = set()
+    for index, node in enumerate(normalized_nodes):
+        bbox = _micro_single_bbox(node)
+        page = _micro_node_page(node)
+        if bbox is None or page is None:
+            continue
+        if not _is_micro_mergeable_node(
+            node,
+            bbox,
+            page_width=_micro_page_width(normalized_nodes, page),
+            small_equation_width_ratio=small_equation_width_ratio,
+            small_equation_max_height=small_equation_max_height,
+        ):
+            continue
+        candidates.append((index, node, bbox, page))
+        candidate_indexes.add(index)
+
+    if not candidates:
+        return normalized_nodes
+
+    lines_by_page: dict[int, list[list[tuple[int, dict[str, Any], tuple[float, float, float, float]]]]] = {}
+    for index, node, bbox, page in sorted(candidates, key=lambda entry: (_micro_y_center(entry[2]), entry[2][0], entry[0])):
+        page_lines = lines_by_page.setdefault(page, [])
+        placed = False
+        for line in page_lines:
+            if _fits_micro_line(bbox, [entry[2] for entry in line], y_center_tolerance_ratio):
+                line.append((index, node, bbox))
+                placed = True
+                break
+        if not placed:
+            page_lines.append([(index, node, bbox)])
+
+    fused_nodes: list[dict[str, Any]] = []
+    for page, lines in lines_by_page.items():
+        page_width = _micro_page_width(normalized_nodes, page)
+        for line in lines:
+            sorted_line = sorted(line, key=lambda entry: (entry[2][0], entry[2][1], entry[0]))
+            for run in _split_micro_line_by_gap(sorted_line, max_inline_gap=max_inline_gap, page_width=page_width):
+                if len(run) == 1 and not _should_rewrite_single_micro_node(run[0][1]):
+                    continue
+                fused_nodes.append(_make_micro_fused_node(run, page=page))
+
+    if not fused_nodes:
+        return normalized_nodes
+
+    fused_source_indexes = {
+        index
+        for fused in fused_nodes
+        for index in fused.get("source_node_indexes", [])
+        if isinstance(index, int)
+    }
+    output_with_position: list[tuple[int, dict[str, Any]]] = [
+        (index, node)
+        for index, node in enumerate(normalized_nodes)
+        if index not in fused_source_indexes
+    ]
+    for fused in fused_nodes:
+        source_indexes = [value for value in fused.get("source_node_indexes", []) if isinstance(value, int)]
+        insertion_index = min(source_indexes) if source_indexes else len(normalized_nodes)
+        output_with_position.append((insertion_index, fused))
+    output = [node for _, node in sorted(output_with_position, key=lambda entry: entry[0])]
+    for order, node in enumerate(output):
+        node.setdefault("micro_fused_order", order)
+    return output
 
 
 def extract_text(block: dict[str, Any]) -> str:
@@ -409,11 +579,108 @@ def _extract_reference_items(block: dict[str, Any]) -> list[str]:
     return reference_items
 
 
-def has_terminal_punctuation(text: str) -> bool:
-    stripped = text.rstrip()
-    if not stripped:
-        return False
-    return stripped[-1] in TERMINAL_PUNCTUATION
+def _native_v2_items(payload: Any) -> list[dict[str, Any]]:
+    """Return MinerU native blocks in exact source order."""
+
+    if isinstance(payload, list) and (not payload or all(isinstance(page, list) for page in payload)):
+        items: list[dict[str, Any]] = []
+        for page_idx, page in enumerate(payload):
+            if not isinstance(page, list):
+                continue
+            for block_idx, block in enumerate(page):
+                if isinstance(block, dict):
+                    items.append({"page_idx": page_idx, "block_idx": block_idx, "block": dict(block)})
+        return items
+
+    if isinstance(payload, list) and all(isinstance(block, dict) for block in payload):
+        items = []
+        for block_idx, block in enumerate(payload):
+            page_idx = block.get("page_idx")
+            if not isinstance(page_idx, int):
+                page_idx = 0
+            items.append({"page_idx": page_idx, "block_idx": block_idx, "block": dict(block)})
+        return items
+
+    raise ValueError("Expected MinerU native content_list_v2 pages or a flat content_list")
+
+
+def _annotate_columnar_order(
+    nodes: list[dict[str, Any]],
+    *,
+    page_width: float,
+    center_x: float,
+    margin: float,
+) -> list[dict[str, Any]]:
+    annotated = []
+    for order, node in enumerate(nodes):
+        item = dict(node)
+        item["column_fix_index"] = order
+        item["column_fix_span"] = "FULL_SPAN"
+        item["column_fix_column"] = None
+        item["column_fix_page_width"] = page_width
+        item["column_fix_center_x"] = center_x
+        item["column_fix_center_margin"] = margin
+        annotated.append(item)
+    return annotated
+
+
+def _columnar_page_width_and_center(nodes: list[dict[str, Any]]) -> tuple[float, float]:
+    text_boxes = [
+        bbox
+        for node in nodes
+        for bbox in [_first_bbox(node.get("bbox"))]
+        if bbox is not None and _is_columnar_textual_node(node)
+    ]
+    boxes = text_boxes or [
+        bbox
+        for node in nodes
+        for bbox in [_first_bbox(node.get("bbox"))]
+        if bbox is not None
+    ]
+    if not boxes:
+        return 0.0, 0.0
+    min_x = min(bbox[0] for bbox in boxes)
+    max_x = max(bbox[2] for bbox in boxes)
+    page_width = max(0.0, max_x - min_x)
+    return page_width, min_x + page_width / 2.0
+
+
+def _is_columnar_textual_node(node: dict[str, Any]) -> bool:
+    node_type = str(node.get("type") or node.get("raw_type") or "").lower()
+    if node_type in TEXTUAL_TYPES:
+        return True
+    if node.get("text_for_embedding") or node.get("text"):
+        return True
+    block = node.get("block")
+    return isinstance(block, dict) and str(block.get("type") or "").lower() in TEXTUAL_TYPES
+
+
+def _columnar_order_view(
+    node: dict[str, Any],
+    *,
+    original_index: int,
+    page_width: float,
+    center_x: float,
+    margin: float,
+    full_span_width_ratio: float,
+) -> ColumnarOrderView:
+    bbox = _first_bbox(node.get("bbox"))
+    if bbox is None:
+        return ColumnarOrderView(node=node, original_index=original_index, bbox=None, span_label="FULL_SPAN", column_label=None)
+
+    width = max(0.0, bbox[2] - bbox[0])
+    crosses_center = bbox[0] < center_x - margin and bbox[2] > center_x + margin
+    is_full_span = width > full_span_width_ratio * page_width or crosses_center
+    if is_full_span:
+        return ColumnarOrderView(node=node, original_index=original_index, bbox=bbox, span_label="FULL_SPAN", column_label=None)
+
+    center = (bbox[0] + bbox[2]) / 2.0
+    column_label = "LEFT_COL" if center <= center_x else "RIGHT_COL"
+    return ColumnarOrderView(node=node, original_index=original_index, bbox=bbox, span_label="HALF_SPAN", column_label=column_label)
+
+
+def _columnar_top_key(view: ColumnarOrderView) -> tuple[float, float, int]:
+    return (view.y0, view.x0, view.original_index)
 
 
 def detect_list_marker(text: str) -> dict[str, str] | None:
@@ -457,23 +724,14 @@ def _parse_bbox(value: Any) -> tuple[float, float, float, float]:
 
 def _sort_page_blocks(blocks: list[BlockView], cfg: SortConfig) -> list[BlockView]:
     column_blocks, full_width_blocks = _assign_columns(blocks, cfg)
-    full_width_blocks = sorted(full_width_blocks, key=lambda view: (view.y0, view.x0, view.original_index))
-
-    ordered: list[BlockView] = []
-    emitted: set[int] = set()
-    for full in full_width_blocks:
-        before = [
-            view
-            for view in column_blocks
-            if view.original_index not in emitted and view.cy < full.y0 - cfg.y_tolerance
-        ]
-        ordered.extend(_sort_column_region(before))
-        emitted.update(view.original_index for view in before)
-        ordered.append(full)
-
-    remaining = [view for view in column_blocks if view.original_index not in emitted]
-    ordered.extend(_sort_column_region(remaining))
-    return ordered
+    assigned = column_blocks + full_width_blocks
+    return rebuild_reading_order(
+        assigned,
+        full_span_ratio=cfg.full_width_ratio,
+        x_tolerance=5.0,
+        y_tolerance=cfg.y_tolerance,
+        fallback_key=lambda view: (view.y0, view.x0, view.original_index),
+    )
 
 
 def _assign_columns(blocks: list[BlockView], cfg: SortConfig) -> tuple[list[BlockView], list[BlockView]]:
@@ -519,15 +777,6 @@ def _infer_column_split(blocks: list[BlockView], cfg: SortConfig) -> float | Non
     if best_gap < cfg.min_column_gap or best_index < 0:
         return None
     return (centers[best_index] + centers[best_index + 1]) / 2.0
-
-
-def _sort_column_region(blocks: list[BlockView]) -> list[BlockView]:
-    """Sort one region between full-width blocks: left column, then right."""
-
-    return sorted(
-        blocks,
-        key=lambda view: (view.column_id or 0, view.y0, view.x0, view.original_index),
-    )
 
 
 def _enrich_ordered_blocks(ordered: list[BlockView]) -> list[dict[str, Any]]:
@@ -594,108 +843,290 @@ def _logical_block_type(block: dict[str, Any]) -> Any:
     return block.get("type")
 
 
-def _new_v3_item(item: dict[str, Any], global_order: int) -> dict[str, Any]:
-    bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else []
-    text = item.get("text_for_embedding") or ""
-    return {
-        "global_order": global_order,
-        "type": item.get("type"),
-        "raw_type": item.get("raw_type"),
-        "list_type": item.get("list_type"),
-        "reference_items": list(item.get("reference_items") or []),
-        "page_idx": item.get("page_idx"),
-        "visual_order": item.get("visual_order"),
-        "original_index": item.get("original_index"),
-        "bbox": list(bbox),
-        "column_id": item.get("column_id"),
-        "is_full_width": item.get("is_full_width"),
-        "is_textual": item.get("is_textual"),
-        "text_for_embedding": text,
-        "merge_count": 1,
-        "source_page_idxs": [item.get("page_idx")],
-        "source_visual_orders": [item.get("visual_order")],
-        "source_original_indexes": [item.get("original_index")],
-        "block": item.get("block"),
-    }
-
-
-def _should_merge_v3(
-    previous: dict[str, Any],
-    current: dict[str, Any],
+def _is_micro_mergeable_node(
+    node: dict[str, Any],
+    bbox: tuple[float, float, float, float],
     *,
-    same_page_cross_column_y_tolerance: float,
-    cross_page_bottom_threshold: float,
-    cross_page_top_threshold: float,
+    page_width: float,
+    small_equation_width_ratio: float,
+    small_equation_max_height: float,
 ) -> bool:
-    if previous.get("type") != current.get("type"):
+    node_type = _micro_node_type(node)
+    if node_type in MICRO_STRUCTURAL_TYPES:
         return False
-    if previous.get("type") not in MERGEABLE_TYPES:
+    if not _micro_node_text(node).strip():
         return False
-    if not previous.get("text_for_embedding") or not current.get("text_for_embedding"):
-        return False
-    if has_terminal_punctuation(str(previous.get("text_for_embedding", ""))):
-        return False
-
-    prev_page = _last_value(previous.get("source_page_idxs"))
-    cur_page = current.get("page_idx")
-    if not isinstance(prev_page, int) or not isinstance(cur_page, int):
-        return False
-
-    prev_bbox = _last_bbox(previous.get("bbox"))
-    cur_bbox = _first_bbox(current.get("bbox"))
-    if prev_bbox is None or cur_bbox is None:
-        return False
-
-    if prev_page == cur_page:
-        return _is_same_page_cross_column_continuation(previous, current, prev_bbox, cur_bbox, same_page_cross_column_y_tolerance)
-    if cur_page == prev_page + 1:
-        return prev_bbox[3] >= cross_page_bottom_threshold and cur_bbox[1] <= cross_page_top_threshold
+    if node_type in MICRO_INLINE_MATH_TYPES:
+        return True
+    if node_type in MICRO_TEXT_TYPES:
+        return True
+    if node_type in MICRO_EQUATION_TYPES:
+        width = max(0.0, bbox[2] - bbox[0])
+        height = max(0.0, bbox[3] - bbox[1])
+        return height <= small_equation_max_height and width <= max(1.0, page_width) * small_equation_width_ratio
     return False
 
 
-def _merge_v3_item(previous: dict[str, Any], current: dict[str, Any]) -> None:
-    previous["bbox"].extend(current.get("bbox", []))
-    previous["text_for_embedding"] = _join_continuation_text(
-        str(previous.get("text_for_embedding", "")),
-        str(current.get("text_for_embedding", "")),
-    )
-    previous["merge_count"] = int(previous.get("merge_count", 1)) + int(current.get("merge_count", 1))
-    for key in ("source_page_idxs", "source_visual_orders", "source_original_indexes"):
-        previous.setdefault(key, [])
-        previous[key].extend(current.get(key, []))
+def _micro_node_type(node: dict[str, Any]) -> str:
+    return str(node.get("type") or node.get("raw_type") or node.get("block_type") or "").casefold()
 
 
-def _join_continuation_text(left: str, right: str) -> str:
-    left = left.rstrip()
-    right = right.lstrip()
-    if not left:
-        return right
-    if not right:
-        return left
-    if left.endswith("-"):
-        return left[:-1] + right
-    return left + " " + right
+def _micro_node_text(node: dict[str, Any]) -> str:
+    for key in ("text_for_embedding", "text", "content", "latex"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    block = node.get("block")
+    if isinstance(block, dict):
+        text = extract_text(block)
+        if text:
+            return text
+    return ""
 
 
-def _is_same_page_cross_column_continuation(
-    previous: dict[str, Any],
-    current: dict[str, Any],
-    prev_bbox: tuple[float, float, float, float],
-    cur_bbox: tuple[float, float, float, float],
-    y_tolerance: float,
-) -> bool:
-    prev_col = previous.get("column_id")
-    cur_col = current.get("column_id")
-    if prev_col == 0 and cur_col == 1:
-        return cur_bbox[1] <= prev_bbox[1] + y_tolerance
-    return False
-
-
-def _last_bbox(value: Any) -> tuple[float, float, float, float] | None:
-    if not isinstance(value, list) or len(value) < 4 or len(value) % 4 != 0:
+def _micro_single_bbox(node: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = node.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
         return None
-    vals = value[-4:]
-    return (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+    try:
+        x0, y0, x1, y1 = (float(part) for part in bbox)
+    except (TypeError, ValueError):
+        return None
+    if x1 < x0 or y1 < y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _micro_node_page(node: dict[str, Any]) -> int | None:
+    pages = node.get("source_page_idxs")
+    if isinstance(pages, list) and len(pages) == 1 and isinstance(pages[0], int):
+        return pages[0]
+    page = node.get("page_idx")
+    return page if isinstance(page, int) else None
+
+
+def _micro_page_width(nodes: list[dict[str, Any]], page: int) -> float:
+    boxes = [
+        bbox
+        for node in nodes
+        if _micro_node_page(node) == page
+        for bbox in [_micro_single_bbox(node)]
+        if bbox is not None
+    ]
+    if not boxes:
+        return 1000.0
+    return max(1.0, max(bbox[2] for bbox in boxes) - min(bbox[0] for bbox in boxes))
+
+
+def _micro_y_center(bbox: tuple[float, float, float, float]) -> float:
+    return (bbox[1] + bbox[3]) / 2.0
+
+
+def _micro_height(bbox: tuple[float, float, float, float]) -> float:
+    return max(1.0, bbox[3] - bbox[1])
+
+
+def _fits_micro_line(
+    bbox: tuple[float, float, float, float],
+    line_bboxes: list[tuple[float, float, float, float]],
+    y_center_tolerance_ratio: float,
+) -> bool:
+    if not line_bboxes:
+        return True
+    center = _micro_y_center(bbox)
+    height = _micro_height(bbox)
+    for line_bbox in line_bboxes:
+        line_center = _micro_y_center(line_bbox)
+        line_height = _micro_height(line_bbox)
+        tolerance = y_center_tolerance_ratio * ((height + line_height) / 2.0)
+        if abs(center - line_center) <= tolerance:
+            return True
+    return False
+
+
+def _split_micro_line_by_gap(
+    line: list[tuple[int, dict[str, Any], tuple[float, float, float, float]]],
+    *,
+    max_inline_gap: float,
+    page_width: float,
+) -> list[list[tuple[int, dict[str, Any], tuple[float, float, float, float]]]]:
+    if not line:
+        return []
+    runs: list[list[tuple[int, dict[str, Any], tuple[float, float, float, float]]]] = [[line[0]]]
+    for entry in line[1:]:
+        previous_bbox = runs[-1][-1][2]
+        bbox = entry[2]
+        gap = bbox[0] - previous_bbox[2]
+        avg_height = (_micro_height(previous_bbox) + _micro_height(bbox)) / 2.0
+        safe_gap = min(max_inline_gap, max(20.0, page_width * 0.06, avg_height * 4.0))
+        if gap > safe_gap:
+            runs.append([entry])
+        else:
+            runs[-1].append(entry)
+    return runs
+
+
+def _should_rewrite_single_micro_node(node: dict[str, Any]) -> bool:
+    return _micro_node_type(node) in MICRO_INLINE_MATH_TYPES
+
+
+def _make_micro_fused_node(
+    run: list[tuple[int, dict[str, Any], tuple[float, float, float, float]]],
+    *,
+    page: int,
+) -> dict[str, Any]:
+    ordered = sorted(run, key=lambda entry: (entry[2][0], entry[2][1], entry[0]))
+    bboxes = [entry[2] for entry in ordered]
+    source_nodes = [entry[1] for entry in ordered]
+    source_indexes = [entry[0] for entry in ordered]
+    text = _fuse_micro_text(source_nodes, bboxes)
+    global_orders = [_numeric_or_none(node.get("global_order")) for node in source_nodes]
+    visual_orders = [_numeric_or_none(node.get("visual_order")) for node in source_nodes]
+    original_indexes = [_numeric_or_none(node.get("original_index")) for node in source_nodes]
+    style_spans = [
+        dict(span)
+        for node in source_nodes
+        for span in (node.get("style_spans") if isinstance(node.get("style_spans"), list) else [])
+        if isinstance(span, dict)
+    ]
+
+    fused: dict[str, Any] = {
+        "type": "text",
+        "raw_type": "micro_fused_line",
+        "page_idx": page,
+        "bbox": [
+            min(bbox[0] for bbox in bboxes),
+            min(bbox[1] for bbox in bboxes),
+            max(bbox[2] for bbox in bboxes),
+            max(bbox[3] for bbox in bboxes),
+        ],
+        "text_for_embedding": text,
+        "text": text,
+        "is_textual": True,
+        "is_full_width": False,
+        "micro_fused": True,
+        "micro_fusion_count": len(source_nodes),
+        "source_node_indexes": source_indexes,
+        "source_global_orders": [int(value) for value in global_orders if value is not None],
+        "source_visual_orders": [int(value) for value in visual_orders if value is not None],
+        "source_original_indexes": [int(value) for value in original_indexes if value is not None],
+        "source_page_idxs": [page],
+        "micro_source_types": [_micro_node_type(node) for node in source_nodes],
+        "block": {
+            "type": "paragraph",
+            "content": {"paragraph_content": [{"type": "text", "content": text}]},
+        },
+    }
+    if style_spans:
+        fused["style_spans"] = style_spans
+        fused["style_baseline_size"] = _weighted_micro_font_size(style_spans)
+    if any(node.get("column_id") is not None for node in source_nodes):
+        fused["column_id"] = source_nodes[0].get("column_id")
+    if any(value is not None for value in global_orders):
+        fused["global_order"] = min(value for value in global_orders if value is not None)
+    if any(value is not None for value in visual_orders):
+        fused["visual_order"] = min(value for value in visual_orders if value is not None)
+    if any(value is not None for value in original_indexes):
+        fused["original_index"] = min(value for value in original_indexes if value is not None)
+    return fused
+
+
+def _fuse_micro_text(nodes: list[dict[str, Any]], bboxes: list[tuple[float, float, float, float]]) -> str:
+    text = ""
+    previous_bbox: tuple[float, float, float, float] | None = None
+    for node, bbox in zip(nodes, bboxes):
+        piece = _micro_text_piece(node)
+        if not piece:
+            continue
+        if not text:
+            text = piece
+        elif _micro_should_join_without_space(text, piece, previous_bbox, bbox):
+            text += piece
+        else:
+            text += " " + piece
+        previous_bbox = bbox
+    return " ".join(text.split())
+
+
+def _micro_text_piece(node: dict[str, Any]) -> str:
+    text = " ".join(_micro_node_text(node).split())
+    if not text:
+        return ""
+    if _micro_node_type(node) in MICRO_INLINE_MATH_TYPES | MICRO_EQUATION_TYPES:
+        return _ensure_inline_math(text)
+    return text
+
+
+def _ensure_inline_math(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if (stripped.startswith("$") and stripped.endswith("$")) or (
+        stripped.startswith(r"\(") and stripped.endswith(r"\)")
+    ):
+        return stripped
+    if stripped.startswith(r"\[") and stripped.endswith(r"\]"):
+        stripped = stripped[2:-2].strip()
+    return f"${stripped}$"
+
+
+def _micro_should_join_without_space(
+    left: str,
+    right: str,
+    previous_bbox: tuple[float, float, float, float] | None,
+    bbox: tuple[float, float, float, float],
+) -> bool:
+    if not left or not right:
+        return False
+    if right[0] in ",.;:!?%)]}，。；：！？、》）】":
+        return True
+    if left[-1] in "([{（《【":
+        return True
+    if previous_bbox is not None:
+        gap = bbox[0] - previous_bbox[2]
+        avg_height = (_micro_height(previous_bbox) + _micro_height(bbox)) / 2.0
+        if gap <= max(1.0, avg_height * 0.12):
+            return True
+    return False
+
+
+def _weighted_micro_font_size(style_spans: list[dict[str, Any]]) -> float:
+    weighted: dict[float, int] = {}
+    for span in style_spans:
+        size = span.get("font_size")
+        if not isinstance(size, (int, float)):
+            continue
+        weight = int(span.get("char_count") or len(str(span.get("text") or "")) or 1)
+        weighted[float(size)] = weighted.get(float(size), 0) + max(1, weight)
+    if not weighted:
+        return 0.0
+    return max(weighted.items(), key=lambda item: item[1])[0]
+
+
+def _numeric_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _micro_output_sort_key(node: dict[str, Any]) -> tuple[int, float, float, int]:
+    bbox = _micro_single_bbox(node) or _first_bbox(node.get("bbox")) or (0.0, 0.0, 0.0, 0.0)
+    page = _micro_node_page(node)
+    if page is None:
+        page = 0
+    source_indexes = node.get("source_node_indexes")
+    int_source_indexes = [int(value) for value in source_indexes if isinstance(value, int)] if isinstance(source_indexes, list) else []
+    if int_source_indexes:
+        source_index = min(int_source_indexes)
+    else:
+        source_index = _numeric_or_none(node.get("global_order"))
+        if source_index is None:
+            source_index = _numeric_or_none(node.get("original_index")) or 0
+    return (page, bbox[1], bbox[0], source_index)
 
 
 def _first_bbox(value: Any) -> tuple[float, float, float, float] | None:
@@ -703,88 +1134,3 @@ def _first_bbox(value: Any) -> tuple[float, float, float, float] | None:
         return None
     vals = value[:4]
     return (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
-
-
-def _last_value(value: Any) -> Any:
-    if isinstance(value, list) and value:
-        return value[-1]
-    return None
-
-
-def _new_v3_item_like(item: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "bbox": list(item.get("bbox") or []),
-        "text_for_embedding": item.get("text_for_embedding") or "",
-        "merge_count": item.get("merge_count", 1),
-        "source_page_idxs": list(item.get("source_page_idxs") or [item.get("page_idx")]),
-        "source_visual_orders": list(item.get("source_visual_orders") or [item.get("visual_order")]),
-        "source_original_indexes": list(item.get("source_original_indexes") or [item.get("original_index")]),
-    }
-
-
-def _find_float_separated_paragraph_continuation(
-    items: list[dict[str, Any]],
-    item_index: int,
-    *,
-    max_skipped_float_blocks: int,
-    float_cross_page_top_threshold: float,
-) -> tuple[int, list[dict[str, Any]]] | None:
-    current = items[item_index]
-    if current.get("type") != "paragraph":
-        return None
-    if detect_list_marker(str(current.get("text_for_embedding") or "")) is not None:
-        return None
-    if not str(current.get("text_for_embedding") or "").rstrip().endswith("-"):
-        return None
-
-    skipped: list[dict[str, Any]] = []
-    cursor = item_index + 1
-    while cursor < len(items) and _is_float_block(items[cursor]) and len(skipped) < max_skipped_float_blocks:
-        skipped.append(items[cursor])
-        cursor += 1
-
-    if not skipped or cursor >= len(items):
-        return None
-
-    candidate = items[cursor]
-    if candidate.get("type") != "paragraph":
-        return None
-    if detect_list_marker(str(candidate.get("text_for_embedding") or "")) is not None:
-        return None
-    if not candidate.get("text_for_embedding"):
-        return None
-
-    prev_page = _last_value(current.get("source_page_idxs"))
-    cur_page = candidate.get("page_idx")
-    prev_bbox = _last_bbox(current.get("bbox"))
-    cur_bbox = _first_bbox(candidate.get("bbox"))
-    if not isinstance(prev_page, int) or not isinstance(cur_page, int) or prev_bbox is None or cur_bbox is None:
-        return None
-
-    if cur_page == prev_page + 1 and cur_bbox[1] <= float_cross_page_top_threshold:
-        return cursor, skipped
-    if cur_page == prev_page:
-        return cursor, skipped
-    return None
-
-
-def _is_float_block(item: dict[str, Any]) -> bool:
-    return str(item.get("type") or "").lower() in FLOAT_TYPES
-
-
-def _find_list_parent(output: list[dict[str, Any]], item: dict[str, Any], indent_threshold: float) -> int | None:
-    item_bbox = _first_bbox(item.get("bbox"))
-    if item_bbox is None:
-        return None
-    for idx in range(len(output) - 1, -1, -1):
-        candidate = output[idx]
-        text = str(candidate.get("text_for_embedding") or "").rstrip()
-        if not text.endswith((':', '：')):
-            continue
-        candidate_bbox = _first_bbox(candidate.get("bbox"))
-        if candidate_bbox is None:
-            continue
-        if item_bbox[0] > candidate_bbox[0] + indent_threshold:
-            return idx
-        return None
-    return None

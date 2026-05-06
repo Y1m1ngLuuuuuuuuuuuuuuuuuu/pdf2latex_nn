@@ -7,12 +7,35 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.perception.xy_cut import sort_nodes_by_reading_order
+from src.perception.title_features import strip_title_numbering, title_numbering_level
 
-DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref"]
+
+DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref", "float", "algorithm", "algpseudocode"]
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 DEFAULT_PREAMBLE_COMMANDS = [r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}"]
-LIST_MARKER_RE = re.compile(r"^\s*(?:\u2022|\u25E6|\-|\*|[0-9]+\.|[a-zA-Z]\.)\s+")
+LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
+ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+NUMERIC_ID_RE = re.compile(r"\d+")
+PSEUDOCODE_START_RE = re.compile(
+    r"^\s*(?:Algorithm\s*\d+\b|Input\s*:|Output\s*:|Require\s*:|Ensure\s*:)",
+    re.IGNORECASE,
+)
+PSEUDOCODE_BREAK_RE = re.compile(
+    r"\s+(?=(?:Input|Output|Require|Ensure)\s*:|Algorithm\s*\d+\b|(?:for|while|if|else|elif|return|end)\b)",
+    re.IGNORECASE,
+)
+VERBATIM_END_RE = re.compile(r"\\end\s*\{\s*verbatim\s*\}", re.IGNORECASE)
+ALGORITHM_CAPTION_RE = re.compile(r"^\s*Algorithm\s*(?:\d+)?\s*[:.\-]?\s*(.*)$", re.IGNORECASE)
+PSEUDOCODE_IO_RE = re.compile(r"^\s*(Input|Require|Output|Ensure)\s*:\s*(.*)$", re.IGNORECASE)
+PSEUDOCODE_FOR_RE = re.compile(r"^\s*for\s+(.+?)(?:\s+do)?\s*$", re.IGNORECASE)
+PSEUDOCODE_WHILE_RE = re.compile(r"^\s*while\s+(.+?)(?:\s+do)?\s*$", re.IGNORECASE)
+PSEUDOCODE_IF_RE = re.compile(r"^\s*if\s+(.+?)(?:\s+then)?\s*$", re.IGNORECASE)
+PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
+PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
+TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
+LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 
 
 @dataclass
@@ -47,8 +70,10 @@ def render_node(node: Any, *, depth: int = 0) -> str:
     record = getattr(node, "record", node if isinstance(node, dict) else {})
     block_type = canonical_render_type(record)
     text = node_text(node)
-    children = list(getattr(node, "children", record.get("children", [])))
+    children = sorted_render_children(getattr(node, "children", record.get("children", [])))
 
+    if is_algorithm_like_node(record, text):
+        return render_algorithm_block(text)
     if block_type == "title":
         body = [render_title(text, depth=depth)] if text else []
         body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
@@ -58,12 +83,10 @@ def render_node(node: Any, *, depth: int = 0) -> str:
     if block_type == "inline_math":
         return render_inline_math(text)
     if block_type == "table":
-        return render_verbatim_like(text, "table")
+        return render_table_placeholder(record, text)
     if block_type == "figure":
         caption = escape_latex(text) if text else "Figure"
         return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
-    if block_type in {"algorithm", "code"}:
-        return render_verbatim_like(text, block_type)
     if block_type == "reference":
         return render_references(record, text)
     if block_type == "list":
@@ -77,17 +100,18 @@ def render_node(node: Any, *, depth: int = 0) -> str:
 
 
 def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list[str]:
-    child_list = list(children or [])
+    child_list = sorted_render_children(children)
     rendered: list[str] = []
     index = 0
     while index < len(child_list):
         child = child_list[index]
-        if is_bullet_list_candidate(child):
+        list_environment = list_environment_for_node(child)
+        if list_environment is not None:
             run: list[Any] = []
-            while index < len(child_list) and is_bullet_list_candidate(child_list[index]):
+            while index < len(child_list) and list_environment_for_node(child_list[index]) is not None:
                 run.append(child_list[index])
                 index += 1
-            rendered.append(render_dynamic_itemize(run, depth=depth))
+            rendered.append(render_dynamic_list_group(run, environment=list_environment, depth=depth))
             continue
         block = render_child_block(child, depth=depth)
         if block:
@@ -102,23 +126,50 @@ def render_child_block(child: Any, *, depth: int) -> str:
 
 
 def is_bullet_list_candidate(node: Any) -> bool:
+    return list_environment_for_node(node) is not None
+
+
+def list_environment_for_node(node: Any) -> str | None:
     record = getattr(node, "record", node if isinstance(node, dict) else {})
-    if canonical_render_type(record) != "text":
-        return False
-    return bool(LIST_MARKER_RE.match(node_text(node)))
+    block_type = canonical_render_type(record)
+    text = node_text(node)
+    children = getattr(node, "children", record.get("children", []))
+    if block_type == "list" and not children:
+        return list_environment_for_record(record, fallback_text=text)
+    if block_type != "text":
+        return None
+    return list_environment_for_text(text)
 
 
-def render_dynamic_itemize(items: list[Any], *, depth: int) -> str:
-    lines = [r"\begin{itemize}"]
+def list_environment_for_record(record: dict[str, Any], *, fallback_text: str = "") -> str:
+    explicit = str(record.get("list_type") or record.get("list_style") or record.get("enum_type") or "").casefold()
+    if explicit in {"ordered", "enumerate", "numbered", "number", "alpha", "roman"}:
+        return "enumerate"
+    text = fallback_text or node_text(record)
+    return list_environment_for_text(text) or "itemize"
+
+
+def list_environment_for_text(text: str) -> str | None:
+    value = str(text or "")
+    if not LIST_MARKER_RE.match(value):
+        return None
+    return "enumerate" if ORDERED_LIST_MARKER_RE.match(value) else "itemize"
+
+
+def render_dynamic_list_group(items: list[Any], *, environment: str, depth: int) -> str:
+    lines = [rf"\begin{{{environment}}}"]
     for item in items:
-        item_text = strip_list_marker(node_text(item))
-        item_body = escape_latex(item_text) if item_text else ""
+        item_body = render_textual_node_without_list_marker(item) if node_text(item) else ""
         nested = render_child_blocks_with_dynamic_lists(getattr(item, "children", []), depth=depth + 1)
         if nested:
             item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
         lines.append(rf"\item {item_body}".rstrip())
-    lines.append(r"\end{itemize}")
+    lines.append(rf"\end{{{environment}}}")
     return "\n".join(lines)
+
+
+def render_dynamic_itemize(items: list[Any], *, depth: int) -> str:
+    return render_dynamic_list_group(items, environment="itemize", depth=depth)
 
 
 def strip_list_marker(text: str) -> str:
@@ -126,15 +177,21 @@ def strip_list_marker(text: str) -> str:
 
 
 def render_list_node(node: Any, *, depth: int) -> str:
-    children = list(getattr(node, "children", []))
+    record = getattr(node, "record", node if isinstance(node, dict) else {})
+    children = sorted_render_children(getattr(node, "children", record.get("children", [])))
+    environment = list_environment_for_record(record, fallback_text=node_text(node))
     if not children:
         text = node_text(node)
-        return "\\begin{itemize}\n" + rf"\item {escape_latex(text)}" + "\n\\end{itemize}"
-    lines = [r"\begin{itemize}"]
+        item_body = render_textual_node_without_list_marker(node) if text else ""
+        return rf"\begin{{{environment}}}" + "\n" + rf"\item {item_body}".rstrip() + "\n" + rf"\end{{{environment}}}"
+    first_child_environment = list_environment_for_node(children[0])
+    if first_child_environment is not None:
+        environment = first_child_environment
+    lines = [rf"\begin{{{environment}}}"]
     for child in children:
         item_body = render_list_item(child, depth=depth + 1)
         lines.append(rf"\item {item_body}".rstrip())
-    lines.append(r"\end{itemize}")
+    lines.append(rf"\end{{{environment}}}")
     return "\n".join(lines)
 
 
@@ -142,23 +199,23 @@ def render_list_item(node: Any, *, depth: int) -> str:
     record = getattr(node, "record", node if isinstance(node, dict) else {})
     block_type = canonical_render_type(record)
     text = node_text(node)
-    if block_type == "equation":
+    if is_algorithm_like_node(record, text):
+        item_body = render_algorithm_block(text)
+    elif block_type == "equation":
         item_body = render_equation(text)
     elif block_type == "inline_math":
         item_body = render_inline_math(text)
     else:
-        item_body = render_textual_content(record, text) if text else ""
-    nested = [render_node(grandchild, depth=depth + 1) for grandchild in getattr(node, "children", [])]
+        item_body = render_textual_node_without_list_marker(node) if text else ""
+    nested = [render_node(grandchild, depth=depth + 1) for grandchild in sorted_render_children(getattr(node, "children", []))]
     if nested:
         item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
     return item_body
 
 
 def render_references(record: dict[str, Any], fallback_text: str) -> str:
-    references = record.get("reference_items")
-    if isinstance(references, list) and references:
-        items = [str(item.get("text") if isinstance(item, dict) else item).strip() for item in references]
-    else:
+    items = collect_reference_items(record)
+    if not items:
         items = [line.strip() for line in re.split(r"\n+|\s{2,}", fallback_text) if line.strip()]
     if not items:
         return ""
@@ -169,15 +226,232 @@ def render_references(record: dict[str, Any], fallback_text: str) -> str:
     return "\n".join(lines)
 
 
+def collect_reference_items(record: dict[str, Any]) -> list[str]:
+    items = normalize_reference_items(record.get("reference_items"))
+    for merged_record in record.get("merged_records", []):
+        if isinstance(merged_record, dict):
+            items.extend(normalize_reference_items(merged_record.get("reference_items")))
+    return [item for item in items if item]
+
+
+def normalize_reference_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        text = item.get("text") if isinstance(item, dict) else item
+        text = str(text or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
 def render_verbatim_like(text: str, label: str) -> str:
     if not text:
         return f"% empty {label} block"
     return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}"
 
 
+def is_algorithm_like_node(record: dict[str, Any], text: str) -> bool:
+    if canonical_render_type(record) in {"algorithm", "code"}:
+        return True
+    return bool(PSEUDOCODE_START_RE.match(str(text or "")))
+
+
+def render_algorithm_block(text: str) -> str:
+    caption, commands = parse_pseudo_code(text)
+    lines = [r"\begin{algorithm}[H]"]
+    if caption:
+        lines.append(rf"\caption{{{escape_latex(caption)}}}")
+    lines.append(r"\begin{algorithmic}[1]")
+    lines.extend(commands or [r"\State " + format_algorithmic_text(text)])
+    lines.append(r"\end{algorithmic}")
+    lines.append(r"\end{algorithm}")
+    return "\n".join(lines)
+
+
+def parse_pseudo_code(text: str) -> tuple[str | None, list[str]]:
+    body = restore_algorithm_line_breaks(text)
+    raw_lines = [line.strip() for line in body.split("\n") if line.strip()]
+    caption: str | None = None
+    commands: list[str] = []
+    block_stack: list[str] = []
+
+    for raw_line in raw_lines:
+        line = strip_pseudocode_line_number(raw_line)
+        caption_match = ALGORITHM_CAPTION_RE.match(line)
+        if caption_match and caption is None:
+            caption = caption_match.group(1).strip() or "Algorithm"
+            continue
+
+        io_match = PSEUDOCODE_IO_RE.match(line)
+        if io_match:
+            kind, content = io_match.group(1).casefold(), io_match.group(2).strip()
+            command = r"\Require" if kind in {"input", "require"} else r"\Ensure"
+            commands.append(rf"{command} {format_algorithmic_text(content)}")
+            continue
+
+        end_match = PSEUDOCODE_END_RE.match(line)
+        if end_match:
+            close_kind = end_match.group(1)
+            commands.append(close_algorithmic_block(block_stack, close_kind))
+            continue
+
+        for_match = PSEUDOCODE_FOR_RE.match(line)
+        if for_match:
+            commands.append(rf"\For{{{format_algorithmic_text(for_match.group(1).strip())}}}")
+            block_stack.append("for")
+            continue
+
+        while_match = PSEUDOCODE_WHILE_RE.match(line)
+        if while_match:
+            commands.append(rf"\While{{{format_algorithmic_text(while_match.group(1).strip())}}}")
+            block_stack.append("while")
+            continue
+
+        if_match = PSEUDOCODE_IF_RE.match(line)
+        if if_match:
+            commands.append(rf"\If{{{format_algorithmic_text(if_match.group(1).strip())}}}")
+            block_stack.append("if")
+            continue
+
+        return_match = PSEUDOCODE_RETURN_RE.match(line)
+        if return_match:
+            commands.append(rf"\State \Return {format_algorithmic_text(return_match.group(1).strip())}")
+            continue
+
+        commands.append(rf"\State {format_algorithmic_text(line)}")
+
+    while block_stack:
+        commands.append(close_algorithmic_block(block_stack, None))
+    return caption, commands
+
+
+def strip_pseudocode_line_number(line: str) -> str:
+    return re.sub(r"^\s*\d+\s*[:.)]\s*", "", line).strip()
+
+
+def close_algorithmic_block(block_stack: list[str], close_kind: str | None) -> str:
+    normalized = str(close_kind or "").casefold()
+    if normalized in block_stack:
+        block_stack.pop(len(block_stack) - 1 - block_stack[::-1].index(normalized))
+        kind = normalized
+    elif block_stack:
+        kind = block_stack.pop()
+    else:
+        kind = normalized or "for"
+    if kind == "if":
+        return r"\EndIf"
+    if kind == "while":
+        return r"\EndWhile"
+    return r"\EndFor"
+
+
+def format_algorithmic_text(text: str) -> str:
+    prepared = normalize_algorithm_math_text(text)
+    if not prepared:
+        return ""
+    if LATEX_MATH_MARKER_RE.search(prepared):
+        return r"\(\displaystyle " + escape_algorithm_math_text(prepared) + r"\)"
+    return escape_latex(prepared)
+
+
+def normalize_algorithm_math_text(text: str) -> str:
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    normalized = normalized.replace("<-", r"\gets").replace("->", r"\to")
+    return " ".join(normalized.split())
+
+
+def escape_algorithm_math_text(text: str) -> str:
+    return (
+        str(text)
+        .replace("%", r"\%")
+        .replace("&", r"\&")
+        .replace("#", r"\#")
+    )
+
+
+def restore_algorithm_line_breaks(text: str) -> str:
+    body = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if "\n" in body:
+        return body
+    body = PSEUDOCODE_BREAK_RE.sub("\n", body)
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def sanitize_verbatim_body(text: str) -> str:
+    sanitized = VERBATIM_END_RE.sub(r"\\end {verbatim}", str(text or ""))
+    return "".join(_safe_code_verbatim_char(char) for char in sanitized)
+
+
+def render_table_placeholder(record: dict[str, Any], text: str) -> str:
+    table_id = table_node_identifier(record)
+    bbox = format_table_bbox(record.get("bbox"))
+    caption = extract_table_caption(text) or "Table reconstruction placeholder"
+    todo = f"% [TODO_TABLE_RECONSTRUCT: BBOX={bbox}, ID={table_id}]"
+    return "\n".join(
+        [
+            r"\begin{table}[H]",
+            r"\centering",
+            todo,
+            rf"\caption{{{escape_latex(caption)}}}",
+            r"\end{table}",
+        ]
+    )
+
+
+def table_node_identifier(record: dict[str, Any]) -> str:
+    for key in ("id", "block_id", "table_id"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    value = record.get("global_order")
+    if value is not None:
+        return f"table_{value}"
+    return "table_unknown"
+
+
+def format_table_bbox(value: Any) -> str:
+    if not isinstance(value, list) or len(value) < 4:
+        return "UNKNOWN"
+    try:
+        coords = [float(coord) for coord in value[:4]]
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    return "(" + ", ".join(format_bbox_number(coord) for coord in coords) + ")"
+
+
+def format_bbox_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+
+
+def extract_table_caption(text: str) -> str | None:
+    match = TABLE_CAPTION_RE.search(str(text or ""))
+    if not match:
+        return None
+    return " ".join(match.group(1).split())
+
+
+def _safe_code_verbatim_char(char: str) -> str:
+    if ord(char) < 128:
+        return char
+    if char in CODE_UNICODE_REPLACEMENTS:
+        return CODE_UNICODE_REPLACEMENTS[char]
+    ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+    return ascii_fallback or "?"
+
+
 def render_title(text: str, *, depth: int) -> str:
-    command = SECTION_COMMANDS[min(depth, len(SECTION_COMMANDS) - 1)]
-    return rf"\{command}{{{escape_latex(text)}}}"
+    command = title_command(text, depth=depth)
+    title_text = strip_title_numbering(text)
+    return rf"\{command}{{{escape_latex(title_text)}}}"
+
+
+def title_command(text: str, *, depth: int) -> str:
+    numbered_level = title_numbering_level(text)
+    if numbered_level is not None:
+        return SECTION_COMMANDS[min(numbered_level - 1, len(SECTION_COMMANDS) - 1)]
+    return SECTION_COMMANDS[min(max(0, depth), len(SECTION_COMMANDS) - 1)]
 
 
 def render_equation(text: str) -> str:
@@ -220,6 +494,73 @@ def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
     return normalize_latex_text("".join(rendered))
 
 
+def render_textual_node_without_list_marker(node: Any) -> str:
+    record = getattr(node, "record", node if isinstance(node, dict) else {})
+    records = [record] + [item for item in record.get("merged_records", []) if isinstance(item, dict)]
+    rendered_parts: list[str] = []
+    used_structured_content = False
+    marker_stripped = False
+    for current_record in records:
+        prepared_record = strip_list_marker_from_record(current_record) if not marker_stripped else current_record
+        if prepared_record is not current_record:
+            marker_stripped = True
+        rendered = render_textual_content(prepared_record, node_text(prepared_record))
+        if extract_content_segments(prepared_record):
+            used_structured_content = True
+        if rendered:
+            rendered_parts.append(rendered)
+    if rendered_parts:
+        if used_structured_content:
+            return merge_latex_fragments(rendered_parts)
+        return normalize_latex_text(" ".join(rendered_parts))
+    return escape_latex(strip_list_marker(node_text(node)))
+
+
+def strip_list_marker_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(record)
+    changed = False
+    for key in ("merged_text", "text_for_embedding", "text", "text_preview"):
+        value = prepared.get(key)
+        if isinstance(value, str) and LIST_MARKER_RE.match(value):
+            prepared[key] = strip_list_marker(value)
+            changed = True
+            break
+
+    block = prepared.get("block")
+    if isinstance(block, dict):
+        block_copy = dict(block)
+        content = block_copy.get("content")
+        content_copy: Any = content
+        segments = extract_content_segments(prepared)
+        if segments:
+            stripped_segments = []
+            stripped = False
+            for segment in segments:
+                segment_copy = dict(segment)
+                if not stripped and str(segment_copy.get("type") or "").lower() == "text":
+                    content_text = str(segment_copy.get("content") or segment_copy.get("text") or "")
+                    if LIST_MARKER_RE.match(content_text):
+                        replacement = strip_list_marker(content_text)
+                        if "content" in segment_copy:
+                            segment_copy["content"] = replacement
+                        else:
+                            segment_copy["text"] = replacement
+                        stripped = True
+                        changed = True
+                stripped_segments.append(segment_copy)
+            if isinstance(content, dict):
+                content_copy = dict(content)
+                for key in ("paragraph_content", "title_content", "content"):
+                    if isinstance(content_copy.get(key), list):
+                        content_copy[key] = stripped_segments
+                        break
+            elif isinstance(content, list):
+                content_copy = stripped_segments
+            block_copy["content"] = content_copy
+            prepared["block"] = block_copy
+    return prepared if changed else record
+
+
 def extract_content_segments(record: dict[str, Any]) -> list[dict[str, Any]]:
     block = record.get("block")
     if not isinstance(block, dict):
@@ -239,12 +580,104 @@ def normalize_latex_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def merge_latex_fragments(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        part = str(part or "").strip()
+        if not part:
+            continue
+        if not text:
+            text = part
+        elif part.startswith((",", ".", ";", ":", ")", "]", "}")):
+            text += part
+        else:
+            text += " " + part
+    return normalize_latex_text(text)
+
+
 def node_text(node: Any) -> str:
     if hasattr(node, "text"):
         return str(node.text).strip()
     if isinstance(node, dict):
         return str(node.get("text") or node.get("text_for_embedding") or node.get("text_preview") or "").strip()
     return ""
+
+
+def sorted_render_children(children: Any) -> list[Any]:
+    child_list = list(children or [])
+    if any(has_explicit_reading_order(getattr(child, "record", child if isinstance(child, dict) else {})) for child in child_list):
+        return sorted(child_list, key=node_reading_order_key)
+    if any(record_has_bbox(getattr(child, "record", child if isinstance(child, dict) else {})) for child in child_list):
+        return sort_nodes_by_reading_order(child_list, fallback_key=node_reading_order_key)
+    return sorted(child_list, key=node_reading_order_key)
+
+
+def has_explicit_reading_order(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    for key in ("regime_reading_order", "dag_reading_order", "global_order", "reading_order", "original_order", "original_index", "index"):
+        if numeric_value(record.get(key)) is not None:
+            return True
+    return False
+
+
+def node_reading_order_key(node: Any) -> tuple[int, float, float, str]:
+    record = getattr(node, "record", node if isinstance(node, dict) else {})
+    for key in ("regime_reading_order", "dag_reading_order", "xycut_reading_order", "global_order", "reading_order", "original_order", "original_index", "index"):
+        value = numeric_value(record.get(key))
+        if value is not None:
+            return (0, value, 0.0, "")
+
+    source_id = min_numeric_sequence(record.get("source_node_ids"))
+    if source_id is not None:
+        return (1, source_id, 0.0, "")
+
+    merged_ids = getattr(node, "merged_node_ids", None)
+    merged_id = min_numeric_sequence(merged_ids)
+    if merged_id is not None:
+        return (1, merged_id, 0.0, "")
+
+    node_id = numeric_value(getattr(node, "node_id", None))
+    if node_id is not None and node_id >= 0:
+        return (1, node_id, 0.0, "")
+
+    page = numeric_value(record.get("page_idx"))
+    visual = numeric_value(record.get("visual_order"))
+    if page is not None or visual is not None:
+        return (2, page if page is not None else 0.0, visual if visual is not None else 0.0, "")
+
+    for key in ("id", "node_id", "block_id"):
+        value = numeric_value(record.get(key))
+        if value is not None:
+            return (3, value, 0.0, "")
+
+    return (4, 0.0, 0.0, "")
+
+
+def record_has_bbox(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    value = record.get("bbox")
+    return isinstance(value, (list, tuple)) and len(value) >= 4
+
+
+def numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = NUMERIC_ID_RE.search(value)
+        if match:
+            return float(match.group(0))
+    return None
+
+
+def min_numeric_sequence(value: Any) -> float | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    numbers = [number for number in (numeric_value(item) for item in value) if number is not None]
+    return min(numbers) if numbers else None
 
 
 def canonical_render_type(record: dict[str, Any]) -> str:
@@ -312,6 +745,188 @@ def _safe_verbatim_char(char: str) -> str:
         return UNICODE_LATEX_REPLACEMENTS[char]
     ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
     return ascii_fallback or "?"
+
+
+ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
+    "α": r"\alpha",
+    "β": r"\beta",
+    "γ": r"\gamma",
+    "δ": r"\delta",
+    "ϵ": r"\epsilon",
+    "ε": r"\epsilon",
+    "ζ": r"\zeta",
+    "η": r"\eta",
+    "θ": r"\theta",
+    "ι": r"\iota",
+    "κ": r"\kappa",
+    "λ": r"\lambda",
+    "μ": r"\mu",
+    "ν": r"\nu",
+    "ξ": r"\xi",
+    "π": r"\pi",
+    "ρ": r"\rho",
+    "σ": r"\sigma",
+    "τ": r"\tau",
+    "υ": r"\upsilon",
+    "φ": r"\phi",
+    "χ": r"\chi",
+    "ψ": r"\psi",
+    "ω": r"\omega",
+    "Γ": r"\Gamma",
+    "Δ": r"\Delta",
+    "Θ": r"\Theta",
+    "Λ": r"\Lambda",
+    "Ξ": r"\Xi",
+    "Π": r"\Pi",
+    "Σ": r"\Sigma",
+    "Φ": r"\Phi",
+    "Ψ": r"\Psi",
+    "Ω": r"\Omega",
+    "≤": r"\leq",
+    "≥": r"\geq",
+    "≠": r"\neq",
+    "≈": r"\approx",
+    "±": r"\pm",
+    "×": r"\times",
+    "÷": r"\div",
+    "∞": r"\infty",
+    "∂": r"\partial",
+    "∇": r"\nabla",
+    "∑": r"\sum",
+    "∫": r"\int",
+    "∈": r"\in",
+    "∉": r"\notin",
+    "∋": r"\ni",
+    "⊂": r"\subset",
+    "⊆": r"\subseteq",
+    "⊃": r"\supset",
+    "⊇": r"\supseteq",
+    "∪": r"\cup",
+    "∩": r"\cap",
+    "∧": r"\wedge",
+    "∨": r"\vee",
+    "¬": r"\neg",
+    "∀": r"\forall",
+    "∃": r"\exists",
+    "∅": r"\emptyset",
+    "∝": r"\propto",
+    "∼": r"\sim",
+    "≃": r"\simeq",
+    "≅": r"\cong",
+    "≡": r"\equiv",
+    "≪": r"\ll",
+    "≫": r"\gg",
+    "⋅": r"\cdot",
+    "·": r"\cdot",
+    "∗": r"*",
+    "√": r"\sqrt{}",
+    "→": r"\to",
+    "←": r"\gets",
+    "↔": r"\leftrightarrow",
+    "⟶": r"\longrightarrow",
+    "⟵": r"\longleftarrow",
+    "⇔": r"\Leftrightarrow",
+    "⇒": r"\Rightarrow",
+    "⇐": r"\Leftarrow",
+}
+
+
+CODE_UNICODE_REPLACEMENTS = {
+    "α": "alpha",
+    "β": "beta",
+    "γ": "gamma",
+    "δ": "delta",
+    "ϵ": "epsilon",
+    "ε": "epsilon",
+    "ζ": "zeta",
+    "η": "eta",
+    "θ": "theta",
+    "ι": "iota",
+    "κ": "kappa",
+    "λ": "lambda",
+    "μ": "mu",
+    "ν": "nu",
+    "ξ": "xi",
+    "π": "pi",
+    "ρ": "rho",
+    "σ": "sigma",
+    "τ": "tau",
+    "υ": "upsilon",
+    "φ": "phi",
+    "χ": "chi",
+    "ψ": "psi",
+    "ω": "omega",
+    "Γ": "Gamma",
+    "Δ": "Delta",
+    "Θ": "Theta",
+    "Λ": "Lambda",
+    "Ξ": "Xi",
+    "Π": "Pi",
+    "Σ": "Sigma",
+    "Φ": "Phi",
+    "Ψ": "Psi",
+    "Ω": "Omega",
+    "≤": "<=",
+    "≥": ">=",
+    "≠": "!=",
+    "≈": "~=",
+    "±": "+/-",
+    "×": "x",
+    "÷": "/",
+    "∞": "inf",
+    "∂": "partial",
+    "∇": "nabla",
+    "∑": "sum",
+    "∫": "int",
+    "∈": " in ",
+    "∉": " notin ",
+    "∋": " contains ",
+    "⊂": " subset ",
+    "⊆": " subseteq ",
+    "⊃": " superset ",
+    "⊇": " superseteq ",
+    "∪": " union ",
+    "∩": " inter ",
+    "∧": " and ",
+    "∨": " or ",
+    "¬": "not ",
+    "∀": "forall ",
+    "∃": "exists ",
+    "∅": "empty",
+    "∝": "propto",
+    "∼": "~",
+    "≃": "~=",
+    "≅": "~=",
+    "≡": "==",
+    "≪": "<<",
+    "≫": ">>",
+    "⋅": "*",
+    "·": "*",
+    "∗": "*",
+    "√": "sqrt",
+    "→": "->",
+    "←": "<-",
+    "↔": "<->",
+    "⟶": "->",
+    "⟵": "<-",
+    "⇔": "<=>",
+    "⇒": "=>",
+    "⇐": "<=",
+    "′": "'",
+    "″": "''",
+    "°": "deg",
+    "¹": "^1",
+    "²": "^2",
+    "³": "^3",
+    "•": "*",
+    "–": "-",
+    "—": "---",
+    "−": "-",
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+}
 
 
 UNICODE_LATEX_REPLACEMENTS = {

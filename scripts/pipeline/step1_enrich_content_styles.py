@@ -15,7 +15,7 @@ from src.perception.style_spans import StyleConfig, enrich_content_with_styles  
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="content v3/v4 JSON")
+    parser.add_argument("--input", type=Path, required=True, help="content v7 JSON")
     parser.add_argument("--pdf", type=Path, required=True, help="Original PDF")
     parser.add_argument("--output", type=Path, required=True, help="Output style-enriched content JSON")
     parser.add_argument("--clip-margin", type=float, default=2.0)

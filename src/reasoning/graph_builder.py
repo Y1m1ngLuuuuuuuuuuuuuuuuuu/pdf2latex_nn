@@ -1,4 +1,4 @@
-"""Build PyTorch Geometric graphs from merged MinerU content v3 JSON."""
+"""Build PyTorch Geometric graphs from MinerU content v7 JSON."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.perception.schema import (
+    COLUMN_FEATURE_FIELDS,
     DERIVED_STAT_FIELDS,
     EDGE_ATTR_FIELDS,
     FEATURE_TYPE_VOCAB,
@@ -16,11 +17,19 @@ from src.perception.schema import (
     NON_TEXT_DENSITY_TYPES,
     PLACEHOLDER_TEXT,
     SCIBERT_DIM,
+    SEQUENCE_POSITION_FIELDS,
     STYLE_STAT_FIELDS,
+    TITLE_STRUCTURE_FIELDS,
 )
+from src.perception.reading_order import fuse_micro_nodes
+from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
+from src.perception.xy_cut import sort_node_indices_by_reading_order
+from src.perception.title_features import title_pattern_flags
 
 PAGE_SIZE = 1000.0
+FULL_WIDTH_THRESHOLD = 620.0
 TYPE_VOCAB = FEATURE_TYPE_VOCAB
+SEQUENTIAL_EDGE_TYPES = {"sequential", "sequential_forced"}
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,39 @@ class PageFrames:
 
 
 @dataclass(frozen=True)
+class LogicalBox:
+    item_index: int
+    chunk_index: int
+    page_idx: int
+    bbox: tuple[float, float, float, float]
+    full_span: bool
+
+    @property
+    def x0(self) -> float:
+        return self.bbox[0]
+
+    @property
+    def y0(self) -> float:
+        return self.bbox[1]
+
+    @property
+    def x1(self) -> float:
+        return self.bbox[2]
+
+    @property
+    def y1(self) -> float:
+        return self.bbox[3]
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2.0
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2.0
+
+
+@dataclass(frozen=True)
 class GraphBuildConfig:
     model_path: Path
     max_length: int = 512
@@ -51,9 +93,10 @@ class GraphBuildConfig:
     bidirectional_edges: bool = True
     sequential_window: int = 3
     spatial_k: int = 3
+    fuse_micro_nodes: bool = False
 
 
-def load_content_v3(path: Path) -> list[dict[str, Any]]:
+def load_content_v7(path: Path) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     items = data.get("items")
     if not isinstance(items, list):
@@ -61,58 +104,43 @@ def load_content_v3(path: Path) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-def build_graph_from_content_v3(input_path: Path, output_path: Path, config: GraphBuildConfig) -> Any:
-    """Embed v3 nodes, concatenate geometry, and save a PyG Data object."""
+def build_graph_from_content_v7(input_path: Path, output_path: Path, config: GraphBuildConfig) -> Any:
+    """Embed v7 nodes, concatenate geometry, and save a PyG Data object."""
 
     import torch
     from torch_geometric.data import Data
 
-    items = load_content_v3(input_path)
+    raw_items = load_content_v7(input_path)
+    items = fuse_micro_nodes(raw_items) if config.fuse_micro_nodes else raw_items
     texts = [text_for_embedding(item) for item in items]
+    regime_order = sort_node_indices_by_reading_order(items)
+    regime_ranks = _ranks_from_order(regime_order, len(items))
     semantic = embed_texts_scibert_cls(texts, config)
     type_onehot = build_type_onehot_matrix(items)
     geometry = build_geometry_matrix(items)
-    stats = build_derived_stats_matrix(items)
+    stats = build_derived_stats_matrix(items, reading_order_ranks=regime_ranks)
     style_stats = build_style_stats_matrix(items)
-    x = torch.cat([semantic, type_onehot, geometry, stats, style_stats], dim=1)
+    sequence_position = build_sequence_position_matrix(items, reading_order_ranks=regime_ranks)
+    column_ids = infer_column_ids(items)
+    column_features = build_column_onehot_matrix(items, column_ids=column_ids)
+    title_structure = build_title_structure_matrix(items)
+    x = torch.cat(
+        [semantic, type_onehot, geometry, stats, style_stats, sequence_position, column_features, title_structure],
+        dim=1,
+    )
     edge_pairs = build_candidate_edge_pairs(
         items,
         sequential_window=config.sequential_window,
         spatial_k=config.spatial_k,
         bidirectional=config.bidirectional_edges,
+        reading_order_indices=regime_order,
     )
     edge_index = build_edge_index_from_pairs(edge_pairs)
-    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs, reading_order_ranks=regime_ranks)
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     data.edge_source_types = [source_type for _, _, source_type in edge_pairs]
-    data.node_records = make_node_records(items)
-    data.feature_schema = {
-        "semantic": {"start": 0, "end": SCIBERT_DIM, "dim": SCIBERT_DIM, "source": "SciBERT CLS window mean"},
-        "type_onehot": {
-            "start": SCIBERT_DIM,
-            "end": SCIBERT_DIM + len(TYPE_VOCAB),
-            "dim": len(TYPE_VOCAB),
-            "vocab": TYPE_VOCAB,
-        },
-        "geometry": {
-            "start": SCIBERT_DIM + len(TYPE_VOCAB),
-            "end": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS),
-            "dim": len(GEOMETRY_FIELDS),
-            "fields": GEOMETRY_FIELDS,
-        },
-        "derived_stats": {
-            "start": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS),
-            "end": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS),
-            "dim": len(DERIVED_STAT_FIELDS),
-            "fields": DERIVED_STAT_FIELDS,
-        },
-        "style_stats": {
-            "start": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS),
-            "end": SCIBERT_DIM + len(TYPE_VOCAB) + len(GEOMETRY_FIELDS) + len(DERIVED_STAT_FIELDS) + len(STYLE_STAT_FIELDS),
-            "dim": len(STYLE_STAT_FIELDS),
-            "fields": STYLE_STAT_FIELDS,
-        },
-    }
+    data.node_records = make_node_records(items, column_ids=column_ids, reading_order_ranks=regime_ranks)
+    data.feature_schema = build_node_feature_schema()
     data.edge_attr_schema = {
         "dim": len(EDGE_ATTR_FIELDS),
         "fields": EDGE_ATTR_FIELDS,
@@ -120,11 +148,14 @@ def build_graph_from_content_v3(input_path: Path, output_path: Path, config: Gra
             "strategy": "dual_view_knn",
             "sequential_window": config.sequential_window,
             "spatial_k": config.spatial_k,
-            "edge_source_types": ["sequential", "spatial_down", "spatial_right"],
+            "edge_source_types": ["sequential_forced", "sequential", "spatial_down", "spatial_right"],
         },
     }
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
+    data.micro_fusion_applied = bool(config.fuse_micro_nodes)
+    data.micro_fusion_node_count_before = len(raw_items)
+    data.micro_fusion_node_count_after = len(items)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(data, output_path)
     return data
@@ -213,14 +244,17 @@ def build_geometry_matrix(items: list[dict[str, Any]]) -> Any:
     return torch.tensor(rows, dtype=torch.float32)
 
 
-def build_derived_stats_matrix(items: list[dict[str, Any]]) -> Any:
+def build_derived_stats_matrix(items: list[dict[str, Any]], *, reading_order_ranks: list[int] | None = None) -> Any:
     import torch
 
     total_nodes = max(1, len(items) - 1)
+    if reading_order_ranks is None:
+        reading_order_ranks = list(range(len(items)))
     rows = []
     for idx, item in enumerate(items):
         chunks = list(iter_bbox_chunks(item.get("bbox")))
-        macro_position = idx / total_nodes
+        rank = reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx
+        macro_position = rank / total_nodes
         total_width = sum(max(0.0, bbox[2] - bbox[0]) for bbox in chunks)
         total_height = sum(max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
         area_sum = sum(max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
@@ -257,11 +291,82 @@ def build_style_stats_matrix(items: list[dict[str, Any]]) -> Any:
     return torch.tensor(rows, dtype=torch.float32)
 
 
+def build_sequence_position_matrix(items: list[dict[str, Any]], *, reading_order_ranks: list[int] | None = None) -> Any:
+    """Return N x 16 sinusoidal encodings of the regime-state reading index."""
+
+    import torch
+
+    dim = len(SEQUENCE_POSITION_FIELDS)
+    if not items:
+        return torch.empty((0, dim), dtype=torch.float32)
+
+    rows = []
+    if reading_order_ranks is None:
+        reading_order_ranks = regime_reading_order_ranks(items)
+    for idx, _ in enumerate(items):
+        order_idx = reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx
+        row = []
+        for pair_idx in range(dim // 2):
+            denominator = 10000.0 ** (2.0 * pair_idx / dim)
+            angle = order_idx / denominator
+            row.extend([math.sin(angle), math.cos(angle)])
+        rows.append(row)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_column_onehot_matrix(items: list[dict[str, Any]], *, column_ids: list[int] | None = None) -> Any:
+    """Return N x 3 one-hot column IDs: left, right, or full/single-column."""
+
+    import torch
+
+    if column_ids is None:
+        column_ids = infer_column_ids(items)
+    rows = []
+    for column_id in column_ids:
+        normalized = column_id if column_id in {0, 1} else 2
+        row = [0.0, 0.0, 0.0]
+        row[normalized] = 1.0
+        rows.append(row)
+    if not rows:
+        return torch.empty((0, len(COLUMN_FEATURE_FIELDS)), dtype=torch.float32)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_title_structure_matrix(items: list[dict[str, Any]]) -> Any:
+    """Return relative font size plus heading-number regex probes."""
+
+    import torch
+
+    base_font_size = infer_document_body_font_size(items) or infer_document_baseline_font_size(items) or 1.0
+    rows = []
+    for item in items:
+        font_size = _item_font_size(item)
+        relative_font_size = font_size / base_font_size if font_size > 0 and base_font_size > 0 else 0.0
+        is_h1, is_h2 = title_pattern_flags(str(item.get("text_for_embedding") or item.get("text") or ""))
+        rows.append([relative_font_size, is_h1, is_h2])
+    if not rows:
+        return torch.empty((0, len(TITLE_STRUCTURE_FIELDS)), dtype=torch.float32)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
 def infer_document_body_font_size(items: list[dict[str, Any]]) -> float:
     weighted: dict[float, int] = {}
     for item in items:
         if canonical_type(item.get("type")) != "text":
             continue
+        size = _item_font_size(item)
+        if size <= 0:
+            continue
+        weight = max(1, len(str(item.get("text_for_embedding") or "")))
+        weighted[size] = weighted.get(size, 0) + weight
+    if not weighted:
+        return 0.0
+    return max(weighted.items(), key=lambda item: item[1])[0]
+
+
+def infer_document_baseline_font_size(items: list[dict[str, Any]]) -> float:
+    weighted: dict[float, int] = {}
+    for item in items:
         size = _item_font_size(item)
         if size <= 0:
             continue
@@ -292,6 +397,41 @@ def infer_page_frames(items: list[dict[str, Any]]) -> dict[int, PageFrames]:
     for page, boxes in by_page.items():
         frames[page] = infer_page_frame(boxes)
     return frames
+
+
+def infer_column_ids(items: list[dict[str, Any]]) -> list[int]:
+    """Infer coarse column IDs from each page's X-center clusters.
+
+    IDs are 0 for left column, 1 for right column, and 2 for full-width or
+    single-column blocks. This is intentionally coarse: the model needs a
+    stable logical cue, not a brittle exact column detector.
+    """
+
+    page_frames = infer_page_frames(items)
+    column_ids: list[int] = []
+    for item in items:
+        bbox = _first_bbox(item.get("bbox"))
+        page_idx = _first_item_page(item)
+        if bbox is None or page_idx is None:
+            column_ids.append(2)
+            continue
+
+        frames = page_frames.get(page_idx)
+        if bool(item.get("is_full_width")) or bbox[2] - bbox[0] >= FULL_WIDTH_THRESHOLD:
+            column_ids.append(2)
+            continue
+        if frames is None or frames.left is None or frames.right is None:
+            column_ids.append(2)
+            continue
+        if _bbox_spans_column_gutter(bbox, frames):
+            column_ids.append(2)
+            continue
+
+        center = (bbox[0] + bbox[2]) / 2.0
+        left_center = (frames.left.x_min + frames.left.x_max) / 2.0
+        right_center = (frames.right.x_min + frames.right.x_max) / 2.0
+        column_ids.append(0 if abs(center - left_center) <= abs(center - right_center) else 1)
+    return column_ids
 
 
 def infer_page_frame(boxes: list[tuple[float, float, float, float]]) -> PageFrames:
@@ -342,6 +482,25 @@ def normalize_x_in_local_frame(
     return frame.normalize_x(x)
 
 
+def _bbox_spans_column_gutter(bbox: tuple[float, float, float, float], frames: PageFrames) -> bool:
+    if frames.left is None or frames.right is None:
+        return False
+    return bbox[0] <= frames.left.x_max and bbox[2] >= frames.right.x_min
+
+
+def _ranks_from_order(order: list[int], node_count: int) -> list[int]:
+    ranks = list(range(node_count))
+    for rank, node_idx in enumerate(_valid_reading_order_indices(order, node_count)):
+        ranks[node_idx] = rank
+    return ranks
+
+
+def _valid_reading_order_indices(order: list[int] | None, node_count: int) -> list[int]:
+    if order is None or len(order) != node_count or sorted(order) != list(range(node_count)):
+        return list(range(node_count))
+    return list(order)
+
+
 def build_sequential_edge_index(node_count: int, *, bidirectional: bool = True) -> Any:
     import torch
 
@@ -359,6 +518,26 @@ def build_edge_index_from_pairs(edge_pairs: list[tuple[int, int, str]]) -> Any:
     return torch.tensor([(source, target) for source, target, _ in edge_pairs], dtype=torch.long).t().contiguous()
 
 
+def build_node_feature_schema() -> dict[str, dict[str, Any]]:
+    schema: dict[str, dict[str, Any]] = {}
+    start = 0
+
+    def add(name: str, dim: int, **metadata: Any) -> None:
+        nonlocal start
+        schema[name] = {"start": start, "end": start + dim, "dim": dim, **metadata}
+        start += dim
+
+    add("semantic", SCIBERT_DIM, source="SciBERT CLS window mean")
+    add("type_onehot", len(TYPE_VOCAB), vocab=TYPE_VOCAB)
+    add("geometry", len(GEOMETRY_FIELDS), fields=GEOMETRY_FIELDS)
+    add("derived_stats", len(DERIVED_STAT_FIELDS), fields=DERIVED_STAT_FIELDS)
+    add("style_stats", len(STYLE_STAT_FIELDS), fields=STYLE_STAT_FIELDS)
+    add("sequence_position", len(SEQUENCE_POSITION_FIELDS), fields=SEQUENCE_POSITION_FIELDS, source="single/double-column regime reading index")
+    add("column_features", len(COLUMN_FEATURE_FIELDS), fields=COLUMN_FEATURE_FIELDS, source="page x-center column clustering")
+    add("title_structure", len(TITLE_STRUCTURE_FIELDS), fields=TITLE_STRUCTURE_FIELDS, source="font-size ratio and heading regex probes")
+    return schema
+
+
 def build_sequential_edge_pairs(node_count: int, *, bidirectional: bool = True) -> list[tuple[int, int]]:
     edges = []
     for idx in range(max(0, node_count - 1)):
@@ -374,6 +553,7 @@ def build_candidate_edge_pairs(
     sequential_window: int = 3,
     spatial_k: int = 3,
     bidirectional: bool = True,
+    reading_order_indices: list[int] | None = None,
 ) -> list[tuple[int, int, str]]:
     """Build dual-view candidate edges: reading-order window plus spatial sight lines."""
 
@@ -390,12 +570,20 @@ def build_candidate_edge_pairs(
         edge_pairs.append((source_idx, target_idx, source_type))
 
     node_count = len(items)
+    order = sort_node_indices_by_reading_order(items) if reading_order_indices is None else _valid_reading_order_indices(reading_order_indices, node_count)
+    for pos in range(max(0, node_count - 1)):
+        source_idx = order[pos]
+        target_idx = order[pos + 1]
+        add_edge(source_idx, target_idx, "sequential_forced")
+        if bidirectional:
+            add_edge(target_idx, source_idx, "sequential_forced")
+
     window = max(0, int(sequential_window))
-    for source_idx in range(node_count):
-        start = max(0, source_idx - window) if bidirectional else source_idx + 1
-        end = min(node_count, source_idx + window + 1)
-        for target_idx in range(start, end):
-            add_edge(source_idx, target_idx, "sequential")
+    for source_pos, source_idx in enumerate(order):
+        start = max(0, source_pos - window) if bidirectional else source_pos + 1
+        end = min(node_count, source_pos + window + 1)
+        for target_pos in range(start, end):
+            add_edge(source_idx, order[target_pos], "sequential")
 
     if spatial_k <= 0:
         return edge_pairs
@@ -423,17 +611,26 @@ def build_candidate_edge_pairs(
     return edge_pairs
 
 
-def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, *, edge_pairs: list[tuple[int, int, str]] | None = None) -> Any:
-    """Return 10-dimensional edge features aligned with candidate edge_index."""
+def build_edge_attr_matrix(
+    items: list[dict[str, Any]],
+    semantic: Any,
+    *,
+    edge_pairs: list[tuple[int, int, str]] | None = None,
+    reading_order_ranks: list[int] | None = None,
+) -> Any:
+    """Return 11-dimensional edge features aligned with candidate edge_index."""
 
     import torch
     import torch.nn.functional as F
 
     if edge_pairs is None:
         edge_pairs = build_candidate_edge_pairs(items)
+    if reading_order_ranks is None:
+        reading_order_ranks = regime_reading_order_ranks(items)
+    logical_centers = build_logical_center_pairs(items)
 
     rows = []
-    for source_idx, target_idx, _ in edge_pairs:
+    for source_idx, target_idx, source_type in edge_pairs:
         source = items[source_idx]
         target = items[target_idx]
         semantic_cosine = float(F.cosine_similarity(semantic[source_idx], semantic[target_idx], dim=0).item())
@@ -445,21 +642,33 @@ def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, *, edge_p
         delta_x_left = (target_bbox[0] - source_bbox[0]) / PAGE_SIZE
         source_center = _bbox_center(source_bbox)
         target_center = _bbox_center(target_bbox)
+        logical_source_center = logical_centers[source_idx][1] if source_idx < len(logical_centers) else None
+        logical_target_center = logical_centers[target_idx][0] if target_idx < len(logical_centers) else None
+        center_distance = logical_center_distance(
+            logical_source_center,
+            logical_target_center,
+            fallback_source=source_center,
+            fallback_target=target_center,
+        )
         source_height = max(1.0, source_bbox[3] - source_bbox[1])
         target_height = max(1.0, target_bbox[3] - target_bbox[1])
 
+        source_rank = reading_order_ranks[source_idx] if source_idx < len(reading_order_ranks) else source_idx
+        target_rank = reading_order_ranks[target_idx] if target_idx < len(reading_order_ranks) else target_idx
+        index_delta = float(target_rank - source_rank)
         rows.append(
             [
                 semantic_cosine,
                 delta_y_gap,
                 delta_x_left,
                 float(abs(delta_x_left) < 0.01),
-                _center_distance(source_center, target_center) / PAGE_SIZE,
+                center_distance / PAGE_SIZE,
                 _item_font_size(target) - _item_font_size(source),
                 float(_item_is_bold(source) and not _item_is_bold(target)),
                 target_height / source_height,
-                float(target_idx - source_idx),
-                float(target_idx - source_idx == 1),
+                index_delta,
+                float(index_delta == 1.0),
+                float(source_type in SEQUENTIAL_EDGE_TYPES),
             ]
         )
     if not rows:
@@ -467,9 +676,18 @@ def build_edge_attr_matrix(items: list[dict[str, Any]], semantic: Any, *, edge_p
     return torch.tensor(rows, dtype=torch.float32)
 
 
-def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def make_node_records(
+    items: list[dict[str, Any]],
+    *,
+    column_ids: list[int] | None = None,
+    reading_order_ranks: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    if column_ids is None:
+        column_ids = infer_column_ids(items)
+    if reading_order_ranks is None:
+        reading_order_ranks = regime_reading_order_ranks(items)
     records = []
-    for item in items:
+    for idx, item in enumerate(items):
         records.append(
             {
                 "global_order": item.get("global_order"),
@@ -477,6 +695,10 @@ def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "raw_type": item.get("raw_type"),
                 "list_type": item.get("list_type"),
                 "canonical_type": canonical_type(item.get("type")),
+                "column_id_inferred": column_ids[idx] if idx < len(column_ids) else 2,
+                "regime_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
+                "dag_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
+                "xycut_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "page_idx": item.get("page_idx"),
                 "visual_order": item.get("visual_order"),
                 "merge_count": item.get("merge_count"),
@@ -488,6 +710,183 @@ def make_node_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def build_logical_center_pairs(
+    items: list[dict[str, Any]],
+    *,
+    full_span_ratio: float = 0.60,
+) -> list[tuple[tuple[float, float] | None, tuple[float, float] | None]]:
+    """Return first/last centers in a reading-flow coordinate system.
+
+    Double-column regions are "unrolled" into a single logical vertical axis:
+    the left column occupies the first half of that region and the right column
+    occupies the second half. This makes left-column bottoms and right-column
+    tops close in relation space without erasing local indentation within each
+    column.
+    """
+
+    chunk_boxes = collect_logical_boxes(items)
+    if not chunk_boxes:
+        return [(None, None) for _ in items]
+
+    local_centers: dict[tuple[int, int], tuple[float, float]] = {}
+    page_heights: dict[int, float] = {}
+    for page_idx in sorted({box.page_idx for box in chunk_boxes}):
+        page_boxes = [box for box in chunk_boxes if box.page_idx == page_idx]
+        centers, logical_height = build_page_logical_centers(page_boxes, full_span_ratio=full_span_ratio)
+        local_centers.update(centers)
+        page_heights[page_idx] = logical_height
+
+    page_offsets: dict[int, float] = {}
+    cursor = 0.0
+    for page_idx in sorted(page_heights):
+        page_offsets[page_idx] = cursor
+        cursor += max(PAGE_SIZE, page_heights[page_idx])
+
+    centers_by_chunk: dict[tuple[int, int], tuple[float, float]] = {}
+    page_by_chunk = {(box.item_index, box.chunk_index): box.page_idx for box in chunk_boxes}
+    for key, center in local_centers.items():
+        page_idx = page_by_chunk.get(key, 0)
+        centers_by_chunk[key] = (center[0], center[1] + page_offsets.get(page_idx, 0.0))
+
+    pairs: list[tuple[tuple[float, float] | None, tuple[float, float] | None]] = []
+    for item_index, item in enumerate(items):
+        chunk_count = len(iter_bbox_chunks(item.get("bbox")))
+        if chunk_count == 0:
+            pairs.append((None, None))
+            continue
+        first = centers_by_chunk.get((item_index, 0))
+        last = centers_by_chunk.get((item_index, chunk_count - 1))
+        pairs.append((first, last or first))
+    return pairs
+
+
+def collect_logical_boxes(items: list[dict[str, Any]]) -> list[LogicalBox]:
+    boxes: list[LogicalBox] = []
+    for item_index, item in enumerate(items):
+        chunks = iter_bbox_chunks(item.get("bbox"))
+        if not chunks:
+            continue
+        pages = item.get("source_page_idxs")
+        if not isinstance(pages, list) or len(pages) != len(chunks):
+            pages = [item.get("page_idx")] * len(chunks)
+        for chunk_index, (bbox, page) in enumerate(zip(chunks, pages)):
+            if not isinstance(page, int):
+                continue
+            boxes.append(
+                LogicalBox(
+                    item_index=item_index,
+                    chunk_index=chunk_index,
+                    page_idx=page,
+                    bbox=bbox,
+                    full_span=bool(item.get("is_full_width")) or (bbox[2] - bbox[0]) >= FULL_WIDTH_THRESHOLD,
+                )
+            )
+    return boxes
+
+
+def build_page_logical_centers(
+    boxes: list[LogicalBox],
+    *,
+    full_span_ratio: float,
+) -> tuple[dict[tuple[int, int], tuple[float, float]], float]:
+    if not boxes:
+        return {}, PAGE_SIZE
+
+    min_x = min(box.x0 for box in boxes)
+    max_x = max(box.x1 for box in boxes)
+    page_width = max(1.0, max_x - min_x)
+    center_x = min_x + page_width / 2.0
+    mode_blocks: list[tuple[str, list[LogicalBox]]] = []
+    current_mode: str | None = None
+    current_block: list[LogicalBox] = []
+    for box in sorted(boxes, key=lambda item: (item.y0, item.x0, item.item_index, item.chunk_index)):
+        mode = "SINGLE" if box.full_span or (box.x1 - box.x0) > full_span_ratio * page_width else "DOUBLE"
+        if current_mode is not None and mode != current_mode and current_block:
+            mode_blocks.append((current_mode, current_block))
+            current_block = []
+        current_mode = mode
+        current_block.append(box)
+    if current_mode is not None and current_block:
+        mode_blocks.append((current_mode, current_block))
+
+    centers: dict[tuple[int, int], tuple[float, float]] = {}
+    logical_cursor = 0.0
+    previous_y1: float | None = None
+    for mode, block in mode_blocks:
+        block_y0 = min(box.y0 for box in block)
+        block_y1 = max(box.y1 for box in block)
+        if previous_y1 is not None and block_y0 > previous_y1:
+            logical_cursor += block_y0 - previous_y1
+        block_height = max(1.0, block_y1 - block_y0)
+        if mode == "DOUBLE":
+            write_double_column_logical_centers(
+                block,
+                centers,
+                center_x=center_x,
+                page_width=page_width,
+                block_y0=block_y0,
+                block_height=block_height,
+                logical_cursor=logical_cursor,
+            )
+        else:
+            for box in block:
+                y_rel = clamp01((box.cy - block_y0) / block_height)
+                x_rel = clamp01((box.cx - min_x) / page_width)
+                centers[(box.item_index, box.chunk_index)] = (x_rel * PAGE_SIZE, logical_cursor + y_rel * block_height)
+        logical_cursor += block_height
+        previous_y1 = block_y1
+
+    return centers, max(PAGE_SIZE, logical_cursor)
+
+
+def write_double_column_logical_centers(
+    block: list[LogicalBox],
+    centers: dict[tuple[int, int], tuple[float, float]],
+    *,
+    center_x: float,
+    page_width: float,
+    block_y0: float,
+    block_height: float,
+    logical_cursor: float,
+) -> None:
+    left = [box for box in block if box.cx <= center_x]
+    right = [box for box in block if box.cx > center_x]
+    frames = {
+        0: frame_from_logical_boxes(left) or frame_from_logical_boxes(block),
+        1: frame_from_logical_boxes(right) or frame_from_logical_boxes(block),
+    }
+    column_count = 2 if left and right else 1
+    for box in block:
+        column = 0 if column_count == 1 or box.cx <= center_x else 1
+        frame = frames[column] or frame_from_logical_boxes(block)
+        y_rel = clamp01((box.cy - block_y0) / block_height)
+        logical_progress = (column + y_rel) / column_count
+        x_rel = clamp01((box.cx - frame.x_min) / frame.width) if frame is not None else 0.5
+        centers[(box.item_index, box.chunk_index)] = (x_rel * PAGE_SIZE, logical_cursor + logical_progress * block_height)
+
+
+def frame_from_logical_boxes(boxes: list[LogicalBox]) -> ColumnFrame | None:
+    if not boxes:
+        return None
+    return ColumnFrame(x_min=min(box.x0 for box in boxes), x_max=max(box.x1 for box in boxes))
+
+
+def logical_center_distance(
+    source: tuple[float, float] | None,
+    target: tuple[float, float] | None,
+    *,
+    fallback_source: tuple[float, float],
+    fallback_target: tuple[float, float],
+) -> float:
+    if source is None or target is None:
+        return _center_distance(fallback_source, fallback_target)
+    return _center_distance(source, target)
+
+
+def clamp01(value: float) -> float:
+    return min(1.0, max(0.0, value))
 
 
 def iter_bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:

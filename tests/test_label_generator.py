@@ -33,7 +33,7 @@ def test_label_graph_edges_falls_back_to_none_for_low_similarity_orphans(tmp_pat
     data = Data(
         x=torch.zeros((3, 4)),
         edge_index=torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((3, 10)),
+        edge_attr=torch.zeros((3, 11)),
     )
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
     mapping = {
@@ -75,7 +75,7 @@ def test_label_graph_edges_aborts_when_default_orphan_ratio_exceeds_thirty_perce
     data = Data(
         x=torch.zeros((3, 4)),
         edge_index=torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((3, 10)),
+        edge_attr=torch.zeros((3, 11)),
     )
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
     mapping = {
