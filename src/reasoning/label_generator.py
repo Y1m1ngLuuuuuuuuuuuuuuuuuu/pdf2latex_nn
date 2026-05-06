@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.perception.reading_order import fuse_micro_nodes
-from src.reasoning.latex_flattener import MATH_PLACEHOLDER, flatten_latex_file, mask_math_environments
+from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_file
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
 
@@ -72,6 +72,11 @@ class AlignmentMatch:
 class AlignmentLabelerConfig:
     similarity_threshold: float = 65.0
     min_clean_chars: int = 3
+    max_window_nodes: int = 8
+    max_window_chars_ratio: float = 1.8
+    score_drop_tolerance: float = 8.0
+    tex_lookahead_nodes: int = 4
+    tail_absorption_nodes: int = 3
     max_orphan_ratio: float = 0.30
     abort_on_bad_alignment: bool = False
     output_mapping_json: Path | None = None
@@ -156,6 +161,7 @@ class AlignmentLabeler:
         self.tex_nodes: dict[str, TexAlignmentNode] = {}
         self.pdf_nodes: list[PdfAlignmentNode] = []
         self.matches: list[AlignmentMatch] = []
+        self.tex_to_pdf_indices: dict[str, list[int]] = {}
         self.flattener_summary: dict[str, Any] | None = None
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
@@ -177,8 +183,10 @@ class AlignmentLabeler:
         graph.pdf_to_tex_scores = [match.score for match in self.matches]
         graph.label_counts = label_counts(labels)
         graph.alignment_schema = {
-            "strategy": "texsoup_rapidfuzz_partial_ratio_path_v1",
+            "strategy": "texsoup_accumulative_sliding_window_path_v2",
             "similarity_threshold": self.config.similarity_threshold,
+            "max_window_nodes": self.config.max_window_nodes,
+            "tail_absorption_nodes": self.config.tail_absorption_nodes,
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
@@ -227,32 +235,138 @@ class AlignmentLabeler:
     def parse_tex_nodes(self) -> list[TexAlignmentNode]:
         from TexSoup import TexSoup
 
-        flattened = flatten_latex_file(self.tex_path)
-        self.flattener_summary = flattened.summary()
-        soup = TexSoup(flattened.content)
+        flattened = flatten_latex_file(self.tex_path, config=LatexFlattenerConfig(mask_math=False))
+        try:
+            soup = TexSoup(flattened.content)
+            self.flattener_summary = flattened.summary()
+            self.flattener_summary["mask_math_fallback"] = False
+        except Exception:
+            flattened = flatten_latex_file(self.tex_path, config=LatexFlattenerConfig(mask_math=True))
+            soup = TexSoup(flattened.content)
+            self.flattener_summary = flattened.summary()
+            self.flattener_summary["mask_math_fallback"] = True
         builder = _TexSoupPathBuilder(self.config)
         builder.walk_soup(soup)
         return builder.nodes
 
     def align_pdf_to_tex(self) -> list[AlignmentMatch]:
-        from rapidfuzz import fuzz
+        tex_sequence = [node for node in self.tex_nodes.values() if self.is_alignable_tex_node(node)]
+        matches = [AlignmentMatch(pdf_node_index=node.node_index, tex_id=None, score=0.0) for node in self.pdf_nodes]
+        self.tex_to_pdf_indices = {}
 
-        tex_candidates = [node for node in self.tex_nodes.values() if len(node.clean) >= self.config.min_clean_chars]
-        matches = []
-        for pdf_node in self.pdf_nodes:
+        pdf_cursor = 0
+        tex_cursor = 0
+        while pdf_cursor < len(self.pdf_nodes) and tex_cursor < len(tex_sequence):
+            pdf_node = self.pdf_nodes[pdf_cursor]
             if len(pdf_node.clean) < self.config.min_clean_chars:
-                matches.append(AlignmentMatch(pdf_node_index=pdf_node.node_index, tex_id=None, score=0.0))
+                pdf_cursor += 1
                 continue
-            best_node: TexAlignmentNode | None = None
-            best_score = 0.0
-            for tex_node in tex_candidates:
-                score = float(fuzz.partial_ratio(pdf_node.clean, tex_node.clean))
-                if score > best_score:
-                    best_score = score
-                    best_node = tex_node
-            tex_id = best_node.tex_id if best_node is not None and best_score >= self.config.similarity_threshold else None
-            matches.append(AlignmentMatch(pdf_node_index=pdf_node.node_index, tex_id=tex_id, score=best_score))
+
+            tex_node = tex_sequence[tex_cursor]
+            window = self.find_alignment_window(pdf_cursor, tex_node)
+            if window is None:
+                next_tex_cursor = self.find_better_tex_candidate(pdf_node.clean, tex_sequence, tex_cursor)
+                if next_tex_cursor is not None:
+                    tex_cursor = next_tex_cursor
+                    continue
+                pdf_cursor += 1
+                continue
+
+            start, end, score = window
+            assigned_indices = list(range(start, end + 1))
+            next_index = end + 1
+            absorbed = 0
+            while absorbed < self.config.tail_absorption_nodes and next_index < len(self.pdf_nodes):
+                next_pdf = self.pdf_nodes[next_index]
+                if len(next_pdf.clean) < self.config.min_clean_chars:
+                    break
+                if not self.is_tex_fragment(next_pdf.clean, tex_node.clean):
+                    break
+                assigned_indices.append(next_index)
+                next_index += 1
+                absorbed += 1
+
+            for node_index in assigned_indices:
+                matches[node_index] = AlignmentMatch(
+                    pdf_node_index=node_index,
+                    tex_id=tex_node.tex_id,
+                    score=score,
+                )
+            self.tex_to_pdf_indices.setdefault(tex_node.tex_id, []).extend(assigned_indices)
+            pdf_cursor = next_index
+            tex_cursor += 1
+
         return matches
+
+    def is_alignable_tex_node(self, node: TexAlignmentNode) -> bool:
+        if len(node.clean) < self.config.min_clean_chars:
+            return False
+        if node.node_type in LIST_ENV_NAMES | CONTAINER_ENV_NAMES:
+            return False
+        if node.node_type in {"document", "environment"} and node.clean in LIST_ENV_NAMES:
+            return False
+        return True
+
+    def find_alignment_window(self, start_index: int, tex_node: TexAlignmentNode) -> tuple[int, int, float] | None:
+        buffer_parts: list[str] = []
+        best_score = 0.0
+        best_end = start_index
+        max_end = min(len(self.pdf_nodes), start_index + max(1, self.config.max_window_nodes))
+        for end_index in range(start_index, max_end):
+            pdf_node = self.pdf_nodes[end_index]
+            if len(pdf_node.clean) < self.config.min_clean_chars:
+                continue
+            buffer_parts.append(pdf_node.clean)
+            buffer = "".join(buffer_parts)
+            score = levenshtein_ratio_score(buffer, tex_node.clean)
+            if score > best_score:
+                best_score = score
+                best_end = end_index
+            if score >= self.config.similarity_threshold:
+                return start_index, end_index, score
+            if self.window_is_too_long(buffer, tex_node.clean):
+                break
+            if best_end < end_index and best_score - score > self.config.score_drop_tolerance:
+                break
+        if self.is_tex_fragment(self.pdf_nodes[start_index].clean, tex_node.clean):
+            return start_index, start_index, fragment_ratio_score(self.pdf_nodes[start_index].clean, tex_node.clean)
+        return None
+
+    def find_better_tex_candidate(
+        self,
+        pdf_clean: str,
+        tex_sequence: list[TexAlignmentNode],
+        tex_cursor: int,
+    ) -> int | None:
+        current = tex_sequence[tex_cursor]
+        current_score = fragment_ratio_score(pdf_clean, current.clean)
+        best_cursor: int | None = None
+        best_score = current_score
+        upper = min(len(tex_sequence), tex_cursor + 1 + max(0, self.config.tex_lookahead_nodes))
+        for candidate_cursor in range(tex_cursor + 1, upper):
+            candidate = tex_sequence[candidate_cursor]
+            score = fragment_ratio_score(pdf_clean, candidate.clean)
+            if score > best_score:
+                best_score = score
+                best_cursor = candidate_cursor
+        if best_cursor is None:
+            return None
+        if best_score >= self.config.similarity_threshold or best_score - current_score >= 15.0:
+            return best_cursor
+        return None
+
+    def window_is_too_long(self, buffer: str, tex_clean: str) -> bool:
+        if not tex_clean:
+            return True
+        allowed = int(len(tex_clean) * max(1.0, self.config.max_window_chars_ratio)) + 32
+        return len(buffer) > allowed
+
+    def is_tex_fragment(self, pdf_clean: str, tex_clean: str) -> bool:
+        if len(pdf_clean) < self.config.min_clean_chars or len(tex_clean) < self.config.min_clean_chars:
+            return False
+        if pdf_clean in tex_clean or tex_clean in pdf_clean:
+            return True
+        return fragment_ratio_score(pdf_clean, tex_clean) >= max(self.config.similarity_threshold, 92.0)
 
     def build_edge_labels(self, graph: Any) -> Any:
         import torch
@@ -274,11 +388,24 @@ class AlignmentLabeler:
         path_v = self.tex_nodes[target_match.tex_id].path_ids
         if path_u == path_v:
             return int(TexRelationLabel.MERGE)
-        if path_v[:-1] == path_u:
+        if path_v[:-1] == path_u and self.is_first_pdf_anchor(source_index, source_match.tex_id) and self.is_first_pdf_anchor(
+            target_index, target_match.tex_id
+        ):
             return int(TexRelationLabel.PARENT_CHILD)
-        if len(path_u) == len(path_v) and path_u[:-1] == path_v[:-1]:
+        if (
+            len(path_u) == len(path_v)
+            and path_u[:-1] == path_v[:-1]
+            and self.is_first_pdf_anchor(source_index, source_match.tex_id)
+            and self.is_first_pdf_anchor(target_index, target_match.tex_id)
+        ):
             return int(TexRelationLabel.SIBLING)
         return int(TexRelationLabel.NONE)
+
+    def is_first_pdf_anchor(self, pdf_index: int, tex_id: str | None) -> bool:
+        if not tex_id:
+            return False
+        indices = self.tex_to_pdf_indices.get(tex_id, [])
+        return bool(indices) and pdf_index == min(indices)
 
     def assert_alignment_quality(self) -> None:
         orphan_count = sum(1 for match in self.matches if not match.tex_id)
@@ -302,6 +429,7 @@ class AlignmentLabeler:
             "similarity_threshold": self.config.similarity_threshold,
             "flattener": self.flattener_summary,
             "matches": [asdict(match) for match in self.matches],
+            "tex_to_pdf_indices": self.tex_to_pdf_indices,
             "tex_nodes": [asdict(node) for node in self.tex_nodes.values()],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -345,7 +473,7 @@ class _TexSoupPathBuilder:
                 self.add_node(name, tex_node_text(child), parent_id)
                 continue
             if name in MATH_ENV_NAMES:
-                paragraph_buffer.append(" [MATH] ")
+                paragraph_buffer.append(f" {tex_node_text(child)} ")
                 continue
             if name in BLOCK_ENV_NAMES:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
@@ -403,12 +531,29 @@ class _TexSoupPathBuilder:
 def clean_text(text: Any) -> str:
     """Aggressively normalize PDF/TeX text for fuzzy alignment."""
 
-    value = mask_math_environments(str(text or ""))
-    value = re.sub(r"\[math\]", f" {MATH_PLACEHOLDER} ", value, flags=re.IGNORECASE)
+    value = str(text or "")
+    value = expose_math_payload(value)
     value = value.lower()
     value = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?", " ", value)
     value = re.sub(r"\\.", " ", value)
     value = re.sub(rf"[^0-9a-z\u4e00-\u9fff]+", "", value)
+    return value
+
+
+def expose_math_payload(value: str) -> str:
+    """Remove TeX math wrappers while preserving the symbols' core letters/digits."""
+
+    value = re.sub(
+        r"\\begin\{([^}]+)\}(.*?)\\end\{\1\}",
+        lambda match: f" {match.group(2)} ",
+        value,
+        flags=re.DOTALL,
+    )
+    value = re.sub(r"\$\$(.*?)\$\$", lambda match: f" {match.group(1)} ", value, flags=re.DOTALL)
+    value = re.sub(r"\$(.*?)\$", lambda match: f" {match.group(1)} ", value, flags=re.DOTALL)
+    value = re.sub(r"\\\[(.*?)\\\]", lambda match: f" {match.group(1)} ", value, flags=re.DOTALL)
+    value = re.sub(r"\\\((.*?)\\\)", lambda match: f" {match.group(1)} ", value, flags=re.DOTALL)
+    value = re.sub(r"\[math\]", " math ", value, flags=re.IGNORECASE)
     return value
 
 
@@ -470,7 +615,11 @@ def tex_node_name(node: Any) -> str:
 def tex_node_text(node: Any) -> str:
     name = tex_node_name(node)
     if name in MATH_ENV_NAMES:
-        return "[MATH]"
+        contents = getattr(node, "contents", None)
+        if contents:
+            text = " ".join(tex_node_text(child) for child in contents)
+            return text or "[MATH]"
+        return str(node or "[MATH]")
     if name in SKIP_TEX_NODE_NAMES:
         return ""
     if isinstance(node, str):
@@ -487,6 +636,26 @@ def tex_node_text(node: Any) -> str:
 def label_counts(labels: Any) -> dict[int, int]:
     values = labels.detach().cpu().tolist()
     return {label: values.count(label) for label in range(4)}
+
+
+def levenshtein_ratio_score(source: str, target: str) -> float:
+    if not source or not target:
+        return 0.0
+    from rapidfuzz.distance import Levenshtein
+
+    distance = float(Levenshtein.distance(source, target))
+    denominator = float(max(len(source), len(target), 1))
+    return max(0.0, 100.0 * (1.0 - distance / denominator))
+
+
+def fragment_ratio_score(source: str, target: str) -> float:
+    if not source or not target:
+        return 0.0
+    from rapidfuzz import fuzz
+
+    if source in target or target in source:
+        return 100.0
+    return float(fuzz.partial_ratio(source, target))
 
 
 def load_pdf_to_tex_mapping(path: Path) -> dict[str, Any]:
