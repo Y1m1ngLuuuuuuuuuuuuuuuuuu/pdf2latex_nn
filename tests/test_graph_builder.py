@@ -19,6 +19,31 @@ def test_feature_projector_balances_raw_node_features():
     assert torch.allclose(projected[:, :32].norm(p=2, dim=-1), torch.ones(4), atol=1e-5)
 
 
+def test_feature_projector_l2_normalizes_raw_scibert_before_bottleneck():
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return
+
+    from src.reasoning.gnn_model import FeatureProjector, FeatureProjectorConfig
+
+    config = FeatureProjectorConfig(semantic_hidden_dim=2, layout_hidden_dim=2, dropout=0.0)
+    projector = FeatureProjector(config)
+    with torch.no_grad():
+        projector.semantic_projection.weight.zero_()
+        projector.semantic_projection.weight[0, 0] = 1.0
+        projector.semantic_projection.weight[1, 1] = 1.0
+        projector.semantic_projection.bias[:] = torch.tensor([1.0, 0.0])
+    x = torch.zeros((2, 817), dtype=torch.float32)
+    x[0, :2] = torch.tensor([3.0, 4.0])
+    x[1, :2] = torch.tensor([30.0, 40.0])
+
+    projected = projector(x)
+
+    assert torch.allclose(projected[0, :2], projected[1, :2], atol=1e-6)
+    assert torch.allclose(projected[:, :2].norm(p=2, dim=-1), torch.ones(2), atol=1e-6)
+
+
 def test_edge_relation_gat_outputs_one_logit_row_per_edge():
     try:
         import torch

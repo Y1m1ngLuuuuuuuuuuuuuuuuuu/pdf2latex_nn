@@ -37,7 +37,8 @@ class FeatureProjectorConfig:
     semantic_hidden_dim: int = 64
     layout_hidden_dim: int = 32
     type_dim: int = 10
-    dropout: float = 0.1
+    dropout: float = 0.2
+    semantic_norm_eps: float = 1e-12
     layout_input_dim_override: int | None = None
 
     @property
@@ -68,9 +69,10 @@ class FeatureProjector(_MODULE_BASE):
     """Project raw node features into a balanced model input space.
 
     The raw `.pt` graph keeps the full 768-dimensional SciBERT vector. This
-    module is the model-side bottleneck: it compresses semantics, applies L2
-    normalization, and gives layout/type/stat features their own projection
-    before concatenation.
+    module is the model-side bottleneck: it L2-normalizes raw SciBERT vectors,
+    compresses semantics, applies a second L2 stabilization after the ReLU
+    bottleneck, and gives layout/type/stat features their own projection before
+    concatenation.
     """
 
     def __init__(self, config: FeatureProjectorConfig | None = None):
@@ -95,9 +97,10 @@ class FeatureProjector(_MODULE_BASE):
             layout = layout[:, :expected_layout_dim]
         elif layout.shape[1] < expected_layout_dim:
             layout = F.pad(layout, (0, expected_layout_dim - layout.shape[1]))
+        semantic = F.normalize(semantic, p=2, dim=-1, eps=self.config.semantic_norm_eps)
         semantic_projected = F.relu(self.semantic_projection(semantic))
-        semantic_projected = F.normalize(semantic_projected, p=2, dim=-1)
         semantic_projected = self.semantic_dropout(semantic_projected)
+        semantic_projected = F.normalize(semantic_projected, p=2, dim=-1, eps=self.config.semantic_norm_eps)
         return torch.cat([semantic_projected, self.layout(layout)], dim=-1)
 
 

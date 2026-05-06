@@ -322,12 +322,12 @@ edge_attr_dim = 11
 原始 `.pt` 继续保存完整 768 维 SciBERT 节点语义，不在数据层降维。降维和归一化属于模型层：
 
 ```text
-semantic_768 -> Linear -> semantic_64 -> L2 normalize
+semantic_768 -> L2 normalize -> Linear -> ReLU -> Dropout(0.2) -> semantic_64 -> L2 normalize
 layout/type/stats/sequence/column/title_45 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 
-当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=11)`、`TransformerConv(edge_dim=11)` 或 `GINEConv`。
+当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。原始 `.pt` 中的 768 维 SciBERT 仍保留，用于复用缓存和计算 `semantic_cosine`；真正进入 GNN 前，语义分支必须经过上述脱水流程，避免主题词汇压制 bbox、scroll-y、样式和类型特征。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=11)`、`TransformerConv(edge_dim=11)` 或 `GINEConv`。
 
 ## Validator 最低要求
 
