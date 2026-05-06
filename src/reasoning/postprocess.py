@@ -192,6 +192,8 @@ class TreeDecoder:
                 continue
             if raw_skeleton is not None and merge_crosses_section_boundary(source, target, raw_skeleton):
                 continue
+            if merge_crosses_intermediate_list_marker(source, target, node_records):
+                continue
             if not self.can_merge(node_records[source], node_records[target]):
                 continue
             merge_score = float(probs[edge_pos, MERGE].item())
@@ -658,11 +660,26 @@ class TreeDecoder:
             child = child_list[index]
             list_environment = list_environment_for_node(child)
             if list_environment is not None:
-                run: list[ResolvedNode] = []
-                while index < len(child_list) and list_environment_for_node(child_list[index]) is not None:
-                    run.append(child_list[index])
-                    index += 1
-                rendered.append(self.render_dynamic_list_group(run, environment=list_environment, depth=depth))
+                entries: list[tuple[ResolvedNode, list[ResolvedNode]]] = []
+                item_node = child
+                continuations: list[ResolvedNode] = []
+                index += 1
+                while index < len(child_list):
+                    current = child_list[index]
+                    current_environment = list_environment_for_node(current)
+                    if current_environment is not None:
+                        entries.append((item_node, continuations))
+                        item_node = current
+                        continuations = []
+                        index += 1
+                        continue
+                    if is_list_item_continuation_node(current):
+                        continuations.append(current)
+                        index += 1
+                        continue
+                    break
+                entries.append((item_node, continuations))
+                rendered.append(self.render_dynamic_list_entries(entries, environment=list_environment, depth=depth))
                 continue
             block = self.render_node(child, depth=depth).strip()
             if block:
@@ -670,16 +687,30 @@ class TreeDecoder:
             index += 1
         return rendered
 
-    def render_dynamic_list_group(self, items: list[ResolvedNode], *, environment: str, depth: int) -> str:
+    def render_dynamic_list_entries(
+        self,
+        entries: list[tuple[ResolvedNode, list[ResolvedNode]]],
+        *,
+        environment: str,
+        depth: int,
+    ) -> str:
         lines = [rf"\begin{{{environment}}}"]
-        for item in items:
-            item_body = render_textual_node_without_list_marker(item) if item.text else ""
+        for item, continuations in entries:
+            if list_environment_for_node(item) is not None:
+                item_body = render_textual_node_without_list_marker(item) if item.text else ""
+            else:
+                item_body = self.render_list_item(item, depth=depth + 1)
             nested = self.render_child_blocks_with_dynamic_lists(item.children, depth=depth + 1)
-            if nested:
-                item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
+            continuation_blocks = [self.render_node(node, depth=depth + 1).strip() for node in continuations]
+            body_parts = [item_body, *nested, *continuation_blocks]
+            item_body = "\n".join(part for part in body_parts if part).strip()
             lines.append(rf"\item {item_body}".rstrip())
         lines.append(rf"\end{{{environment}}}")
         return "\n".join(lines)
+
+    def render_dynamic_list_group(self, items: list[ResolvedNode], *, environment: str, depth: int) -> str:
+        entries = [(item, []) for item in items]
+        return self.render_dynamic_list_entries(entries, environment=environment, depth=depth)
 
     def render_dynamic_itemize(self, items: list[ResolvedNode], *, depth: int) -> str:
         return self.render_dynamic_list_group(items, environment="itemize", depth=depth)
@@ -694,12 +725,27 @@ class TreeDecoder:
             first_child_environment = list_environment_for_node(children[0])
             if first_child_environment is not None:
                 environment = first_child_environment
-        lines = [rf"\begin{{{environment}}}"]
+        entries: list[tuple[ResolvedNode, list[ResolvedNode]]] = []
+        item_node: ResolvedNode | None = None
+        continuations: list[ResolvedNode] = []
         for child in children:
-            item = self.render_list_item(child, depth=depth + 1)
-            lines.append(rf"\item {item}".rstrip())
-        lines.append(rf"\end{{{environment}}}")
-        return "\n".join(lines)
+            if list_environment_for_node(child) is not None:
+                if item_node is not None:
+                    entries.append((item_node, continuations))
+                item_node = child
+                continuations = []
+                continue
+            if item_node is not None and is_list_item_continuation_node(child):
+                continuations.append(child)
+                continue
+            if item_node is not None:
+                entries.append((item_node, continuations))
+                item_node = None
+                continuations = []
+            entries.append((child, []))
+        if item_node is not None:
+            entries.append((item_node, continuations))
+        return self.render_dynamic_list_entries(entries, environment=environment, depth=depth)
 
     def render_list_item(self, node: ResolvedNode, *, depth: int = 0) -> str:
         block_type = canonical_render_type(node.record)
@@ -1274,7 +1320,7 @@ def can_contract_merge_records(
 ) -> bool:
     left_type = canonical_render_type(left)
     right_type = canonical_render_type(right)
-    if record_starts_with_list_marker(left) or record_starts_with_list_marker(right):
+    if record_starts_with_list_marker(right):
         return False
     if left_type != right_type or left_type not in MERGE_COMPATIBLE_TYPES:
         return False
@@ -1289,6 +1335,16 @@ def can_contract_merge_records(
 
 def record_starts_with_list_marker(record: dict[str, Any]) -> bool:
     return bool(LIST_MARKER_RE.match(node_record_text(record)))
+
+
+def merge_crosses_intermediate_list_marker(source: int, target: int, node_records: list[dict[str, Any]]) -> bool:
+    lower, upper = sorted((source, target))
+    if upper - lower <= 1:
+        return False
+    for index in range(lower + 1, upper):
+        if 0 <= index < len(node_records) and record_starts_with_list_marker(node_records[index]):
+            return True
+    return False
 
 
 def crosses_column_gutter_barrier(
@@ -1381,6 +1437,13 @@ def bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:
 
 def is_bullet_list_candidate(node: ResolvedNode) -> bool:
     return list_environment_for_node(node) is not None
+
+
+def is_list_item_continuation_node(node: ResolvedNode) -> bool:
+    """Allow display objects to stay inside the current list item."""
+
+    block_type = canonical_render_type(node.record)
+    return block_type in {"equation", "inline_math", "table", "figure", "algorithm", "code"}
 
 
 def list_environment_for_node(node: ResolvedNode) -> str | None:

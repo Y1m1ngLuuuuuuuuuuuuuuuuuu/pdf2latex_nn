@@ -332,7 +332,7 @@ def test_tree_decoder_rejects_merge_across_section_scopes():
     edge_index = torch.tensor([[1], [3]], dtype=torch.long)
     scores = torch.tensor([[0.99, 0.0, 0.0, 0.01]], dtype=torch.float32)
 
-    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5)).decode(records, edge_index, scores)
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
 
     assert [child.text for child in root.children] == ["A", "B"]
     assert [child.text for child in root.children[0].children] == ["End of A-"]
@@ -501,11 +501,54 @@ def test_tree_decoder_refuses_merge_when_target_starts_with_list_marker():
     edge_index = torch.tensor([[0], [1]], dtype=torch.long)
     scores = torch.tensor([[0.99, 0.0, 0.0, 0.01]], dtype=torch.float32)
 
-    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5)).decode(records, edge_index, scores)
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
 
     flattened = [node.text for node in root.children]
     assert flattened == ["Lead into list.", "1. First item"]
     assert all(child.merged_node_ids == [idx] for idx, child in enumerate(root.children))
+
+
+def test_tree_decoder_allows_merge_from_list_marker_to_text_continuation():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "paragraph", "text": "1. First item starts"},
+        {"type": "paragraph", "text": "and continues."},
+    ]
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    scores = torch.tensor(
+        [
+            [0.99, 0.0, 0.0],
+            [0.99, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
+
+    assert len(root.children) == 1
+    assert root.children[0].text == "1. First item starts and continues."
+    assert root.children[0].merged_node_ids == [0, 1]
+
+
+def test_tree_decoder_refuses_merge_across_intermediate_list_marker():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "equation_interline", "text": "d_{Ch}(x,c_k)"},
+        {"type": "paragraph", "text": "4. Wasserstein distance"},
+        {"type": "equation_interline", "text": "d_W(x,c_k)"},
+    ]
+    edge_index = torch.tensor([[0], [2]], dtype=torch.long)
+    scores = torch.tensor([[0.99, 0.0, 0.0]], dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
+
+    assert [child.merged_node_ids for child in root.children] == [[0], [1], [2]]
 
 
 def test_tree_decoder_groups_numbered_sibling_items_as_enumerate():
@@ -526,6 +569,27 @@ def test_tree_decoder_groups_numbered_sibling_items_as_enumerate():
     assert r"\item Second step" in tex
     assert "1. First step" not in tex
     assert r"\begin{itemize}" not in tex
+
+
+def test_tree_decoder_keeps_display_equations_inside_numbered_list_items():
+    records = [
+        {"type": "paragraph", "text": "1. Euclidean distance $(d_E)$: Captures geometry"},
+        {"type": "equation_interline", "text": "d_E(x,c_k)=\\|f_\\theta(x)-c_k\\|_2"},
+        {"type": "paragraph", "text": "2. Cosine distance $(d_C)$: Measures similarity"},
+        {"type": "equation_interline", "text": "d_C(x,c_k)=1-\\frac{f_\\theta(x)\\cdot c_k}{\\|f_\\theta(x)\\|\\|c_k\\|}"},
+        {"type": "paragraph", "text": "After list."},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert tex.count(r"\begin{enumerate}") == 1
+    assert tex.count(r"\end{enumerate}") == 1
+    assert tex.count(r"\item") == 2
+    assert r"\item Euclidean distance" in tex
+    assert r"\item Cosine distance" in tex
+    assert "\\[\nd_E(x,c_k)" in tex
+    assert tex.index(r"\item Euclidean distance") < tex.index("\\[\nd_E(x,c_k)") < tex.index(r"\item Cosine distance")
+    assert "\\end{enumerate}\n\nAfter list." in tex
 
 
 def test_tree_decoder_native_list_node_strips_marker_and_selects_environment():

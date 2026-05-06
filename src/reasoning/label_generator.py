@@ -160,6 +160,7 @@ HEADING_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
 SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
+MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
 
 
 class AlignmentLabeler:
@@ -409,7 +410,11 @@ class AlignmentLabeler:
         path_u = self.tex_nodes[source_match.tex_id].path_ids
         path_v = self.tex_nodes[target_match.tex_id].path_ids
         if path_u == path_v:
-            return int(TexRelationLabel.MERGE)
+            if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
+                return int(TexRelationLabel.NONE)
+            if same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
+                return int(TexRelationLabel.MERGE)
+            return int(TexRelationLabel.NONE)
         visual_relation = self.infer_visual_relation(source_index, target_index, source_match, target_match)
         if visual_relation is not None:
             return visual_relation
@@ -448,6 +453,15 @@ class AlignmentLabeler:
             return False
         indices = self.tex_to_pdf_indices.get(tex_id, [])
         return bool(indices) and pdf_index == min(indices)
+
+    def same_tex_node_merge_crosses_list_marker(self, source_index: int, target_index: int) -> bool:
+        lower, upper = sorted((source_index, target_index))
+        if upper - lower <= 1:
+            return False
+        for index in range(lower + 1, upper):
+            if 0 <= index < len(self.pdf_nodes) and LIST_MARKER_RE.match(self.pdf_nodes[index].text):
+                return True
+        return False
 
     def assert_alignment_quality(self) -> None:
         orphan_count = sum(1 for match in self.matches if not match.tex_id)
@@ -670,6 +684,38 @@ def looks_like_standalone_heading(text: str) -> bool:
 
 def canonical_pdf_type(item: dict[str, Any]) -> str:
     return str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").strip().lower()
+
+
+def canonical_pdf_merge_type(item: dict[str, Any]) -> str:
+    """Collapse MinerU/PyMuPDF block names into relation-label merge families."""
+
+    raw = canonical_pdf_type(item)
+    if raw in {"paragraph", "text", "paragraph_text", "body", "list", "item"}:
+        return "text"
+    if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
+        return "equation"
+    if raw in {"inline_math", "inline_formula", "math_inline"}:
+        return "inline_math"
+    if raw in {"reference", "references", "bibliography"}:
+        return "reference"
+    if raw in {"table", "figure", "image", "chart", "algorithm", "code"}:
+        return raw
+    return "text"
+
+
+def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> bool:
+    """Prevent same-TeX scope from collapsing across structural block boundaries.
+
+    A TeX ``item`` may contain both text and display math. Those are siblings
+    inside the list item, not one physical paragraph, so they must not become
+    MERGE edges even though fuzzy alignment maps them to the same TeX node.
+    """
+
+    left_type = canonical_pdf_merge_type(left.item)
+    right_type = canonical_pdf_merge_type(right.item)
+    if LIST_MARKER_RE.match(right.text):
+        return False
+    return left_type == right_type and left_type in MERGE_COMPATIBLE_PDF_TYPES
 
 
 def pdf_font_size(item: dict[str, Any]) -> float:

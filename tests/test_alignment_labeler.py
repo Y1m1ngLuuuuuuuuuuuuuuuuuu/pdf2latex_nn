@@ -139,6 +139,150 @@ def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     assert graph.pdf_to_tex[1] == graph.pdf_to_tex[2]
 
 
+def test_alignment_labeler_refuses_cross_type_merge_inside_same_tex_item(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "1. Euclidean distance ( d _ { E } ) : Captures global relationships",
+                    },
+                    {
+                        "type": "equation_interline",
+                        "text_for_embedding": "d _ { E } ( x , c _ { k } ) = || f _ theta ( x ) - c _ k || _ 2",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \begin{enumerate}
+        \item Euclidean distance (\(d_E\)): Captures global relationships
+        \[
+        d_E(x,c_k)=\|f_\theta(x)-c_k\|_2
+        \]
+        \end{enumerate}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_allows_same_type_text_continuation_after_list_marker(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "1. First item starts here"},
+                    {"type": "paragraph", "text_for_embedding": "and continues on the next physical line."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \begin{enumerate}
+        \item First item starts here and continues on the next physical line.
+        \end{enumerate}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE), int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_refuses_merge_across_intermediate_list_marker(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "equation_interline", "text_for_embedding": "d ch equation"},
+                    {"type": "paragraph", "text_for_embedding": "4. Wasserstein distance"},
+                    {"type": "equation_interline", "text_for_embedding": "d w equation"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \begin{enumerate}
+        \item Wasserstein distance
+        \[
+        d ch equation
+        \]
+        \[
+        d w equation
+        \]
+        \end{enumerate}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(similarity_threshold=40.0),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
 def test_alignment_labeler_uses_visual_heading_stack_when_tex_paths_are_flat(tmp_path):
     if not has_alignment_deps():
         return
