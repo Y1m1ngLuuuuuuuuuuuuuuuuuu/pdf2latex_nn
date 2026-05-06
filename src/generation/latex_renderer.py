@@ -79,9 +79,13 @@ def render_node(node: Any, *, depth: int = 0) -> str:
         body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
         return "\n\n".join(part for part in body if part)
     if block_type == "equation":
-        return render_equation(text)
+        body = [render_equation(text)]
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        return "\n\n".join(part for part in body if part)
     if block_type == "inline_math":
-        return render_inline_math(text)
+        body = [render_inline_math(text)]
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        return "\n\n".join(part for part in body if part)
     if block_type == "table":
         return render_table_placeholder(record, text)
     if block_type == "figure":

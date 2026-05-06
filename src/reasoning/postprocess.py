@@ -19,6 +19,7 @@ VIRTUAL_ROOT = "__ROOT__"
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
+NON_PARENT_RENDER_TYPES = {"equation", "inline_math", "algorithm", "code"}
 DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
@@ -635,9 +636,13 @@ class TreeDecoder:
             parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
             return "\n\n".join(part for part in parts if part)
         if block_type == "equation":
-            return render_equation(text)
+            parts = [render_equation(text)]
+            parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+            return "\n\n".join(part for part in parts if part)
         if block_type == "inline_math":
-            return render_inline_math(text)
+            parts = [render_inline_math(text)]
+            parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+            return "\n\n".join(part for part in parts if part)
         if block_type == "table":
             return render_table_placeholder(node.record, node_verbatim_text(node), node_id=node.node_id)
         if block_type == "figure":
@@ -1061,11 +1066,15 @@ def sibling_crosses_section_boundary(source: int, target: int, skeleton: Heading
 def violates_structural_parent_child(source: ResolvedNode, target: ResolvedNode, skeleton: HeadingSkeleton) -> bool:
     source_id = source.node_id
     target_id = target.node_id
+    source_type = canonical_render_type(source.record)
+    target_type = canonical_render_type(target.record)
+    if source_type in NON_PARENT_RENDER_TYPES:
+        return True
     if target_id in skeleton.heading_ids:
         return True
     if source_id in skeleton.heading_ids:
         return skeleton.scope_by_node.get(target_id) != source_id
-    if canonical_render_type(target.record) == "title":
+    if target_type == "title":
         return True
     return skeleton.scope_by_node.get(source_id) != skeleton.scope_by_node.get(target_id)
 

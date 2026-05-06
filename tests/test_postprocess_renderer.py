@@ -93,6 +93,25 @@ def test_tree_decoder_refuses_cross_type_merge_contraction():
     assert root.children[0].children[0].merged_node_ids == [1]
 
 
+def test_tree_decoder_rejects_equation_as_parent_and_preserves_following_text():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "equation_interline", "text": "d_{Ch}(x,c_k)"},
+        {"type": "paragraph", "text": "Metric space integration: Each distance metric undergoes z-score normalization."},
+    ]
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    scores = torch.tensor([[0.0, 0.99, 0.01]], dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, require_parent_argmax=True)).decode(records, edge_index, scores)
+    tex = TreeDecoder().render_document(root)
+
+    assert [child.merged_node_ids for child in root.children] == [[0], [1]]
+    assert "Metric space integration" in tex
+
+
 def test_tree_decoder_renders_reference_items_from_merged_records():
     records = [
         {"type": "reference", "reference_items": ["A. First.", "B. Second."]},

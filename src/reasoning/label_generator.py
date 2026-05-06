@@ -161,6 +161,25 @@ SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
+NON_HEADING_PDF_TYPES = {
+    "equation",
+    "equation_interline",
+    "interline_equation",
+    "display_formula",
+    "formula",
+    "inline_math",
+    "inline_formula",
+    "math_inline",
+    "table",
+    "figure",
+    "image",
+    "chart",
+    "algorithm",
+    "code",
+    "reference",
+    "references",
+    "bibliography",
+}
 
 
 class AlignmentLabeler:
@@ -597,6 +616,8 @@ def is_visual_heading_candidate(
     raw_type = canonical_pdf_type(node.item)
     if raw_type in HEADING_TYPES:
         return True
+    if raw_type in NON_HEADING_PDF_TYPES or str(node.item.get("list_type") or "").lower() == "reference_list":
+        return False
     if LIST_MARKER_RE.match(text):
         return False
     if title_numbering_level(text) is not None and looks_like_standalone_heading(text):
