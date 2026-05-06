@@ -7,7 +7,7 @@
 ```text
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
-node_feature_dim: 813
+node_feature_dim: 817
 edge_attr_dim: 11
 ```
 
@@ -202,12 +202,13 @@ reference_item_of
 768 SciBERT semantic
 10 type one-hot
 4 geometry
+4 scroll geometry
 3 derived stats
 6 style stats
 16 sequence position
 3 column-aware features
 3 title structure features
-= 813
+= 817
 ```
 
 切片固定为：
@@ -217,11 +218,12 @@ reference_item_of
 | `semantic` | `[0, 768)` | 768 | SciBERT `[CLS]` sliding-window mean |
 | `type_onehot` | `[768, 778)` | 10 | Block Type 独热 |
 | `geometry` | `[778, 782)` | 4 | 首尾锚点几何 |
-| `derived_stats` | `[782, 785)` | 3 | 宏观位置、宽高比、文本密度 |
-| `style_stats` | `[785, 791)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
-| `sequence_position` | `[791, 807)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
-| `column_features` | `[807, 810)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
-| `title_structure` | `[810, 813)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
+| `scroll_geometry` | `[782, 786)` | 4 | 长卷轴 pseudo-y、栏宽、字号高度和序列进度 |
+| `derived_stats` | `[786, 789)` | 3 | 宏观位置、宽高比、文本密度 |
+| `style_stats` | `[789, 795)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
+| `sequence_position` | `[795, 811)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
+| `column_features` | `[811, 814)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
+| `title_structure` | `[814, 817)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
 
 ### Geometry Fields
 
@@ -233,6 +235,17 @@ y_end_page
 ```
 
 `x_*_local` 使用动态局部栏坐标：`(x - column_x_min) / column_width`。`y_*_page` 使用页面高度归一化。
+
+### Scroll Geometry Fields
+
+```text
+norm_width_local = (x1 - x0) / current_column_width
+norm_height_font = (y1 - y0) / document_body_font_size
+norm_pseudo_y = pseudo_y0 / total_scroll_height
+norm_index = reading_order_rank / (node_count - 1)
+```
+
+`pseudo_y` 把单页单栏/双栏混合排版投影成一条无限向下的阅读长卷轴：同页内从左栏切到右栏时累加当前页已读栏的最大 `y1`，翻页时累加上一页/上一段长卷轴高度。边特征里的 `delta_y_gap`、`delta_x_left` 和 `center_distance` 同样使用该长卷轴坐标，避免左栏底部和右栏顶部在页面绝对坐标里显得“距离很远”。
 
 ### Derived Stats
 

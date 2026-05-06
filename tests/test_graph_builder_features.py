@@ -6,6 +6,8 @@ from src.reasoning.graph_builder import (
     build_edge_attr_matrix,
     build_geometry_matrix,
     build_logical_center_pairs,
+    build_scroll_geometry_matrix,
+    build_scroll_layout,
     build_sequence_position_matrix,
     build_sequential_edge_index,
     build_style_stats_matrix,
@@ -81,6 +83,27 @@ def test_geometry_matrix_uses_first_start_and_last_end_local_coordinates():
     assert [round(float(value), 4) for value in geom[0].tolist()] == [0.0, 0.1, 1.0, 0.2]
     assert round(float(geom[4][0]), 4) == 0.0
     assert round(float(geom[4][2]), 4) == 1.0
+
+
+def test_scroll_geometry_matrix_unrolls_columns_into_pseudo_y_receipt_roll():
+    if not has_torch():
+        return
+    items = [
+        {**item("left top", [80, 100, 480, 200], page=0, column=0), "style_baseline_size": 10.0},
+        {**item("left bottom", [80, 300, 480, 400], page=0, column=0), "style_baseline_size": 10.0},
+        {**item("right top", [520, 100, 920, 200], page=0, column=1), "style_baseline_size": 10.0},
+        {**item("right bottom", [520, 300, 920, 400], page=0, column=1), "style_baseline_size": 10.0},
+    ]
+
+    layout = build_scroll_layout(items, reading_order_indices=[0, 1, 2, 3])
+    features = build_scroll_geometry_matrix(items, scroll_layout=layout)
+
+    assert tuple(features.shape) == (4, 4)
+    assert [round(float(value), 4) for value in features[0].tolist()] == [1.0, 10.0, 0.125, 0.0]
+    assert round(float(features[2][2]), 4) == 0.625
+    assert round(float(features[3][3]), 4) == 1.0
+    assert layout.boxes[2] is not None
+    assert layout.boxes[2].pseudo_y0 == 500.0
 
 
 def test_sequential_edges_are_bidirectional_by_default():
@@ -236,7 +259,7 @@ def test_logical_center_distance_unrolls_double_column_reading_flow():
     physical_distance = (((720 - 280) ** 2 + (150 - 350) ** 2) ** 0.5) / 1000.0
 
     assert physical_distance > 0.48
-    assert round(float(edge_attr[0][4]), 4) == 0.05
+    assert round(float(edge_attr[0][4]), 4) == 0.2
 
 
 def test_logical_center_pairs_keep_same_column_relative_x_not_absolute_x():

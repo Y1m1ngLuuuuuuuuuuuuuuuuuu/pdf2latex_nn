@@ -45,7 +45,7 @@ def test_overfit_script_runs_one_epoch_on_tiny_valid_graph(tmp_path):
 
     graph_path = tmp_path / "graph.pt"
     data = Data(
-        x=torch.zeros((2, 813), dtype=torch.float32),
+        x=torch.zeros((2, 817), dtype=torch.float32),
         edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
         edge_attr=torch.zeros((2, 11), dtype=torch.float32),
     )

@@ -52,6 +52,7 @@ class EdgeRelation(str, Enum):
 
 FEATURE_TYPE_VOCAB = [block_type.value for block_type in BlockType]
 GEOMETRY_FIELDS = ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
+SCROLL_GEOMETRY_FIELDS = ["norm_width_local", "norm_height_font", "norm_pseudo_y", "norm_index"]
 DERIVED_STAT_FIELDS = ["macro_position", "aspect_ratio", "text_density"]
 STYLE_STAT_FIELDS = [
     "baseline_font_size_norm",
@@ -200,6 +201,7 @@ class FeatureTensorSchema:
     semantic_dim: int = SCIBERT_DIM
     type_vocab: list[str] = field(default_factory=lambda: list(FEATURE_TYPE_VOCAB))
     geometry_fields: list[str] = field(default_factory=lambda: list(GEOMETRY_FIELDS))
+    scroll_geometry_fields: list[str] = field(default_factory=lambda: list(SCROLL_GEOMETRY_FIELDS))
     derived_stat_fields: list[str] = field(default_factory=lambda: list(DERIVED_STAT_FIELDS))
     style_stat_fields: list[str] = field(default_factory=lambda: list(STYLE_STAT_FIELDS))
     sequence_position_fields: list[str] = field(default_factory=lambda: list(SEQUENCE_POSITION_FIELDS))
@@ -216,6 +218,7 @@ class FeatureTensorSchema:
             self.semantic_dim
             + self.type_dim
             + len(self.geometry_fields)
+            + len(self.scroll_geometry_fields)
             + len(self.derived_stat_fields)
             + len(self.style_stat_fields)
             + len(self.sequence_position_fields)

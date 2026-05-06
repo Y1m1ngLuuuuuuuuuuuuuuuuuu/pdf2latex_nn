@@ -10,6 +10,7 @@ from src.perception.schema import (
     EDGE_ATTR_FIELDS,
     GEOMETRY_FIELDS,
     SCIBERT_DIM,
+    SCROLL_GEOMETRY_FIELDS,
     SEQUENCE_POSITION_FIELDS,
     STYLE_STAT_FIELDS,
     TITLE_STRUCTURE_FIELDS,
@@ -47,6 +48,7 @@ class FeatureProjectorConfig:
         return (
             self.type_dim
             + len(GEOMETRY_FIELDS)
+            + len(SCROLL_GEOMETRY_FIELDS)
             + len(DERIVED_STAT_FIELDS)
             + len(STYLE_STAT_FIELDS)
             + len(SEQUENCE_POSITION_FIELDS)

@@ -41,9 +41,10 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "inline_code_char_ratio",
     ]
     assert len(schema.sequence_position_fields) == 16
+    assert schema.scroll_geometry_fields == ["norm_width_local", "norm_height_font", "norm_pseudo_y", "norm_index"]
     assert schema.column_feature_fields == ["column_left", "column_right", "column_full_or_single"]
     assert schema.title_structure_fields == ["relative_font_size", "is_h1_pattern", "is_h2_pattern"]
-    assert schema.node_feature_dim == 813
+    assert schema.node_feature_dim == 817
     assert schema.edge_attr_dim == 11
     assert schema.edge_attr_fields == [
         "semantic_cosine",

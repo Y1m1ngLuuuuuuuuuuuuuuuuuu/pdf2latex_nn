@@ -17,6 +17,7 @@ from src.perception.schema import (
     NON_TEXT_DENSITY_TYPES,
     PLACEHOLDER_TEXT,
     SCIBERT_DIM,
+    SCROLL_GEOMETRY_FIELDS,
     SEQUENCE_POSITION_FIELDS,
     STYLE_STAT_FIELDS,
     TITLE_STRUCTURE_FIELDS,
@@ -85,6 +86,42 @@ class LogicalBox:
 
 
 @dataclass(frozen=True)
+class ScrollBox:
+    item_index: int
+    page_idx: int
+    bbox: tuple[float, float, float, float]
+    column_id: int
+    column_width: float
+    local_x0: float
+    local_x1: float
+    pseudo_y0: float
+    pseudo_y1: float
+
+    @property
+    def width(self) -> float:
+        return max(0.0, self.bbox[2] - self.bbox[0])
+
+    @property
+    def height(self) -> float:
+        return max(0.0, self.bbox[3] - self.bbox[1])
+
+    @property
+    def local_cx(self) -> float:
+        return (self.local_x0 + self.local_x1) / 2.0
+
+    @property
+    def pseudo_cy(self) -> float:
+        return (self.pseudo_y0 + self.pseudo_y1) / 2.0
+
+
+@dataclass(frozen=True)
+class ScrollLayout:
+    boxes: list[ScrollBox | None]
+    ranks: list[int]
+    total_scroll_height: float
+
+
+@dataclass(frozen=True)
 class GraphBuildConfig:
     model_path: Path
     max_length: int = 512
@@ -115,17 +152,29 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     texts = [text_for_embedding(item) for item in items]
     regime_order = sort_node_indices_by_reading_order(items)
     regime_ranks = _ranks_from_order(regime_order, len(items))
+    column_ids = infer_column_ids(items)
+    scroll_layout = build_scroll_layout(items, reading_order_indices=regime_order, column_ids=column_ids)
     semantic = embed_texts_scibert_cls(texts, config)
     type_onehot = build_type_onehot_matrix(items)
     geometry = build_geometry_matrix(items)
+    scroll_geometry = build_scroll_geometry_matrix(items, scroll_layout=scroll_layout)
     stats = build_derived_stats_matrix(items, reading_order_ranks=regime_ranks)
     style_stats = build_style_stats_matrix(items)
     sequence_position = build_sequence_position_matrix(items, reading_order_ranks=regime_ranks)
-    column_ids = infer_column_ids(items)
     column_features = build_column_onehot_matrix(items, column_ids=column_ids)
     title_structure = build_title_structure_matrix(items)
     x = torch.cat(
-        [semantic, type_onehot, geometry, stats, style_stats, sequence_position, column_features, title_structure],
+        [
+            semantic,
+            type_onehot,
+            geometry,
+            scroll_geometry,
+            stats,
+            style_stats,
+            sequence_position,
+            column_features,
+            title_structure,
+        ],
         dim=1,
     )
     edge_pairs = build_candidate_edge_pairs(
@@ -136,10 +185,21 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
         reading_order_indices=regime_order,
     )
     edge_index = build_edge_index_from_pairs(edge_pairs)
-    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs, reading_order_ranks=regime_ranks)
+    edge_attr = build_edge_attr_matrix(
+        items,
+        semantic,
+        edge_pairs=edge_pairs,
+        reading_order_ranks=regime_ranks,
+        scroll_layout=scroll_layout,
+    )
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     data.edge_source_types = [source_type for _, _, source_type in edge_pairs]
-    data.node_records = make_node_records(items, column_ids=column_ids, reading_order_ranks=regime_ranks)
+    data.node_records = make_node_records(
+        items,
+        column_ids=column_ids,
+        reading_order_ranks=regime_ranks,
+        scroll_layout=scroll_layout,
+    )
     data.feature_schema = build_node_feature_schema()
     data.edge_attr_schema = {
         "dim": len(EDGE_ATTR_FIELDS),
@@ -241,6 +301,39 @@ def build_geometry_matrix(items: list[dict[str, Any]]) -> Any:
         x_end = normalize_x_in_local_frame(last[2], last, last_page, page_frames, bool(item.get("is_full_width")))
         y_end = last[3] / PAGE_SIZE
         rows.append([x_start, y_start, x_end, y_end])
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_scroll_geometry_matrix(
+    items: list[dict[str, Any]],
+    *,
+    reading_order_indices: list[int] | None = None,
+    column_ids: list[int] | None = None,
+    scroll_layout: ScrollLayout | None = None,
+) -> Any:
+    """Return local width/height and global pseudo-y/index layout features."""
+
+    import torch
+
+    if scroll_layout is None:
+        scroll_layout = build_scroll_layout(items, reading_order_indices=reading_order_indices, column_ids=column_ids)
+    body_height = infer_document_body_font_size(items) or infer_document_baseline_font_size(items) or 1.0
+    total_nodes = max(1, len(items) - 1)
+    total_scroll_height = max(1.0, scroll_layout.total_scroll_height)
+    rows = []
+    for idx, _ in enumerate(items):
+        box = scroll_layout.boxes[idx] if idx < len(scroll_layout.boxes) else None
+        rank = scroll_layout.ranks[idx] if idx < len(scroll_layout.ranks) else idx
+        norm_index = rank / total_nodes
+        if box is None:
+            rows.append([0.0, 0.0, 0.0, norm_index])
+            continue
+        norm_width = box.width / max(1.0, box.column_width)
+        norm_height = box.height / body_height
+        norm_pseudo_y = clamp01(box.pseudo_y0 / total_scroll_height)
+        rows.append([norm_width, norm_height, norm_pseudo_y, norm_index])
+    if not rows:
+        return torch.empty((0, len(SCROLL_GEOMETRY_FIELDS)), dtype=torch.float32)
     return torch.tensor(rows, dtype=torch.float32)
 
 
@@ -530,6 +623,12 @@ def build_node_feature_schema() -> dict[str, dict[str, Any]]:
     add("semantic", SCIBERT_DIM, source="SciBERT CLS window mean")
     add("type_onehot", len(TYPE_VOCAB), vocab=TYPE_VOCAB)
     add("geometry", len(GEOMETRY_FIELDS), fields=GEOMETRY_FIELDS)
+    add(
+        "scroll_geometry",
+        len(SCROLL_GEOMETRY_FIELDS),
+        fields=SCROLL_GEOMETRY_FIELDS,
+        source="pseudo-y long-scroll projection plus local column/font normalization",
+    )
     add("derived_stats", len(DERIVED_STAT_FIELDS), fields=DERIVED_STAT_FIELDS)
     add("style_stats", len(STYLE_STAT_FIELDS), fields=STYLE_STAT_FIELDS)
     add("sequence_position", len(SEQUENCE_POSITION_FIELDS), fields=SEQUENCE_POSITION_FIELDS, source="single/double-column regime reading index")
@@ -617,6 +716,7 @@ def build_edge_attr_matrix(
     *,
     edge_pairs: list[tuple[int, int, str]] | None = None,
     reading_order_ranks: list[int] | None = None,
+    scroll_layout: ScrollLayout | None = None,
 ) -> Any:
     """Return 11-dimensional edge features aligned with candidate edge_index."""
 
@@ -627,7 +727,8 @@ def build_edge_attr_matrix(
         edge_pairs = build_candidate_edge_pairs(items)
     if reading_order_ranks is None:
         reading_order_ranks = regime_reading_order_ranks(items)
-    logical_centers = build_logical_center_pairs(items)
+    if scroll_layout is None:
+        scroll_layout = build_scroll_layout(items, reading_order_indices=None)
 
     rows = []
     for source_idx, target_idx, source_type in edge_pairs:
@@ -638,15 +739,15 @@ def build_edge_attr_matrix(
         target_bbox = _first_bbox(target.get("bbox"))
         source_bbox = source_bbox or (0.0, 0.0, 0.0, 0.0)
         target_bbox = target_bbox or (0.0, 0.0, 0.0, 0.0)
-        delta_y_gap = (target_bbox[1] - source_bbox[3]) / PAGE_SIZE
-        delta_x_left = (target_bbox[0] - source_bbox[0]) / PAGE_SIZE
+        source_scroll = scroll_layout.boxes[source_idx] if source_idx < len(scroll_layout.boxes) else None
+        target_scroll = scroll_layout.boxes[target_idx] if target_idx < len(scroll_layout.boxes) else None
+        delta_y_gap = scroll_delta_y_gap(source_scroll, target_scroll, fallback_source=source_bbox, fallback_target=target_bbox)
+        delta_x_left = scroll_delta_x_left(source_scroll, target_scroll, fallback_source=source_bbox, fallback_target=target_bbox)
         source_center = _bbox_center(source_bbox)
         target_center = _bbox_center(target_bbox)
-        logical_source_center = logical_centers[source_idx][1] if source_idx < len(logical_centers) else None
-        logical_target_center = logical_centers[target_idx][0] if target_idx < len(logical_centers) else None
-        center_distance = logical_center_distance(
-            logical_source_center,
-            logical_target_center,
+        center_distance = scroll_center_distance(
+            source_scroll,
+            target_scroll,
             fallback_source=source_center,
             fallback_target=target_center,
         )
@@ -681,13 +782,17 @@ def make_node_records(
     *,
     column_ids: list[int] | None = None,
     reading_order_ranks: list[int] | None = None,
+    scroll_layout: ScrollLayout | None = None,
 ) -> list[dict[str, Any]]:
     if column_ids is None:
         column_ids = infer_column_ids(items)
     if reading_order_ranks is None:
         reading_order_ranks = regime_reading_order_ranks(items)
+    if scroll_layout is None:
+        scroll_layout = build_scroll_layout(items, column_ids=column_ids)
     records = []
     for idx, item in enumerate(items):
+        scroll_box = scroll_layout.boxes[idx] if idx < len(scroll_layout.boxes) else None
         records.append(
             {
                 "global_order": item.get("global_order"),
@@ -699,6 +804,9 @@ def make_node_records(
                 "regime_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "dag_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "xycut_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
+                "pseudo_y0": scroll_box.pseudo_y0 if scroll_box is not None else None,
+                "pseudo_y1": scroll_box.pseudo_y1 if scroll_box is not None else None,
+                "scroll_total_height": scroll_layout.total_scroll_height,
                 "page_idx": item.get("page_idx"),
                 "visual_order": item.get("visual_order"),
                 "merge_count": item.get("merge_count"),
@@ -760,6 +868,186 @@ def build_logical_center_pairs(
         last = centers_by_chunk.get((item_index, chunk_count - 1))
         pairs.append((first, last or first))
     return pairs
+
+
+def build_scroll_layout(
+    items: list[dict[str, Any]],
+    *,
+    reading_order_indices: list[int] | None = None,
+    column_ids: list[int] | None = None,
+) -> ScrollLayout:
+    """Project page-local bboxes onto a one-dimensional long-scroll axis."""
+
+    node_count = len(items)
+    if column_ids is None:
+        column_ids = infer_column_ids(items)
+    order = _valid_reading_order_indices(
+        sort_node_indices_by_reading_order(items) if reading_order_indices is None else reading_order_indices,
+        node_count,
+    )
+    ranks = _ranks_from_order(order, node_count)
+    page_frames = infer_page_frames(items)
+    page_widths = infer_page_content_widths(items)
+    boxes: list[ScrollBox | None] = [None] * node_count
+
+    current_page: int | None = None
+    page_base = 0.0
+    page_column_offset = 0.0
+    page_max_local_y = 0.0
+    max_pseudo_y = 0.0
+    last_half_column: int | None = None
+
+    for item_idx in order:
+        item = items[item_idx]
+        bbox = _first_bbox(item.get("bbox"))
+        page_idx = _first_item_page(item)
+        if bbox is None or page_idx is None:
+            continue
+
+        if current_page is None or page_idx != current_page:
+            if current_page is not None:
+                page_base = max(page_base, max_pseudo_y)
+            current_page = page_idx
+            page_column_offset = 0.0
+            page_max_local_y = 0.0
+            last_half_column = None
+
+        column_id = column_ids[item_idx] if item_idx < len(column_ids) else 2
+        if _explicit_column_label(item) is not None:
+            column_id = _explicit_column_label(item) or 2
+        if column_id == 1 and last_half_column == 0:
+            page_column_offset = max(page_column_offset, page_max_local_y)
+
+        column_width = column_width_for_item(item, bbox, page_idx, column_id, page_frames, page_widths)
+        local_x0, local_x1 = local_x_span_for_item(item, bbox, page_idx, column_id, page_frames, page_widths)
+        pseudo_y0 = page_base + page_column_offset + bbox[1]
+        pseudo_y1 = page_base + page_column_offset + bbox[3]
+        boxes[item_idx] = ScrollBox(
+            item_index=item_idx,
+            page_idx=page_idx,
+            bbox=bbox,
+            column_id=column_id,
+            column_width=column_width,
+            local_x0=local_x0,
+            local_x1=local_x1,
+            pseudo_y0=pseudo_y0,
+            pseudo_y1=pseudo_y1,
+        )
+
+        page_max_local_y = max(page_max_local_y, bbox[3])
+        max_pseudo_y = max(max_pseudo_y, pseudo_y1)
+        if column_id in {0, 1}:
+            last_half_column = column_id
+
+    return ScrollLayout(boxes=boxes, ranks=ranks, total_scroll_height=max(1.0, max_pseudo_y))
+
+
+def infer_page_content_widths(items: list[dict[str, Any]]) -> dict[int, float]:
+    by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for item in items:
+        bbox = _first_bbox(item.get("bbox"))
+        page_idx = _first_item_page(item)
+        if bbox is None or page_idx is None:
+            continue
+        by_page.setdefault(page_idx, []).append(bbox)
+    widths = {}
+    for page_idx, boxes in by_page.items():
+        widths[page_idx] = max(1.0, max(bbox[2] for bbox in boxes) - min(bbox[0] for bbox in boxes))
+    return widths
+
+
+def column_width_for_item(
+    item: dict[str, Any],
+    bbox: tuple[float, float, float, float],
+    page_idx: int,
+    column_id: int,
+    page_frames: dict[int, PageFrames],
+    page_widths: dict[int, float],
+) -> float:
+    frame = column_frame_for_item(item, bbox, page_idx, column_id, page_frames)
+    if frame is not None:
+        return frame.width
+    return max(1.0, page_widths.get(page_idx, PAGE_SIZE))
+
+
+def local_x_span_for_item(
+    item: dict[str, Any],
+    bbox: tuple[float, float, float, float],
+    page_idx: int,
+    column_id: int,
+    page_frames: dict[int, PageFrames],
+    page_widths: dict[int, float],
+) -> tuple[float, float]:
+    frame = column_frame_for_item(item, bbox, page_idx, column_id, page_frames)
+    if frame is None:
+        return bbox[0], bbox[2]
+    return frame.normalize_x(bbox[0]) * PAGE_SIZE, frame.normalize_x(bbox[2]) * PAGE_SIZE
+
+
+def column_frame_for_item(
+    item: dict[str, Any],
+    bbox: tuple[float, float, float, float],
+    page_idx: int,
+    column_id: int,
+    page_frames: dict[int, PageFrames],
+) -> ColumnFrame | None:
+    if column_id == 2 or bool(item.get("is_full_width")):
+        return None
+    frames = page_frames.get(page_idx)
+    if frames is None:
+        return None
+    if column_id == 0:
+        return frames.left
+    if column_id == 1:
+        return frames.right
+    return None
+
+
+def _explicit_column_label(item: dict[str, Any]) -> int | None:
+    label = item.get("column_fix_column")
+    if label == "LEFT_COL":
+        return 0
+    if label == "RIGHT_COL":
+        return 1
+    if item.get("column_fix_span") == "FULL_SPAN":
+        return 2
+    return None
+
+
+def scroll_delta_y_gap(
+    source: ScrollBox | None,
+    target: ScrollBox | None,
+    *,
+    fallback_source: tuple[float, float, float, float],
+    fallback_target: tuple[float, float, float, float],
+) -> float:
+    if source is None or target is None:
+        return (fallback_target[1] - fallback_source[3]) / PAGE_SIZE
+    return (target.pseudo_y0 - source.pseudo_y1) / PAGE_SIZE
+
+
+def scroll_delta_x_left(
+    source: ScrollBox | None,
+    target: ScrollBox | None,
+    *,
+    fallback_source: tuple[float, float, float, float],
+    fallback_target: tuple[float, float, float, float],
+) -> float:
+    if source is None or target is None:
+        return (fallback_target[0] - fallback_source[0]) / PAGE_SIZE
+    return (target.local_x0 - source.local_x0) / PAGE_SIZE
+
+
+def scroll_center_distance(
+    source: ScrollBox | None,
+    target: ScrollBox | None,
+    *,
+    fallback_source: tuple[float, float],
+    fallback_target: tuple[float, float],
+) -> float:
+    if source is None or target is None:
+        return _center_distance(fallback_source, fallback_target)
+    return _center_distance((source.local_cx, source.pseudo_cy), (target.local_cx, target.pseudo_cy))
 
 
 def collect_logical_boxes(items: list[dict[str, Any]]) -> list[LogicalBox]:
