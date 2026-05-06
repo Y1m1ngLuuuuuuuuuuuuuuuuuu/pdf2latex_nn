@@ -268,7 +268,7 @@ def build_type_onehot_matrix(items: list[dict[str, Any]]) -> Any:
 
     rows = []
     for item in items:
-        type_name = canonical_type(item.get("type"))
+        type_name = canonical_type(item)
         row = [0.0] * len(TYPE_VOCAB)
         row[TYPE_VOCAB.index(type_name)] = 1.0
         rows.append(row)
@@ -352,7 +352,7 @@ def build_derived_stats_matrix(items: list[dict[str, Any]], *, reading_order_ran
         total_height = sum(max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
         area_sum = sum(max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]) for bbox in chunks)
         aspect_ratio = total_height / max(total_width, 1.0)
-        type_name = canonical_type(item.get("type"))
+        type_name = canonical_type(item)
         if type_name in NON_TEXT_DENSITY_TYPES:
             text_density = 0.0
         else:
@@ -445,7 +445,7 @@ def build_title_structure_matrix(items: list[dict[str, Any]]) -> Any:
 def infer_document_body_font_size(items: list[dict[str, Any]]) -> float:
     weighted: dict[float, int] = {}
     for item in items:
-        if canonical_type(item.get("type")) != "text":
+        if canonical_type(item) != "text":
             continue
         size = _item_font_size(item)
         if size <= 0:
@@ -804,7 +804,7 @@ def make_node_records(
                 "type": item.get("type"),
                 "raw_type": item.get("raw_type"),
                 "list_type": item.get("list_type"),
-                "canonical_type": canonical_type(item.get("type")),
+                "canonical_type": canonical_type(item),
                 "column_id_inferred": column_ids[idx] if idx < len(column_ids) else 2,
                 "regime_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "dag_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
@@ -1340,7 +1340,14 @@ def _style_char_ratio(item: dict[str, Any], flag: str) -> float:
 
 
 def canonical_type(value: Any) -> str:
-    raw = str(value or "").lower()
+    list_type = ""
+    if isinstance(value, dict):
+        list_type = str(value.get("list_type") or "").lower()
+        raw = str(value.get("type") or value.get("raw_type") or value.get("canonical_type") or "").lower()
+    else:
+        raw = str(value or "").lower()
+    if list_type == "reference_list":
+        return "reference"
     if raw in {"paragraph", "text"}:
         return "text"
     if raw == "title":
@@ -1363,7 +1370,7 @@ def canonical_type(value: Any) -> str:
 
 
 def text_for_embedding(item: dict[str, Any]) -> str:
-    type_name = canonical_type(item.get("type"))
+    type_name = canonical_type(item)
     if type_name == "reference":
         return PLACEHOLDER_TEXT[type_name]
     text = str(item.get("text_for_embedding") or "").strip()

@@ -403,6 +403,8 @@ class AlignmentLabeler:
         return torch.tensor(labels, dtype=torch.long)
 
     def infer_relation(self, source_index: int, target_index: int) -> int:
+        if self.same_reference_scope(source_index, target_index):
+            return int(TexRelationLabel.MERGE)
         source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
         target_match = self.matches[target_index] if 0 <= target_index < len(self.matches) else None
         if source_match is None or target_match is None or not source_match.tex_id or not target_match.tex_id:
@@ -462,6 +464,15 @@ class AlignmentLabeler:
             if 0 <= index < len(self.pdf_nodes) and LIST_MARKER_RE.match(self.pdf_nodes[index].text):
                 return True
         return False
+
+    def same_reference_scope(self, source_index: int, target_index: int) -> bool:
+        if not (0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(self.pdf_nodes)):
+            return False
+        source = self.pdf_nodes[source_index]
+        target = self.pdf_nodes[target_index]
+        if canonical_pdf_merge_type(source.item) != "reference" or canonical_pdf_merge_type(target.item) != "reference":
+            return False
+        return source_index != target_index
 
     def assert_alignment_quality(self) -> None:
         orphan_count = sum(1 for match in self.matches if not match.tex_id)
@@ -689,6 +700,8 @@ def canonical_pdf_type(item: dict[str, Any]) -> str:
 def canonical_pdf_merge_type(item: dict[str, Any]) -> str:
     """Collapse MinerU/PyMuPDF block names into relation-label merge families."""
 
+    if str(item.get("list_type") or "").lower() == "reference_list":
+        return "reference"
     raw = canonical_pdf_type(item)
     if raw in {"paragraph", "text", "paragraph_text", "body", "list", "item"}:
         return "text"

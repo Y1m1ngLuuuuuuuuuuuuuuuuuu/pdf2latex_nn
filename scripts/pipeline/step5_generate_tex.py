@@ -132,7 +132,7 @@ def record_from_content_item(item: dict[str, Any]) -> dict[str, Any]:
     text = item.get("text_for_embedding") or item.get("text") or item.get("content") or item.get("latex") or ""
     record["text"] = str(text)
     if "canonical_type" not in record:
-        record["canonical_type"] = canonical_content_type(item.get("type") or item.get("raw_type"))
+        record["canonical_type"] = canonical_content_type(item)
     return record
 
 
@@ -163,7 +163,7 @@ def infer_document_title(records: list[dict[str, Any]]) -> str | None:
     """Use the first real title-like content block as the document title."""
 
     for record in records[:20]:
-        if canonical_content_type(record.get("type") or record.get("raw_type")) != "title":
+        if canonical_content_type(record) != "title":
             continue
         text = str(record.get("text") or record.get("text_for_embedding") or "").strip()
         if not text:
@@ -188,7 +188,14 @@ def looks_like_arxiv_identifier(text: str) -> bool:
 
 
 def canonical_content_type(value: Any) -> str:
-    raw = str(value or "").lower()
+    list_type = ""
+    if isinstance(value, dict):
+        list_type = str(value.get("list_type") or "").lower()
+        raw = str(value.get("canonical_type") or value.get("type") or value.get("raw_type") or "").lower()
+    else:
+        raw = str(value or "").lower()
+    if list_type == "reference_list":
+        return "reference"
     if raw in {"paragraph", "text"}:
         return "text"
     if raw in {"title", "section", "subsection", "subsubsection"}:

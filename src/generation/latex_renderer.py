@@ -105,6 +105,13 @@ def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list
     index = 0
     while index < len(child_list):
         child = child_list[index]
+        if canonical_render_type(node_record(child)) == "reference":
+            run: list[Any] = []
+            while index < len(child_list) and canonical_render_type(node_record(child_list[index])) == "reference":
+                run.append(child_list[index])
+                index += 1
+            rendered.append(render_reference_run(run))
+            continue
         list_environment = list_environment_for_node(child)
         if list_environment is not None:
             run: list[Any] = []
@@ -224,6 +231,20 @@ def render_references(record: dict[str, Any], fallback_text: str) -> str:
         lines.append(rf"\bibitem{{ref{idx}}} {escape_latex(item)}")
     lines.append(r"\end{thebibliography}")
     return "\n".join(lines)
+
+
+def render_reference_run(nodes: list[Any]) -> str:
+    if not nodes:
+        return ""
+    primary = dict(node_record(nodes[0]))
+    merged_records = list(primary.get("merged_records") or [])
+    for node in nodes[1:]:
+        record = node_record(node)
+        merged_records.append(record)
+        merged_records.extend(record.get("merged_records") or [])
+    primary["merged_records"] = merged_records
+    fallback = "\n".join(node_text(node) for node in nodes if node_text(node))
+    return render_references(primary, fallback)
 
 
 def collect_reference_items(record: dict[str, Any]) -> list[str]:
@@ -603,6 +624,10 @@ def node_text(node: Any) -> str:
     return ""
 
 
+def node_record(node: Any) -> dict[str, Any]:
+    return getattr(node, "record", node if isinstance(node, dict) else {})
+
+
 def sorted_render_children(children: Any) -> list[Any]:
     child_list = list(children or [])
     if any(has_explicit_reading_order(getattr(child, "record", child if isinstance(child, dict) else {})) for child in child_list):
@@ -681,6 +706,8 @@ def min_numeric_sequence(value: Any) -> float | None:
 
 
 def canonical_render_type(record: dict[str, Any]) -> str:
+    if str(record.get("list_type") or "").lower() == "reference_list":
+        return "reference"
     raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
     if raw in {"paragraph", "text", "paragraph_text"}:
         return "text"

@@ -108,6 +108,28 @@ def test_tree_decoder_renders_reference_items_from_merged_records():
     assert "C. Third." in tex
 
 
+def test_tree_decoder_groups_reference_list_children_as_one_bibliography():
+    records = [
+        {"type": "title", "text": "References"},
+        {"type": "list", "list_type": "reference_list", "reference_items": ["A. First.", "B. Second."]},
+        {"type": "list", "list_type": "reference_list", "reference_items": ["C. Third."]},
+    ]
+    root = build_resolved_tree(
+        records,
+        [
+            DecodedEdge(source=0, target=1, label=PARENT_CHILD, score=0.99),
+            DecodedEdge(source=0, target=2, label=PARENT_CHILD, score=0.99),
+        ],
+    )
+
+    tex = TreeDecoder().render_document(root)
+
+    assert tex.count(r"\begin{thebibliography}{99}") == 1
+    assert tex.count(r"\end{thebibliography}") == 1
+    assert tex.count(r"\bibitem") == 3
+    assert r"\begin{itemize}" not in tex
+
+
 def test_tree_decoder_refuses_parallel_cross_column_merge_contraction():
     if not has_torch():
         return
@@ -772,6 +794,26 @@ def test_generation_renderer_renders_reference_items_from_merged_records():
 
     assert tex.count(r"\bibitem") == 3
     assert "C. Third." in tex
+
+
+def test_generation_renderer_groups_reference_list_children_as_one_bibliography():
+    root = type("Root", (), {})()
+    root.children = [
+        {
+            "type": "title",
+            "text": "References",
+            "children": [
+                {"type": "list", "list_type": "reference_list", "reference_items": ["A. First.", "B. Second."]},
+                {"type": "list", "list_type": "reference_list", "reference_items": ["C. Third."]},
+            ],
+        }
+    ]
+
+    tex = render_latex_document(root)
+
+    assert tex.count(r"\begin{thebibliography}{99}") == 1
+    assert tex.count(r"\bibitem") == 3
+    assert r"\begin{itemize}" not in tex
 
 
 def test_generation_renderer_sorts_root_and_nested_children_by_id_numbers():

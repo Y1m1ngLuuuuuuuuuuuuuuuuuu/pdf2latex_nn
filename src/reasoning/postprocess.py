@@ -658,6 +658,13 @@ class TreeDecoder:
         child_list = sorted_render_children(children)
         while index < len(child_list):
             child = child_list[index]
+            if canonical_render_type(child.record) == "reference":
+                run: list[ResolvedNode] = []
+                while index < len(child_list) and canonical_render_type(child_list[index].record) == "reference":
+                    run.append(child_list[index])
+                    index += 1
+                rendered.append(render_reference_run(run))
+                continue
             list_environment = list_environment_for_node(child)
             if list_environment is not None:
                 entries: list[tuple[ResolvedNode, list[ResolvedNode]]] = []
@@ -1286,6 +1293,8 @@ def is_cjk(char: str) -> bool:
 
 
 def canonical_render_type(record: dict[str, Any]) -> str:
+    if str(record.get("list_type") or "").lower() == "reference_list":
+        return "reference"
     raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
     if raw in {"paragraph", "text", "paragraph_text", "body"}:
         return "text"
@@ -1757,6 +1766,19 @@ def render_references(record: dict[str, Any], fallback_text: str) -> str:
         lines.append(rf"\bibitem{{ref{idx}}} {escape_latex(item)}")
     lines.append(r"\end{thebibliography}")
     return "\n".join(lines)
+
+
+def render_reference_run(nodes: list[ResolvedNode]) -> str:
+    if not nodes:
+        return ""
+    primary = dict(nodes[0].record)
+    merged_records = list(primary.get("merged_records") or [])
+    for node in nodes[1:]:
+        merged_records.append(node.record)
+        merged_records.extend(node.record.get("merged_records") or [])
+    primary["merged_records"] = merged_records
+    fallback = "\n".join(node.text for node in nodes if node.text)
+    return render_references(primary, fallback)
 
 
 def collect_reference_items(record: dict[str, Any]) -> list[str]:

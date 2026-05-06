@@ -298,6 +298,7 @@ def test_canonical_type_maps_mineru_names_to_fixed_vocab():
     assert canonical_type("algorithm") == "algorithm"
     assert canonical_type("code") == "code"
     assert canonical_type("reference") == "reference"
+    assert canonical_type({"type": "list", "list_type": "reference_list"}) == "reference"
 
 
 def test_type_onehot_matrix_uses_fixed_vocab():
@@ -312,7 +313,7 @@ def test_type_onehot_matrix_uses_fixed_vocab():
         {"type": "algorithm"},
         {"type": "list"},
         {"type": "code"},
-        {"type": "reference"},
+        {"type": "list", "list_type": "reference_list"},
         {"type": "unknown"},
     ]
 
@@ -328,6 +329,7 @@ def test_empty_non_text_gets_placeholder_for_bert():
     assert text_for_embedding({"type": "equation_interline", "text_for_embedding": ""}) == "[EQUATION]"
     assert text_for_embedding({"type": "algorithm", "text_for_embedding": ""}) == "[ALGORITHM]"
     assert text_for_embedding({"type": "reference", "text_for_embedding": "Author A. Paper."}) == "[REFERENCE]"
+    assert text_for_embedding({"type": "list", "list_type": "reference_list", "text_for_embedding": "Author A. Paper."}) == "[REFERENCE]"
 
 
 def test_derived_stats_masks_density_for_non_text_types_and_uses_area_sum():
