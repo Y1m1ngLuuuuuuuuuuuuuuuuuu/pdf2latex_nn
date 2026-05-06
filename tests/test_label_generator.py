@@ -51,8 +51,8 @@ def test_label_graph_edges_falls_back_to_none_for_low_similarity_orphans(tmp_pat
         orphan_log_path=orphan_log,
     )
 
-    assert result.data.y.tolist() == [1, 3, 1]
-    assert result.label_counts == {0: 0, 1: 2, 2: 0, 3: 1}
+    assert result.data.y.tolist() == [1, 2, 1]
+    assert result.label_counts == {0: 0, 1: 2, 2: 1}
     assert len(result.orphan_alignments) == 1
     logged = json.loads(orphan_log.read_text(encoding="utf-8").strip())
     assert logged["reason"] == "low_similarity"

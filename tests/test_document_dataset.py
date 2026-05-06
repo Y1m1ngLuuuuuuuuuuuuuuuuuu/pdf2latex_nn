@@ -129,7 +129,7 @@ def test_document_dataset_preserves_existing_graph_labels(tmp_path):
     sample = dataset[0]
 
     assert sample.y.tolist() == [0, 2]
-    assert sample.label_counts == {0: 1, 1: 0, 2: 1, 3: 0}
+    assert sample.label_counts == {0: 1, 1: 0, 2: 1}
 
 
 def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path):

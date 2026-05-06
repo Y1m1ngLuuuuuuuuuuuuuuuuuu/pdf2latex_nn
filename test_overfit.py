@@ -29,8 +29,7 @@ from src.reasoning.training import FocalLoss, compute_inverse_frequency_weights,
 LABEL_NAMES = {
     0: "merge",
     1: "parent_child",
-    2: "sibling",
-    3: "none",
+    2: "none",
 }
 
 
@@ -272,8 +271,8 @@ def present_class_macro_f1(per_class: dict[int, dict[str, float]]) -> float:
 def class_count_dict(labels: Any) -> dict[str, int]:
     import torch
 
-    counts = torch.bincount(labels.long(), minlength=4).tolist()
-    return {LABEL_NAMES[idx]: int(counts[idx]) for idx in range(4)}
+    counts = torch.bincount(labels.long(), minlength=3).tolist()
+    return {LABEL_NAMES[idx]: int(counts[idx]) for idx in range(3)}
 
 
 def print_epoch(

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -31,8 +33,9 @@ def main() -> int:
     data = torch.load(args.graph, map_location=device, weights_only=False)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
-    model = EdgeRelationGAT(config if isinstance(config, EdgeGATConfig) else EdgeGATConfig()).to(device)
     state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model_config = checkpoint_compatible_config(config if isinstance(config, EdgeGATConfig) else EdgeGATConfig(), state_dict)
+    model = EdgeRelationGAT(model_config).to(device)
     model.load_state_dict(state_dict)
     model.eval()
     with torch.no_grad():
@@ -54,6 +57,25 @@ def main() -> int:
     print(f"wrote {args.output_tex}")
     print(f"decoded_nodes={len(node_records)}")
     return 0
+
+
+def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> EdgeGATConfig:
+    """Adapt default config to old checkpoints that serialized only weights."""
+
+    if not isinstance(state_dict, dict):
+        return config
+    layout_weight = state_dict.get("projector.layout.0.weight")
+    if layout_weight is not None:
+        checkpoint_layout_dim = int(layout_weight.shape[1])
+        if checkpoint_layout_dim != config.node_projector.layout_input_dim:
+            config = replace(
+                config,
+                node_projector=replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim),
+            )
+    head_weight = state_dict.get("edge_head.3.weight")
+    if head_weight is not None and int(head_weight.shape[0]) != config.num_classes:
+        config = replace(config, num_classes=int(head_weight.shape[0]))
+    return config
 
 
 if __name__ == "__main__":

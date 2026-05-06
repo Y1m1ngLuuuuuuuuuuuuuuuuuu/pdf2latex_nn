@@ -111,7 +111,7 @@ class EdgeGATConfig:
     hidden_dim: int = 64
     heads: int = 4
     num_layers: int = 2
-    num_classes: int = 4
+    num_classes: int = 3
     dropout: float = 0.1
 
     @property
@@ -120,7 +120,7 @@ class EdgeGATConfig:
 
 
 class EdgeRelationGAT(_MODULE_BASE):
-    """GATv2 edge classifier for Merge/Parent-Child/Sibling/None relations."""
+    """GATv2 edge classifier for Merge/Parent-Child/None relations."""
 
     def __init__(self, config: EdgeGATConfig | None = None):
         if nn is None or GATv2Conv is None:

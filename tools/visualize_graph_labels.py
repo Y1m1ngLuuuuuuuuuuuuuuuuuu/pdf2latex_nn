@@ -23,8 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 MERGE_LABEL = 0
 PARENT_CHILD_LABEL = 1
-SIBLING_LABEL = 2
-NONE_LABEL = 3
+NONE_LABEL = 2
 
 NOISE_TYPES = {
     "page_header",

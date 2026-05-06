@@ -55,19 +55,19 @@ def test_label_tex_relation_uses_path_encoding():
     assert label_tex_relation(items[0]["tex_id"], items[0]["tex_id"], nodes) == TexRelationLabel.MERGE
     assert label_tex_relation(itemize["tex_id"], items[0]["tex_id"], nodes) == TexRelationLabel.PARENT_CHILD
     assert label_tex_relation(items[0]["tex_id"], itemize["tex_id"], nodes) == TexRelationLabel.PARENT_CHILD
-    assert label_tex_relation(items[0]["tex_id"], items[1]["tex_id"], nodes) == TexRelationLabel.SIBLING
+    assert label_tex_relation(items[0]["tex_id"], items[1]["tex_id"], nodes) == TexRelationLabel.NONE
     assert label_tex_relation(items[0]["tex_id"], items[2]["tex_id"], nodes) == TexRelationLabel.NONE
-    assert label_tex_relation(method["tex_id"], results["tex_id"], nodes) == TexRelationLabel.SIBLING
+    assert label_tex_relation(method["tex_id"], results["tex_id"], nodes) == TexRelationLabel.NONE
 
 
-def test_label_tex_relation_can_allow_distant_siblings_when_requested():
+def test_label_tex_relation_treats_distant_siblings_as_none_even_when_requested():
     payload = build_tex_ast(SAMPLE_TEX)
     nodes = tex_nodes_by_id(payload)
     items = nodes_by_type(nodes, "item")
 
     assert (
         label_tex_relation(items[0]["tex_id"], items[2]["tex_id"], nodes, adjacent_siblings_only=False)
-        == TexRelationLabel.SIBLING
+        == TexRelationLabel.NONE
     )
 
 
@@ -85,7 +85,7 @@ def test_label_pdf_edges_uses_pdf_to_tex_mapping_and_none_for_missing_alignment(
 
     assert labels == [
         int(TexRelationLabel.MERGE),
-        int(TexRelationLabel.SIBLING),
+        int(TexRelationLabel.NONE),
         int(TexRelationLabel.NONE),
     ]
 

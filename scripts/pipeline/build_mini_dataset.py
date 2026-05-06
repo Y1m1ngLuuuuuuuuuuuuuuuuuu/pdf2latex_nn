@@ -441,8 +441,9 @@ def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
             return False
         if graph.y.ndim != 1 or int(graph.y.shape[0]) != int(graph.edge_index.shape[1]):
             return False
-        counts = torch.bincount(graph.y.detach().cpu().long(), minlength=4).tolist()
-        non_none = int(sum(counts[:3]))
+        labels = torch.where(graph.y.detach().cpu().long() >= 2, torch.full_like(graph.y.detach().cpu().long(), 2), graph.y.detach().cpu().long())
+        counts = torch.bincount(labels, minlength=3).tolist()
+        non_none = int(sum(counts[:2]))
         return non_none >= config.min_non_none_edges
     except Exception:
         return False
@@ -452,7 +453,8 @@ def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path
     import torch
 
     graph = torch.load(paths["graph"], map_location="cpu", weights_only=False)
-    counts = torch.bincount(graph.y.detach().cpu().long(), minlength=4).tolist()
+    labels = torch.where(graph.y.detach().cpu().long() >= 2, torch.full_like(graph.y.detach().cpu().long(), 2), graph.y.detach().cpu().long())
+    counts = torch.bincount(labels, minlength=3).tolist()
     pdf_to_tex = list(getattr(graph, "pdf_to_tex", []))
     orphan_ratio = (sum(1 for item in pdf_to_tex if item is None) / len(pdf_to_tex)) if pdf_to_tex else 0.0
     return ProcessedSample(
@@ -462,7 +464,7 @@ def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path
         graph_path=paths["graph"],
         tex_path=candidate.main_tex_path,
         alignment_mapping=paths["mapping"],
-        label_counts={idx: int(counts[idx]) for idx in range(4)},
+        label_counts={idx: int(counts[idx]) for idx in range(3)},
         orphan_ratio=orphan_ratio,
     )
 

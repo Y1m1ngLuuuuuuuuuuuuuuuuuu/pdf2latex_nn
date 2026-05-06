@@ -18,19 +18,19 @@ def test_focal_loss_and_macro_metrics_handle_imbalanced_edges():
 
     logits = torch.tensor(
         [
-            [5.0, 0.0, 0.0, 0.0],
-            [0.0, 5.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 5.0],
-            [0.0, 0.0, 0.0, 5.0],
+            [5.0, 0.0, 0.0],
+            [0.0, 5.0, 0.0],
+            [0.0, 0.0, 5.0],
+            [0.0, 0.0, 5.0],
         ]
     )
-    target = torch.tensor([0, 1, 2, 3])
+    target = torch.tensor([0, 1, 2, 1])
     loss = FocalLoss(weight=torch.tensor(DEFAULT_EDGE_CLASS_WEIGHTS))(logits, target)
     metrics = edge_precision_recall_f1(logits, target)
 
     assert float(loss.item()) > 0.0
     assert metrics.per_class[0]["recall"] == 1.0
-    assert metrics.per_class[2]["recall"] == 0.0
+    assert metrics.per_class[2]["recall"] == 1.0
     assert 0.0 <= metrics.macro_f1 <= 1.0
 
 
@@ -41,6 +41,6 @@ def test_inverse_frequency_weights_give_rare_classes_more_weight():
 
     from src.reasoning.training import compute_inverse_frequency_weights
 
-    weights = compute_inverse_frequency_weights(torch.tensor([3, 3, 3, 3, 0]))
+    weights = compute_inverse_frequency_weights(torch.tensor([2, 2, 2, 2, 0]))
 
-    assert float(weights[0]) > float(weights[3])
+    assert float(weights[0]) > float(weights[2])

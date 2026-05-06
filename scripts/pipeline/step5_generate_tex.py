@@ -67,10 +67,10 @@ def main() -> int:
     tex = decoder.render_document(root, title=document_title)
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
-    pred_counts = torch.bincount(logits.argmax(dim=-1), minlength=4).tolist()
+    pred_counts = torch.bincount(torch.clamp(logits.argmax(dim=-1), max=2), minlength=3).tolist()
     print(f"wrote {args.output_tex}")
     print(f"nodes={len(node_records)} edges={int(data.edge_index.shape[1])}")
-    print(f"predicted_argmax_counts={{0: {pred_counts[0]}, 1: {pred_counts[1]}, 2: {pred_counts[2]}, 3: {pred_counts[3]}}}")
+    print(f"predicted_argmax_counts={{0: {pred_counts[0]}, 1: {pred_counts[1]}, 2: {pred_counts[2]}}}")
     return 0
 
 
@@ -78,13 +78,17 @@ def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> Edge
     """Adapt model dimensions to legacy checkpoints without changing weights."""
 
     layout_weight = state_dict.get("projector.layout.0.weight") if isinstance(state_dict, dict) else None
-    if layout_weight is None:
-        return config
-    checkpoint_layout_dim = int(layout_weight.shape[1])
-    if checkpoint_layout_dim == config.node_projector.layout_input_dim:
-        return config
-    node_projector = replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim)
-    return replace(config, node_projector=node_projector)
+    head_weight = state_dict.get("edge_head.3.weight") if isinstance(state_dict, dict) else None
+    if layout_weight is not None:
+        checkpoint_layout_dim = int(layout_weight.shape[1])
+        if checkpoint_layout_dim != config.node_projector.layout_input_dim:
+            config = replace(
+                config,
+                node_projector=replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim),
+            )
+    if head_weight is not None and int(head_weight.shape[0]) != config.num_classes:
+        config = replace(config, num_classes=int(head_weight.shape[0]))
+    return config
 
 
 def load_node_records(content_json: Path | None, data: Any) -> list[dict[str, Any]]:

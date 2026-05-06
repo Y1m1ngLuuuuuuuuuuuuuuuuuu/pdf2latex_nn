@@ -44,12 +44,12 @@ def main() -> None:
         config=config,
     )
     graph = labeler.run(output_graph_path=args.output, overwrite=args.output is None)
-    counts = torch.bincount(graph.y.detach().cpu(), minlength=4).tolist()
+    counts = torch.bincount(graph.y.detach().cpu().long(), minlength=3).tolist()
     orphan_count = sum(1 for match in labeler.matches if not match.tex_id)
     orphan_ratio = orphan_count / max(1, len(labeler.matches))
     print(f"saved_graph={args.output or args.graph}")
     print(f"num_nodes={int(graph.num_nodes)} num_edges={int(graph.edge_index.shape[1])}")
-    print(f"label_counts={{0: {counts[0]}, 1: {counts[1]}, 2: {counts[2]}, 3: {counts[3]}}}")
+    print(f"label_counts={{0: {counts[0]}, 1: {counts[1]}, 2: {counts[2]}}}")
     print(f"orphan_count={orphan_count} orphan_ratio={orphan_ratio:.2%}")
 
 

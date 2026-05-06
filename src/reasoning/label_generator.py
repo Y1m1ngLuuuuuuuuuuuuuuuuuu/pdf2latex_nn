@@ -421,13 +421,6 @@ class AlignmentLabeler:
             target_index, target_match.tex_id
         ):
             return int(TexRelationLabel.PARENT_CHILD)
-        if (
-            len(path_u) == len(path_v)
-            and path_u[:-1] == path_v[:-1]
-            and self.is_first_pdf_anchor(source_index, source_match.tex_id)
-            and self.is_first_pdf_anchor(target_index, target_match.tex_id)
-        ):
-            return int(TexRelationLabel.SIBLING)
         return int(TexRelationLabel.NONE)
 
     def infer_visual_relation(
@@ -448,11 +441,6 @@ class AlignmentLabeler:
             return int(TexRelationLabel.PARENT_CHILD)
         source_parent = hierarchy.parent_by_node.get(source_index)
         target_parent = hierarchy.parent_by_node.get(target_index)
-        if source_parent is not None and source_parent == target_parent:
-            source_rank = hierarchy.child_rank_by_node.get(source_index)
-            target_rank = hierarchy.child_rank_by_node.get(target_index)
-            if source_rank is not None and target_rank is not None and abs(target_rank - source_rank) == 1:
-                return int(TexRelationLabel.SIBLING)
         return int(TexRelationLabel.NONE)
 
     def is_first_pdf_anchor(self, pdf_index: int, tex_id: str | None) -> bool:
@@ -982,7 +970,7 @@ def tex_node_text(node: Any) -> str:
 
 def label_counts(labels: Any) -> dict[int, int]:
     values = labels.detach().cpu().tolist()
-    return {label: values.count(label) for label in range(4)}
+    return {label: values.count(label) for label in range(3)}
 
 
 def levenshtein_ratio_score(source: str, target: str) -> float:
@@ -1112,7 +1100,6 @@ def label_graph_edges(
         "labels": {
             int(TexRelationLabel.MERGE): "merge",
             int(TexRelationLabel.PARENT_CHILD): "parent_child",
-            int(TexRelationLabel.SIBLING): "sibling",
             int(TexRelationLabel.NONE): "none",
         },
         "orphan_label": cfg.orphan_label,
@@ -1120,7 +1107,7 @@ def label_graph_edges(
     }
     data.pdf_to_tex = [node_tex_ids.get(idx) for idx in range(int(data.num_nodes))]
 
-    label_counts = {label: labels.count(label) for label in range(4)}
+    label_counts = {label: labels.count(label) for label in range(3)}
     return LabelGenerationResult(data=data, label_counts=label_counts, orphan_alignments=orphan_list)
 
 

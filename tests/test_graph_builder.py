@@ -69,7 +69,7 @@ def test_edge_relation_gat_outputs_one_logit_row_per_edge():
 
     logits = model(data)
 
-    assert tuple(logits.shape) == (3, 4)
+    assert tuple(logits.shape) == (3, 3)
 
 
 def test_edge_relation_gat_edge_head_uses_symmetry_breaking_features():

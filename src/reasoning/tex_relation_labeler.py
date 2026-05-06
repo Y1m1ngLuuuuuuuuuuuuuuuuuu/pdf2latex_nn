@@ -11,8 +11,8 @@ from src.reasoning.tex_ast_builder import tex_nodes_by_id
 class TexRelationLabel(IntEnum):
     MERGE = 0
     PARENT_CHILD = 1
-    SIBLING = 2
-    NONE = 3
+    NONE = 2
+    SIBLING = 2  # Deprecated compatibility alias: sibling is now a derived postprocess relation.
 
 
 def label_tex_relation(
@@ -23,7 +23,12 @@ def label_tex_relation(
     adjacent_siblings_only: bool = True,
     directed_parent_child: bool = False,
 ) -> TexRelationLabel:
-    """Return Merge/Parent-Child/Sibling/None using path-encoded TeX nodes."""
+    """Return Merge/Parent-Child/None using path-encoded TeX nodes.
+
+    Sibling is intentionally not a supervised GNN class anymore. Nodes that
+    share a parent but require no structural action are labeled NONE; sibling
+    order is derived later from reading order inside the resolved tree.
+    """
 
     if not tex_id_a or not tex_id_b:
         return TexRelationLabel.NONE
@@ -46,14 +51,6 @@ def label_tex_relation(
         return TexRelationLabel.PARENT_CHILD
     if not directed_parent_child and path_b == path_a[:-1]:
         return TexRelationLabel.PARENT_CHILD
-
-    if path_a[:-1] == path_b[:-1]:
-        if not adjacent_siblings_only:
-            return TexRelationLabel.SIBLING
-        child_a = node_a.get("child_index")
-        child_b = node_b.get("child_index")
-        if isinstance(child_a, int) and isinstance(child_b, int) and abs(child_b - child_a) == 1:
-            return TexRelationLabel.SIBLING
 
     return TexRelationLabel.NONE
 

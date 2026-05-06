@@ -142,13 +142,13 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
                     data.label_counts = result.label_counts
                     data.orphan_count = len(result.orphan_alignments)
                 elif has_valid_edge_labels(data):
-                    data.y = data.y.to(dtype=torch.long)
+                    data.y = normalize_edge_labels(data.y)
                     data.edge_label = data.y
                     data.label_counts = count_edge_labels(data.y)
                     data.orphan_count = int(getattr(data, "orphan_count", 0))
                 else:
                     data = attach_default_none_labels(data)
-                    data.label_counts = {0: 0, 1: 0, 2: 0, 3: int(data.edge_index.shape[1])}
+                    data.label_counts = {0: 0, 1: 0, 2: int(data.edge_index.shape[1])}
                     data.orphan_count = int(data.num_nodes)
                 data.document_id = record.document_id
                 data = sanitize_graph_data(data, config=self.config, require_labels=True)
@@ -200,13 +200,13 @@ def attach_default_none_labels(data: Any) -> Any:
     if torch is None:
         raise ModuleNotFoundError("attach_default_none_labels requires torch")
     edge_count = int(data.edge_index.shape[1])
-    y = torch.full((edge_count,), 3, dtype=torch.long)
+    y = torch.full((edge_count,), 2, dtype=torch.long)
     data.y = y
     data.edge_label = y
     data.label_schema = {
         "task": "edge_relation_classification",
-        "labels": {0: "merge", 1: "parent_child", 2: "sibling", 3: "none"},
-        "orphan_label": 3,
+        "labels": {0: "merge", 1: "parent_child", 2: "none"},
+        "orphan_label": 2,
     }
     return data
 
@@ -219,8 +219,22 @@ def has_valid_edge_labels(data: Any) -> bool:
 
 
 def count_edge_labels(labels: Any) -> dict[int, int]:
-    counts = torch.bincount(labels.detach().cpu().long(), minlength=4).tolist()
-    return {label: int(counts[label]) for label in range(4)}
+    labels = normalize_edge_labels(labels).detach().cpu().long()
+    counts = torch.bincount(labels, minlength=3).tolist()
+    return {label: int(counts[label]) for label in range(3)}
+
+
+def normalize_edge_labels(labels: Any) -> Any:
+    """Fold legacy 4-class labels into the current 3-class target space.
+
+    Old graphs used 2=sibling and 3=none. Sibling is now a derived relation,
+    so both old sibling and old none become 2=none.
+    """
+
+    if torch is None:
+        raise ModuleNotFoundError("normalize_edge_labels requires torch")
+    labels = labels.to(dtype=torch.long)
+    return torch.where(labels >= 2, torch.full_like(labels, 2), labels)
 
 
 def sanitize_graph_data(
@@ -260,7 +274,7 @@ def sanitize_graph_data(
     if require_labels:
         if not hasattr(data, "y"):
             raise GraphFilterError("missing edge labels")
-        data.y = data.y.to(dtype=torch.long)
+        data.y = normalize_edge_labels(data.y)
         if data.y.ndim != 1 or int(data.y.shape[0]) != int(data.edge_index.shape[1]):
             raise GraphFilterError(f"bad edge label shape: {tuple(data.y.shape)}")
         data.edge_label = data.y

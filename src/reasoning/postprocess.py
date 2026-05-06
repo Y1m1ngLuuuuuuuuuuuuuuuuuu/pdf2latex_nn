@@ -13,8 +13,8 @@ from src.perception.title_features import strip_title_numbering, title_numbering
 
 MERGE = 0
 PARENT_CHILD = 1
-SIBLING = 2
-NONE = 3
+NONE = 2
+SIBLING = 2  # Deprecated compatibility alias: sibling is derived from reading order, not decoded.
 VIRTUAL_ROOT = "__ROOT__"
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
@@ -55,10 +55,10 @@ class DecodedEdge:
 class TreeDecoderConfig:
     merge_threshold: float = 0.5
     parent_threshold: float = 0.0
-    sibling_threshold: float = 0.5
+    sibling_threshold: float = 0.5  # Deprecated no-op; kept for CLI/checkpoint compatibility.
     require_merge_argmax: bool = True
     require_parent_argmax: bool = False
-    include_sibling_edges: bool = True
+    include_sibling_edges: bool = False  # Deprecated no-op; sibling order comes from reading order.
     abstract_root_weight: float = 100.0
     reference_parent_weight: float = 100.0
     enforce_parent_causality: bool = True
@@ -139,8 +139,7 @@ class TreeDecoder:
         contracted = self.semantic_title_deduplication(contracted)
         skeleton = build_heading_skeleton(contracted.nodes)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=skeleton)
-        sibling_edges = self.decode_sibling_edges(contracted, edge_index, probs, skeleton=skeleton)
-        return self.build_skeleton_tree(contracted, skeleton, parent_edges + sibling_edges)
+        return self.build_skeleton_tree(contracted, skeleton, parent_edges)
 
     def decode_edges(self, edge_index: Any, scores: Any, *, num_nodes: int | None = None) -> list[DecodedEdge]:
         """Return decoded edges while preserving the legacy function API."""
@@ -151,8 +150,7 @@ class TreeDecoder:
         contracted = self.contract_merge_nodes(node_records, edge_index, probs)
         contracted = self.semantic_title_deduplication(contracted)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs)
-        sibling_edges = self.decode_sibling_edges(contracted, edge_index, probs)
-        return contracted.merge_edges + parent_edges + sibling_edges
+        return contracted.merge_edges + parent_edges
 
     def edge_probabilities(self, scores: Any) -> Any:
         """Accept logits or probabilities and return CPU probability rows."""
@@ -163,8 +161,8 @@ class TreeDecoder:
         if scores.numel() == 0:
             return scores.detach().cpu()
         probs = scores.detach().cpu().to(dtype=torch.float32)
-        if probs.ndim != 2 or int(probs.shape[1]) < 4:
-            raise ValueError("Expected edge scores with shape [num_edges, 4]")
+        if probs.ndim != 2 or int(probs.shape[1]) < 3:
+            raise ValueError("Expected edge scores with shape [num_edges, >=3]")
         row_sums = probs.sum(dim=1)
         is_probability_like = torch.all(probs >= 0.0) and torch.all((row_sums > 0.99) & (row_sums < 1.01))
         if not is_probability_like:
@@ -516,24 +514,9 @@ class TreeDecoder:
         *,
         skeleton: HeadingSkeleton | None = None,
     ) -> list[DecodedEdge]:
-        if not self.config.include_sibling_edges:
-            return []
-        edge_index = normalize_edge_index(edge_index)
-        decoded: list[DecodedEdge] = []
-        for edge_pos in range(edge_index.shape[1]):
-            raw_source = int(edge_index[0, edge_pos].item())
-            raw_target = int(edge_index[1, edge_pos].item())
-            source = contracted.old_to_super.get(raw_source)
-            target = contracted.old_to_super.get(raw_target)
-            if source is None or target is None or source == target:
-                continue
-            score = float(probs[edge_pos, SIBLING].item())
-            if int(probs[edge_pos].argmax().item()) != SIBLING or score < self.config.sibling_threshold:
-                continue
-            if skeleton is not None and sibling_crosses_section_boundary(source, target, skeleton):
-                continue
-            decoded.append(DecodedEdge(source=source, target=target, label=SIBLING, score=score))
-        return decoded
+        """Deprecated: sibling is no longer a supervised/decoded edge class."""
+
+        return []
 
     def build_skeleton_tree(
         self,
@@ -545,7 +528,6 @@ class TreeDecoder:
 
         nodes = {node_id: clone_resolved_node(node) for node_id, node in contracted.nodes.items()}
         parent_of: dict[int, int] = {}
-        sibling_after: dict[int, list[int]] = {}
 
         for heading_id, parent_id in skeleton.heading_parent.items():
             if heading_id in nodes and parent_id in nodes:
@@ -554,10 +536,6 @@ class TreeDecoder:
         best_parent_edge: dict[int, DecodedEdge] = {}
         for edge in decoded_edges:
             if edge.source == edge.target:
-                continue
-            if edge.label == SIBLING and edge.source in nodes and edge.target in nodes:
-                if not sibling_crosses_section_boundary(edge.source, edge.target, skeleton):
-                    sibling_after.setdefault(edge.source, []).append(edge.target)
                 continue
             if edge.label != PARENT_CHILD or edge.source not in nodes or edge.target not in nodes:
                 continue
@@ -585,9 +563,6 @@ class TreeDecoder:
         for child_id, parent_id in parent_of.items():
             if child_id in nodes and parent_id in nodes and child_id != parent_id:
                 nodes[parent_id].children.append(nodes[child_id])
-        for source, targets in sibling_after.items():
-            if source in nodes:
-                nodes[source].sibling_after.extend(sorted(set(targets)))
 
         root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
         for node_id in sorted(nodes, key=lambda idx: node_reading_order_key(nodes[idx])):
@@ -601,20 +576,15 @@ class TreeDecoder:
 
         nodes = {node_id: clone_resolved_node(node) for node_id, node in contracted.nodes.items()}
         parent_of: dict[int, int] = {}
-        sibling_after: dict[int, list[int]] = {}
 
         for edge in decoded_edges:
             if edge.source == edge.target:
                 continue
             if edge.label == PARENT_CHILD and edge.source in nodes and edge.target in nodes:
                 parent_of[edge.target] = edge.source
-            elif edge.label == SIBLING and edge.source in nodes and edge.target in nodes:
-                sibling_after.setdefault(edge.source, []).append(edge.target)
 
         for child_id, parent_id in parent_of.items():
             nodes[parent_id].children.append(nodes[child_id])
-        for source, targets in sibling_after.items():
-            nodes[source].sibling_after.extend(sorted(set(targets)))
 
         root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
         for node_id in sorted(nodes, key=lambda idx: min(nodes[idx].merged_node_ids or [idx])):

@@ -20,7 +20,7 @@ def test_clean_text_collapses_latex_math_and_noise():
     assert clean_text(r"\begin{equation}x=y\end{equation}") == "xy"
 
 
-def test_alignment_labeler_injects_merge_parent_sibling_and_none_labels(tmp_path):
+def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
     if not has_alignment_deps():
         return
     import torch
@@ -80,10 +80,10 @@ def test_alignment_labeler_injects_merge_parent_sibling_and_none_labels(tmp_path
     assert graph.y.tolist() == [
         int(TexRelationLabel.PARENT_CHILD),
         int(TexRelationLabel.MERGE),
-        int(TexRelationLabel.SIBLING),
+        int(TexRelationLabel.NONE),
         int(TexRelationLabel.NONE),
     ]
-    assert graph.label_counts == {0: 1, 1: 1, 2: 1, 3: 1}
+    assert graph.label_counts == {0: 1, 1: 1, 2: 2}
     assert mapping_path.exists()
     saved = torch.load(graph_path, map_location="cpu", weights_only=False)
     assert saved.y.tolist() == graph.y.tolist()

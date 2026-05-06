@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - Lightning is optional in this 
     pl = None
 
 
-DEFAULT_EDGE_CLASS_WEIGHTS = (4.0, 5.0, 1.5, 1.0)
+DEFAULT_EDGE_CLASS_WEIGHTS = (4.0, 5.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,8 @@ class FocalLoss(_LOSS_BASE):
         self.reduction = reduction
 
     def forward(self, logits: Any, target: Any) -> Any:
+        if int(logits.shape[-1]) == 3:
+            target = torch.where(target.long() >= 2, torch.full_like(target.long(), 2), target.long())
         ce = F.cross_entropy(logits, target, weight=self.weight, reduction="none")
         pt = torch.exp(-ce)
         loss = ((1.0 - pt) ** self.gamma) * ce
@@ -60,11 +62,14 @@ def default_class_weight_tensor(device: Any | None = None) -> Any:
     return torch.tensor(DEFAULT_EDGE_CLASS_WEIGHTS, dtype=torch.float32, device=device)
 
 
-def compute_inverse_frequency_weights(labels: Any, *, num_classes: int = 4, smoothing: float = 1.0) -> Any:
+def compute_inverse_frequency_weights(labels: Any, *, num_classes: int = 3, smoothing: float = 1.0) -> Any:
     if torch is None:
         raise ModuleNotFoundError("compute_inverse_frequency_weights requires torch")
     labels = labels.detach().cpu().long()
+    if num_classes == 3:
+        labels = torch.where(labels >= 2, torch.full_like(labels, 2), labels)
     counts = torch.bincount(labels, minlength=num_classes).float() + smoothing
+    counts = counts[:num_classes]
     weights = counts.sum() / (num_classes * counts)
     return weights / weights.mean()
 
@@ -86,13 +91,16 @@ def build_edge_loss(
     raise ValueError(f"Unknown edge loss: {loss_name}")
 
 
-def edge_precision_recall_f1(pred: Any, target: Any, *, num_classes: int = 4) -> EdgeMetrics:
+def edge_precision_recall_f1(pred: Any, target: Any, *, num_classes: int = 3) -> EdgeMetrics:
     if torch is None:
         raise ModuleNotFoundError("edge_precision_recall_f1 requires torch")
     if pred.ndim == 2:
         pred = pred.argmax(dim=-1)
     pred = pred.detach().cpu().long()
     target = target.detach().cpu().long()
+    if num_classes == 3:
+        pred = torch.where(pred >= 2, torch.full_like(pred, 2), pred)
+        target = torch.where(target >= 2, torch.full_like(target, 2), target)
     per_class: dict[int, dict[str, float]] = {}
     f1_values = []
     for cls in range(num_classes):
