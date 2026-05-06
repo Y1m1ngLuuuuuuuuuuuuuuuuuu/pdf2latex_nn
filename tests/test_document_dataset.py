@@ -15,9 +15,9 @@ def make_graph(torch, Data, *, edge_index=None, x=None, edge_attr=None):
         edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     edge_count = int(edge_index.shape[1])
     data = Data(
-        x=torch.zeros((2, 817), dtype=torch.float64) if x is None else x,
+        x=torch.zeros((2, 818), dtype=torch.float64) if x is None else x,
         edge_index=edge_index,
-        edge_attr=torch.zeros((edge_count, 11), dtype=torch.float64) if edge_attr is None else edge_attr,
+        edge_attr=torch.zeros((edge_count, 15), dtype=torch.float64) if edge_attr is None else edge_attr,
     )
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}]
     return data
@@ -34,8 +34,8 @@ def test_sanitize_graph_data_casts_float32_and_clamps_non_finite_values():
     data = make_graph(
         torch,
         Data,
-        x=torch.full((2, 817), float("nan"), dtype=torch.float64),
-        edge_attr=torch.full((2, 11), float("inf"), dtype=torch.float64),
+        x=torch.full((2, 818), float("nan"), dtype=torch.float64),
+        edge_attr=torch.full((2, 15), float("inf"), dtype=torch.float64),
     )
 
     sanitized = sanitize_graph_data(data)
@@ -142,7 +142,7 @@ def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path
 
     bad_graph = tmp_path / "bad.pt"
     edge_index = torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long)
-    data = Data(x=torch.zeros((3, 817)), edge_index=edge_index, edge_attr=torch.zeros((3, 11)))
+    data = Data(x=torch.zeros((3, 818)), edge_index=edge_index, edge_attr=torch.zeros((3, 15)))
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
     torch.save(data, bad_graph)
 

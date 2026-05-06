@@ -30,7 +30,6 @@ from src.perception.title_features import title_pattern_flags
 PAGE_SIZE = 1000.0
 FULL_WIDTH_THRESHOLD = 620.0
 TYPE_VOCAB = FEATURE_TYPE_VOCAB
-SEQUENTIAL_EDGE_TYPES = {"sequential", "sequential_forced"}
 
 
 @dataclass(frozen=True)
@@ -311,7 +310,7 @@ def build_scroll_geometry_matrix(
     column_ids: list[int] | None = None,
     scroll_layout: ScrollLayout | None = None,
 ) -> Any:
-    """Return local width/height and global pseudo-y/index layout features."""
+    """Return local/page width, font-relative height, and global pseudo-y/index features."""
 
     import torch
 
@@ -326,12 +325,13 @@ def build_scroll_geometry_matrix(
         rank = scroll_layout.ranks[idx] if idx < len(scroll_layout.ranks) else idx
         norm_index = rank / total_nodes
         if box is None:
-            rows.append([0.0, 0.0, 0.0, norm_index])
+            rows.append([0.0, 0.0, 0.0, 0.0, norm_index])
             continue
         norm_width = box.width / max(1.0, box.column_width)
+        norm_width_page = box.width / PAGE_SIZE
         norm_height = box.height / body_height
         norm_pseudo_y = clamp01(box.pseudo_y0 / total_scroll_height)
-        rows.append([norm_width, norm_height, norm_pseudo_y, norm_index])
+        rows.append([norm_width, norm_width_page, norm_height, norm_pseudo_y, norm_index])
     if not rows:
         return torch.empty((0, len(SCROLL_GEOMETRY_FIELDS)), dtype=torch.float32)
     return torch.tensor(rows, dtype=torch.float32)
@@ -718,7 +718,7 @@ def build_edge_attr_matrix(
     reading_order_ranks: list[int] | None = None,
     scroll_layout: ScrollLayout | None = None,
 ) -> Any:
-    """Return 11-dimensional edge features aligned with candidate edge_index."""
+    """Return 15-dimensional edge features aligned with candidate edge_index."""
 
     import torch
     import torch.nn.functional as F
@@ -753,10 +753,15 @@ def build_edge_attr_matrix(
         )
         source_height = max(1.0, source_bbox[3] - source_bbox[1])
         target_height = max(1.0, target_bbox[3] - target_bbox[1])
+        y_overlap_ratio = bbox_y_overlap_ratio(source_bbox, target_bbox)
+        has_x_gutter = float(
+            y_overlap_ratio > 0.3 and bbox_x_gap(source_bbox, target_bbox) > 0.03 * PAGE_SIZE
+        )
 
         source_rank = reading_order_ranks[source_idx] if source_idx < len(reading_order_ranks) else source_idx
         target_rank = reading_order_ranks[target_idx] if target_idx < len(reading_order_ranks) else target_idx
         index_delta = float(target_rank - source_rank)
+        index_bins = index_delta_bins(index_delta)
         rows.append(
             [
                 semantic_cosine,
@@ -767,9 +772,9 @@ def build_edge_attr_matrix(
                 _item_font_size(target) - _item_font_size(source),
                 float(_item_is_bold(source) and not _item_is_bold(target)),
                 target_height / source_height,
-                index_delta,
-                float(index_delta == 1.0),
-                float(source_type in SEQUENTIAL_EDGE_TYPES),
+                y_overlap_ratio,
+                has_x_gutter,
+                *index_bins,
             ]
         )
     if not rows:
@@ -896,6 +901,7 @@ def build_scroll_layout(
     page_max_local_y = 0.0
     max_pseudo_y = 0.0
     last_half_column: int | None = None
+    previous_bbox: tuple[float, float, float, float] | None = None
 
     for item_idx in order:
         item = items[item_idx]
@@ -911,11 +917,13 @@ def build_scroll_layout(
             page_column_offset = 0.0
             page_max_local_y = 0.0
             last_half_column = None
+            previous_bbox = None
 
         column_id = column_ids[item_idx] if item_idx < len(column_ids) else 2
-        if _explicit_column_label(item) is not None:
-            column_id = _explicit_column_label(item) or 2
-        if column_id == 1 and last_half_column == 0:
+        explicit_column = _explicit_column_label(item)
+        if explicit_column is not None:
+            column_id = explicit_column
+        if _is_scroll_column_wrap(bbox, previous_bbox, column_id=column_id, previous_column_id=last_half_column):
             page_column_offset = max(page_column_offset, page_max_local_y)
 
         column_width = column_width_for_item(item, bbox, page_idx, column_id, page_frames, page_widths)
@@ -938,8 +946,30 @@ def build_scroll_layout(
         max_pseudo_y = max(max_pseudo_y, pseudo_y1)
         if column_id in {0, 1}:
             last_half_column = column_id
+        previous_bbox = bbox
 
     return ScrollLayout(boxes=boxes, ranks=ranks, total_scroll_height=max(1.0, max_pseudo_y))
+
+
+def _is_scroll_column_wrap(
+    bbox: tuple[float, float, float, float],
+    previous_bbox: tuple[float, float, float, float] | None,
+    *,
+    column_id: int,
+    previous_column_id: int | None,
+    x_shift_threshold: float = 0.20 * PAGE_SIZE,
+) -> bool:
+    if previous_bbox is None:
+        return False
+    if column_id not in {0, 1} or previous_column_id not in {0, 1}:
+        return False
+    if column_id == previous_column_id:
+        return False
+    if column_id == 1 and previous_column_id == 0:
+        return True
+    previous_center = (previous_bbox[0] + previous_bbox[2]) / 2.0
+    current_center = (bbox[0] + bbox[2]) / 2.0
+    return bbox[1] < previous_bbox[1] and abs(current_center - previous_center) >= x_shift_threshold
 
 
 def infer_page_content_widths(items: list[dict[str, Any]]) -> dict[int, float]:
@@ -1048,6 +1078,33 @@ def scroll_center_distance(
     if source is None or target is None:
         return _center_distance(fallback_source, fallback_target)
     return _center_distance((source.local_cx, source.pseudo_cy), (target.local_cx, target.pseudo_cy))
+
+
+def bbox_y_overlap_ratio(
+    source: tuple[float, float, float, float],
+    target: tuple[float, float, float, float],
+    *,
+    eps: float = 1e-6,
+) -> float:
+    intersection = max(0.0, min(source[3], target[3]) - max(source[1], target[1]))
+    min_height = min(max(0.0, source[3] - source[1]), max(0.0, target[3] - target[1]))
+    return intersection / (min_height + eps)
+
+
+def bbox_x_gap(source: tuple[float, float, float, float], target: tuple[float, float, float, float]) -> float:
+    return max(source[0], target[0]) - min(source[2], target[2])
+
+
+def index_delta_bins(index_delta: float) -> list[float]:
+    if index_delta <= 0:
+        return [0.0, 0.0, 0.0, 0.0, 1.0]
+    if index_delta == 1:
+        return [1.0, 0.0, 0.0, 0.0, 0.0]
+    if index_delta == 2:
+        return [0.0, 1.0, 0.0, 0.0, 0.0]
+    if 3 <= index_delta <= 5:
+        return [0.0, 0.0, 1.0, 0.0, 0.0]
+    return [0.0, 0.0, 0.0, 1.0, 0.0]
 
 
 def collect_logical_boxes(items: list[dict[str, Any]]) -> list[LogicalBox]:

@@ -52,7 +52,13 @@ class EdgeRelation(str, Enum):
 
 FEATURE_TYPE_VOCAB = [block_type.value for block_type in BlockType]
 GEOMETRY_FIELDS = ["x_start_local", "y_start_page", "x_end_local", "y_end_page"]
-SCROLL_GEOMETRY_FIELDS = ["norm_width_local", "norm_height_font", "norm_pseudo_y", "norm_index"]
+SCROLL_GEOMETRY_FIELDS = [
+    "norm_width_local",
+    "norm_width_page",
+    "norm_height_font",
+    "norm_pseudo_y",
+    "norm_index",
+]
 DERIVED_STAT_FIELDS = ["macro_position", "aspect_ratio", "text_density"]
 STYLE_STAT_FIELDS = [
     "baseline_font_size_norm",
@@ -79,9 +85,13 @@ EDGE_ATTR_FIELDS = [
     "font_size_delta",
     "bold_to_regular",
     "line_height_ratio",
-    "index_delta",
-    "is_next",
-    "is_sequential_edge",
+    "y_overlap_ratio",
+    "has_x_gutter",
+    "index_delta_bin_adjacent",
+    "index_delta_bin_skip_one",
+    "index_delta_bin_near",
+    "index_delta_bin_far",
+    "index_delta_bin_reverse",
 ]
 NON_TEXT_DENSITY_TYPES = {
     BlockType.EQUATION.value,

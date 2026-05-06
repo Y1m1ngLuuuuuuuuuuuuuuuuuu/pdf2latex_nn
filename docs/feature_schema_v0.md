@@ -7,8 +7,8 @@
 ```text
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
-node_feature_dim: 817
-edge_attr_dim: 11
+node_feature_dim: 818
+edge_attr_dim: 15
 ```
 
 坐标统一使用 MinerU 当前输出的页面归一化坐标，页面左上角是 `(0, 0)`，右下角近似是 `(1000, 1000)`。如果后续需要保留 PDF 原始点坐标，应新增字段，不覆盖现有归一化坐标。
@@ -202,13 +202,13 @@ reference_item_of
 768 SciBERT semantic
 10 type one-hot
 4 geometry
-4 scroll geometry
+5 scroll geometry
 3 derived stats
 6 style stats
 16 sequence position
 3 column-aware features
 3 title structure features
-= 817
+= 818
 ```
 
 切片固定为：
@@ -218,12 +218,12 @@ reference_item_of
 | `semantic` | `[0, 768)` | 768 | SciBERT `[CLS]` sliding-window mean |
 | `type_onehot` | `[768, 778)` | 10 | Block Type 独热 |
 | `geometry` | `[778, 782)` | 4 | 首尾锚点几何 |
-| `scroll_geometry` | `[782, 786)` | 4 | 长卷轴 pseudo-y、栏宽、字号高度和序列进度 |
-| `derived_stats` | `[786, 789)` | 3 | 宏观位置、宽高比、文本密度 |
-| `style_stats` | `[789, 795)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
-| `sequence_position` | `[795, 811)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
-| `column_features` | `[811, 814)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
-| `title_structure` | `[814, 817)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
+| `scroll_geometry` | `[782, 787)` | 5 | 长卷轴 pseudo-y、栏宽/页宽、字号高度和序列进度 |
+| `derived_stats` | `[787, 790)` | 3 | 宏观位置、宽高比、文本密度 |
+| `style_stats` | `[790, 796)` | 6 | PyMuPDF 字号、粗体、斜体、数学、代码样式摘要 |
+| `sequence_position` | `[796, 812)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
+| `column_features` | `[812, 815)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
+| `title_structure` | `[815, 818)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
 
 ### Geometry Fields
 
@@ -240,6 +240,7 @@ y_end_page
 
 ```text
 norm_width_local = (x1 - x0) / current_column_width
+norm_width_page = (x1 - x0) / physical_page_width
 norm_height_font = (y1 - y0) / document_body_font_size
 norm_pseudo_y = pseudo_y0 / total_scroll_height
 norm_index = reading_order_rank / (node_count - 1)
@@ -298,24 +299,28 @@ line-of-sight neighbors: 每个节点在同页向下、向右各寻找最近 k �
 固定维度：
 
 ```text
-edge_attr_dim = 11
+edge_attr_dim = 15
 ```
 
 | index | 字段 | 说明 |
 | --- | --- | --- |
 | 0 | `semantic_cosine` | 源节点和目标节点 SciBERT 768 维向量的余弦相似度 |
-| 1 | `delta_y_gap` | `(target.y_min - source.y_max) / page_height`，允许负数表达跨栏/回跳 |
-| 2 | `delta_x_left` | `(target.x_min - source.x_min) / page_width` |
+| 1 | `delta_y_gap` | `(target.pseudo_y_min - source.pseudo_y_max) / page_height`，允许负数表达局部重叠 |
+| 2 | `delta_x_left` | `(target.local_x_min - source.local_x_min) / page_width`，X 使用栏内逻辑坐标 |
 | 3 | `left_alignment` | 若 `abs(delta_x_left) < 0.01` 则为 `1.0`，否则 `0.0` |
-| 4 | `center_distance` | 源/目标在逻辑阅读坐标系中的中心距离。双栏区域会被展开：左栏占该区域阅读进度前半段，右栏占后半段；X 使用栏内相对坐标，避免左栏底部与右栏顶部被物理沟壑误判为远距离 |
+| 4 | `center_distance` | 源/目标在长卷轴逻辑坐标系中的中心距离。双栏右栏会被接到左栏之后；X 使用栏内相对坐标，避免左栏底部与右栏顶部被物理沟壑误判为远距离 |
 | 5 | `font_size_delta` | `target_font_size - source_font_size`，缺失样式时为 `0.0` |
 | 6 | `bold_to_regular` | 源节点多数文本为粗体且目标节点不是粗体时为 `1.0` |
 | 7 | `line_height_ratio` | `target_bbox_height / source_bbox_height` |
-| 8 | `index_delta` | `target_index - source_index` |
-| 9 | `is_next` | 若 `target_index - source_index == 1` 则为 `1.0` |
-| 10 | `is_sequential_edge` | 若边来自强制/窗口阅读流连边则为 `1.0` |
+| 8 | `y_overlap_ratio` | 两个 bbox 在 Y 轴上的交集高度 / 较小高度 |
+| 9 | `has_x_gutter` | 若 `y_overlap_ratio > 0.3` 且 X 间隙超过页面宽度 3%，则为 `1.0` |
+| 10 | `index_delta_bin_adjacent` | `target_index - source_index == 1` |
+| 11 | `index_delta_bin_skip_one` | `target_index - source_index == 2` |
+| 12 | `index_delta_bin_near` | `target_index - source_index in [3, 5]` |
+| 13 | `index_delta_bin_far` | `target_index - source_index > 5` |
+| 14 | `index_delta_bin_reverse` | `target_index - source_index <= 0` |
 
-这 11 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
+这 15 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
 
 ## Model-Side Projection
 
@@ -323,11 +328,11 @@ edge_attr_dim = 11
 
 ```text
 semantic_768 -> L2 normalize -> Linear -> ReLU -> Dropout(0.2) -> semantic_64 -> L2 normalize
-layout/type/stats/sequence/column/title_45 -> Linear -> layout_32 -> LayerNorm
+layout/type/stats/sequence/column/title_50 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 
-当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。原始 `.pt` 中的 768 维 SciBERT 仍保留，用于复用缓存和计算 `semantic_cosine`；真正进入 GNN 前，语义分支必须经过上述脱水流程，避免主题词汇压制 bbox、scroll-y、样式和类型特征。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=11)`、`TransformerConv(edge_dim=11)` 或 `GINEConv`。
+当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。原始 `.pt` 中的 768 维 SciBERT 仍保留，用于复用缓存和计算 `semantic_cosine`；真正进入 GNN 前，语义分支必须经过上述脱水流程，避免主题词汇压制 bbox、scroll-y、样式和类型特征。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=15)`、`TransformerConv(edge_dim=15)` 或 `GINEConv`。
 
 ## Validator 最低要求
 

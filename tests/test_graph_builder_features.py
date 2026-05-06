@@ -98,10 +98,10 @@ def test_scroll_geometry_matrix_unrolls_columns_into_pseudo_y_receipt_roll():
     layout = build_scroll_layout(items, reading_order_indices=[0, 1, 2, 3])
     features = build_scroll_geometry_matrix(items, scroll_layout=layout)
 
-    assert tuple(features.shape) == (4, 4)
-    assert [round(float(value), 4) for value in features[0].tolist()] == [1.0, 10.0, 0.125, 0.0]
-    assert round(float(features[2][2]), 4) == 0.625
-    assert round(float(features[3][3]), 4) == 1.0
+    assert tuple(features.shape) == (4, 5)
+    assert [round(float(value), 4) for value in features[0].tolist()] == [1.0, 0.4, 10.0, 0.125, 0.0]
+    assert round(float(features[2][3]), 4) == 0.625
+    assert round(float(features[3][4]), 4) == 1.0
     assert layout.boxes[2] is not None
     assert layout.boxes[2].pseudo_y0 == 500.0
 
@@ -203,7 +203,7 @@ def test_candidate_edges_use_dual_view_neighbors():
     assert len({(source, target) for source, target, _ in pairs}) == len(pairs)
 
 
-def test_edge_attr_matrix_uses_strict_eleven_dimensional_relation_features():
+def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
     if not has_torch():
         return
     import torch
@@ -225,7 +225,7 @@ def test_edge_attr_matrix_uses_strict_eleven_dimensional_relation_features():
 
     edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
 
-    assert tuple(edge_attr.shape) == (2, 11)
+    assert tuple(edge_attr.shape) == (2, 15)
     forward = edge_attr[0].tolist()
     reverse = edge_attr[1].tolist()
     assert round(float(forward[0]), 4) == 1.0
@@ -236,11 +236,28 @@ def test_edge_attr_matrix_uses_strict_eleven_dimensional_relation_features():
     assert float(forward[5]) == -2.0
     assert float(forward[6]) == 1.0
     assert round(float(forward[7]), 4) == 0.8
-    assert float(forward[8]) == 1.0
-    assert float(forward[9]) == 1.0
+    assert float(forward[8]) == 0.0
+    assert float(forward[9]) == 0.0
     assert float(forward[10]) == 1.0
-    assert float(reverse[9]) == 0.0
-    assert float(reverse[10]) == 1.0
+    assert forward[10:15] == [1.0, 0.0, 0.0, 0.0, 0.0]
+    assert reverse[10:15] == [0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+def test_edge_attr_marks_y_overlap_and_cross_column_gutter():
+    if not has_torch():
+        return
+    import torch
+
+    items = [
+        item("left same line", [80, 100, 480, 200], page=0, column=0),
+        item("right same line", [560, 120, 920, 210], page=0, column=1),
+    ]
+    semantic = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=[(0, 1, "spatial_right")])
+
+    assert round(float(edge_attr[0][8]), 4) == 0.8889
+    assert float(edge_attr[0][9]) == 1.0
 
 
 def test_logical_center_distance_unrolls_double_column_reading_flow():

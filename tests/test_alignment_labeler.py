@@ -65,7 +65,7 @@ def test_alignment_labeler_injects_merge_parent_sibling_and_none_labels(tmp_path
     data = Data(
         x=torch.zeros((6, 4), dtype=torch.float32),
         edge_index=torch.tensor([[0, 1, 3, 5], [1, 2, 4, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((4, 11), dtype=torch.float32),
+        edge_attr=torch.zeros((4, 15), dtype=torch.float32),
     )
     torch.save(data, graph_path)
 
