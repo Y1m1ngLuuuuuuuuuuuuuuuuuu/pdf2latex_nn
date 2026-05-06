@@ -121,10 +121,13 @@ SECTION_LEVELS = {
     "paragraph": 5,
     "subparagraph": 6,
 }
-MATH_ENV_NAMES = {
-    "[",
+INLINE_MATH_ENV_NAMES = {
     "(",
     "$",
+    "math",
+}
+DISPLAY_MATH_ENV_NAMES = {
+    "[",
     "$$",
     "equation",
     "equation*",
@@ -136,9 +139,9 @@ MATH_ENV_NAMES = {
     "multline*",
     "flalign",
     "flalign*",
-    "math",
     "displaymath",
 }
+MATH_ENV_NAMES = INLINE_MATH_ENV_NAMES | DISPLAY_MATH_ENV_NAMES
 LIST_ENV_NAMES = {"itemize", "enumerate", "description"}
 STANDARD_LIST_NODE = "list_container"
 STANDARD_LIST_ITEM_NODE = "list_item"
@@ -383,6 +386,8 @@ class AlignmentLabeler:
         return matches
 
     def is_alignable_tex_node(self, node: TexAlignmentNode) -> bool:
+        if node.node_type == STANDARD_EQUATION_NODE:
+            return bool(node.clean)
         if len(node.clean) < self.config.min_clean_chars:
             return False
         if node.node_type == STANDARD_LIST_NODE:
@@ -951,6 +956,11 @@ def semantic_node_type_for_block(name: str) -> str:
     return STANDARD_PARAGRAPH_NODE
 
 
+def section_command_base(name: str) -> str | None:
+    base = name[:-1] if name.endswith("*") else name
+    return base if base in SECTION_LEVELS else None
+
+
 def normalize_display_math_for_texsoup(tex: str) -> str:
     """Convert display-math delimiters that TexSoup exposes poorly into environments."""
 
@@ -998,15 +1008,16 @@ class _TexSoupPathBuilder:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
                 self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
                 continue
-            if name in SECTION_LEVELS:
+            section_name = section_command_base(name)
+            if section_name is not None:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
                 node_id = self.add_node(
                     STANDARD_SECTION_NODE,
                     tex_node_text(child),
-                    self.section_parent(name),
-                    source_name=name,
+                    self.section_parent(section_name),
+                    source_name=section_name,
                 )
-                level = SECTION_LEVELS[name]
+                level = SECTION_LEVELS[section_name]
                 if node_id is not None:
                     self.section_by_level = {key: value for key, value in self.section_by_level.items() if key < level}
                     self.section_by_level[level] = node_id
@@ -1019,9 +1030,12 @@ class _TexSoupPathBuilder:
                 continue
             if name == "item":
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                self.add_node(STANDARD_LIST_ITEM_NODE, tex_node_text(child), parent_id, source_name=name)
+                self.walk_item_contents(child, parent_id=parent_id)
                 continue
-            if name in MATH_ENV_NAMES:
+            if name in INLINE_MATH_ENV_NAMES:
+                paragraph_buffer.append(f" {tex_node_text(child)} ")
+                continue
+            if name in DISPLAY_MATH_ENV_NAMES:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
                 self.add_node(STANDARD_EQUATION_NODE, tex_node_text(child) or "[MATH]", self.current_parent(parent_id), source_name=name)
                 continue
@@ -1055,6 +1069,47 @@ class _TexSoupPathBuilder:
                 else:
                     self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
         self.flush_paragraphs(paragraph_buffer, parent_id)
+
+    def walk_item_contents(self, item_node: Any, *, parent_id: str) -> None:
+        item_buffer: list[str] = []
+        for child in getattr(item_node, "contents", []) or []:
+            name = tex_node_name(child)
+            if name in SKIP_TEX_NODE_NAMES:
+                continue
+            if name in POISON_TEX_ENV_NAMES:
+                raise LayoutBreakerException(f"Encountered complex drawing environment: {name}")
+            if name in INLINE_MATH_ENV_NAMES:
+                item_buffer.append(f" {tex_node_text(child)} ")
+                continue
+            if name in DISPLAY_MATH_ENV_NAMES:
+                self.flush_list_item_text(item_buffer, parent_id)
+                self.add_node(STANDARD_EQUATION_NODE, tex_node_text(child) or "[MATH]", parent_id, source_name=name)
+                continue
+            if name in LIST_ENV_NAMES:
+                self.flush_list_item_text(item_buffer, parent_id)
+                env_id = self.add_node(STANDARD_LIST_NODE, name, parent_id, source_name=name)
+                if env_id is not None:
+                    self.walk_children(getattr(child, "contents", []) or [], parent_id=env_id, parent_env=name)
+                continue
+            if name == "text":
+                item_buffer.append(str(child))
+                continue
+            if hasattr(child, "contents"):
+                text = tex_node_text(child)
+                if text:
+                    item_buffer.append(f" {text} ")
+                else:
+                    self.walk_children(getattr(child, "contents", []) or [], parent_id=parent_id, parent_env=name)
+        self.flush_list_item_text(item_buffer, parent_id)
+
+    def flush_list_item_text(self, item_buffer: list[str], parent_id: str) -> None:
+        if not item_buffer:
+            return
+        raw_text = "".join(item_buffer)
+        item_buffer.clear()
+        for paragraph in re.split(r"(?:\r?\n\s*){2,}", raw_text):
+            if paragraph.strip():
+                self.add_node(STANDARD_LIST_ITEM_NODE, paragraph, parent_id, source_name="item")
 
     def add_node(self, node_type: str, text: str, parent_id: str, *, source_name: str | None = None) -> str | None:
         clean = clean_equation_text(text) if node_type == STANDARD_EQUATION_NODE else clean_text(text)

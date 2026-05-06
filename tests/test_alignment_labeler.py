@@ -109,6 +109,67 @@ def test_tex_parser_ignores_preamble_when_document_environment_exists(tmp_path):
     assert all("Preamble Only Noise" not in node.text for node in nodes)
 
 
+def test_tex_parser_accepts_starred_section_commands(tmp_path):
+    if not has_alignment_deps():
+        return
+    content_path = tmp_path / "content.json"
+    graph_path = tmp_path / "graph.pt"
+    tex_path = tmp_path / "main.tex"
+    content_path.write_text('{"items":[]}', encoding="utf-8")
+    tex_path.write_text(
+        r"""
+        \begin{document}
+        \section{Main}
+        \section*{Acknowledgment}
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    labeler = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path)
+    sections = [node for node in labeler.parse_tex_nodes() if node.node_type == "section"]
+
+    assert [section.text for section in sections] == ["Main", "Acknowledgment"]
+    assert [section.source_name for section in sections] == ["section", "section"]
+
+
+def test_tex_parser_keeps_inline_math_inside_list_item_but_splits_display_math(tmp_path):
+    if not has_alignment_deps():
+        return
+    content_path = tmp_path / "content.json"
+    graph_path = tmp_path / "graph.pt"
+    tex_path = tmp_path / "main.tex"
+    content_path.write_text('{"items":[]}', encoding="utf-8")
+    tex_path.write_text(
+        r"""
+        \begin{document}
+        \begin{enumerate}
+        \item Euclidean distance (\(d_E\)): Captures global relationships
+        \[
+        d_E(x,c_k)=\|f_\theta(x)-c_k\|_2
+        \]
+        \end{enumerate}
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    labeler = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path)
+    nodes = labeler.parse_tex_nodes()
+    list_containers = [node for node in nodes if node.node_type == "list_container"]
+    list_items = [node for node in nodes if node.node_type == "list_item"]
+    equations = [node for node in nodes if node.node_type == "equation_display"]
+
+    assert len(list_containers) == 1
+    assert len(list_items) == 1
+    assert len(equations) == 1
+    assert "Euclidean distance" in list_items[0].text
+    assert "d_E" in list_items[0].text
+    assert "f_\\theta" not in list_items[0].text
+    assert list_items[0].parent_id == list_containers[0].tex_id
+    assert equations[0].parent_id == list_containers[0].tex_id
+
+
 def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
     if not has_alignment_deps():
         return

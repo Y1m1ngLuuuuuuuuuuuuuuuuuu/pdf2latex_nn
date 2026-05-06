@@ -131,5 +131,5 @@ strict bad-sample rejection gates
 Last AutoDL verification:
 
 ```text
-142 passed
+144 passed
 ```

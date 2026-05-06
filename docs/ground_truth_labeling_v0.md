@@ -100,6 +100,15 @@ keep alphanumeric / CJK payload
 
 display equation 使用专门的 `clean_equation_text()`。它会保留 `\alpha`、`\beta` 这类命令名，避免纯命令公式被清洗成空串。
 
+行内公式和 display 公式必须分开处理：
+
+```text
+\(...\)、$...$、\begin{math}...\end{math} -> 留在 paragraph/list_item 文本内
+\[...\]、$$...$$、equation/align/gather/multline/flalign/displaymath -> equation_display
+```
+
+这条规则是为了避免列表项被行内公式打碎。例如 `Euclidean distance (\(d_E\))` 必须仍是同一个 `list_item`，不能被拆成多个 enumerate item。
+
 ## Alignment Engine
 
 对齐器使用顺序双指针，不做 `O(N^2)` 全局搜索。
@@ -255,8 +264,18 @@ tests/test_tex_relation_labeler.py
 tests/test_document_dataset.py
 ```
 
+AST 框架对照工具：
+
+```bash
+python tools/compare_tex_ast_framework.py \
+  --tex data/03_tex_source_pool/2501.00050/aaai25.tex \
+  --output data/09_eval_reports/ast_framework_compare/2501.00050_ast_framework_compare.json
+```
+
+该工具把源码中的 section/list/equation/algorithm/caption 框架与 `AlignmentLabeler.parse_tex_nodes()` 的 TexSoup AST 框架做顺序对比，只比较结构节点，不比较公式内部 TeX 字符串。
+
 当前 AutoDL 验证：
 
 ```text
-142 passed
+144 passed
 ```
