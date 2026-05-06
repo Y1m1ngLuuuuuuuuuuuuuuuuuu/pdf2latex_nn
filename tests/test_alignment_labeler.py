@@ -137,3 +137,60 @@ def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
         int(TexRelationLabel.MERGE),
     ]
     assert graph.pdf_to_tex[1] == graph.pdf_to_tex[2]
+
+
+def test_alignment_labeler_uses_visual_heading_stack_when_tex_paths_are_flat(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "bbox": [100, 100, 300, 120]},
+                    {"type": "paragraph", "text_for_embedding": "Body paragraph.", "bbox": [100, 130, 500, 180]},
+                    {"type": "title", "text_for_embedding": "1.1 Details", "bbox": [100, 190, 300, 210]},
+                    {"type": "paragraph", "text_for_embedding": "Detail paragraph.", "bbox": [100, 220, 500, 270]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        """
+        Introduction
+
+        Body paragraph.
+
+        1.1 Details
+
+        Detail paragraph.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 0, 2, 1], [1, 2, 3, 3]], dtype=torch.long),
+        edge_attr=torch.zeros((4, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(),
+    ).run()
+
+    assert graph.y.tolist() == [
+        int(TexRelationLabel.PARENT_CHILD),
+        int(TexRelationLabel.PARENT_CHILD),
+        int(TexRelationLabel.PARENT_CHILD),
+        int(TexRelationLabel.NONE),
+    ]

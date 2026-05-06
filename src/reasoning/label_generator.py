@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from src.perception.reading_order import fuse_micro_nodes
+from src.perception.title_features import title_numbering_level
 from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_file
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
@@ -69,6 +71,16 @@ class AlignmentMatch:
 
 
 @dataclass(frozen=True)
+class VisualHierarchy:
+    parent_by_node: dict[int, int | None]
+    child_rank_by_node: dict[int, int]
+    heading_ids: frozenset[int]
+    heading_levels: dict[int, int]
+    document_title_ids: frozenset[int]
+    body_font_size: float
+
+
+@dataclass(frozen=True)
 class AlignmentLabelerConfig:
     similarity_threshold: float = 65.0
     min_clean_chars: int = 3
@@ -77,6 +89,9 @@ class AlignmentLabelerConfig:
     score_drop_tolerance: float = 8.0
     tex_lookahead_nodes: int = 4
     tail_absorption_nodes: int = 3
+    relation_strategy: str = "visual_first"
+    visual_heading_font_scale: float = 1.12
+    visual_bold_heading_font_scale: float = 1.05
     max_orphan_ratio: float = 0.30
     abort_on_bad_alignment: bool = False
     output_mapping_json: Path | None = None
@@ -141,6 +156,10 @@ SKIP_TEX_NODE_NAMES = {
     "bibliographystyle",
     "bibliography",
 }
+HEADING_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
+SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
+LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 
 
 class AlignmentLabeler:
@@ -162,6 +181,7 @@ class AlignmentLabeler:
         self.pdf_nodes: list[PdfAlignmentNode] = []
         self.matches: list[AlignmentMatch] = []
         self.tex_to_pdf_indices: dict[str, list[int]] = {}
+        self.visual_hierarchy: VisualHierarchy | None = None
         self.flattener_summary: dict[str, Any] | None = None
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
@@ -176,6 +196,7 @@ class AlignmentLabeler:
             )
         self.tex_nodes = {node.tex_id: node for node in self.parse_tex_nodes()}
         self.matches = self.align_pdf_to_tex()
+        self.visual_hierarchy = build_visual_hierarchy(self.pdf_nodes, config=self.config)
         labels = self.build_edge_labels(graph)
         graph.y = labels
         graph.edge_label = labels
@@ -187,6 +208,7 @@ class AlignmentLabeler:
             "similarity_threshold": self.config.similarity_threshold,
             "max_window_nodes": self.config.max_window_nodes,
             "tail_absorption_nodes": self.config.tail_absorption_nodes,
+            "relation_strategy": self.config.relation_strategy,
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
@@ -388,6 +410,13 @@ class AlignmentLabeler:
         path_v = self.tex_nodes[target_match.tex_id].path_ids
         if path_u == path_v:
             return int(TexRelationLabel.MERGE)
+        visual_relation = self.infer_visual_relation(source_index, target_index, source_match, target_match)
+        if visual_relation is not None:
+            return visual_relation
+        if self.config.relation_strategy == "visual_only":
+            return int(TexRelationLabel.NONE)
+        if self.visual_hierarchy is not None and self.visual_hierarchy.heading_ids:
+            return int(TexRelationLabel.NONE)
         if path_v[:-1] == path_u and self.is_first_pdf_anchor(source_index, source_match.tex_id) and self.is_first_pdf_anchor(
             target_index, target_match.tex_id
         ):
@@ -399,6 +428,31 @@ class AlignmentLabeler:
             and self.is_first_pdf_anchor(target_index, target_match.tex_id)
         ):
             return int(TexRelationLabel.SIBLING)
+        return int(TexRelationLabel.NONE)
+
+    def infer_visual_relation(
+        self,
+        source_index: int,
+        target_index: int,
+        source_match: AlignmentMatch,
+        target_match: AlignmentMatch,
+    ) -> int | None:
+        hierarchy = self.visual_hierarchy
+        if hierarchy is None or not hierarchy.heading_ids:
+            return None
+        if not self.is_first_pdf_anchor(source_index, source_match.tex_id) or not self.is_first_pdf_anchor(
+            target_index, target_match.tex_id
+        ):
+            return int(TexRelationLabel.NONE)
+        if hierarchy.parent_by_node.get(target_index) == source_index:
+            return int(TexRelationLabel.PARENT_CHILD)
+        source_parent = hierarchy.parent_by_node.get(source_index)
+        target_parent = hierarchy.parent_by_node.get(target_index)
+        if source_parent is not None and source_parent == target_parent:
+            source_rank = hierarchy.child_rank_by_node.get(source_index)
+            target_rank = hierarchy.child_rank_by_node.get(target_index)
+            if source_rank is not None and target_rank is not None and abs(target_rank - source_rank) == 1:
+                return int(TexRelationLabel.SIBLING)
         return int(TexRelationLabel.NONE)
 
     def is_first_pdf_anchor(self, pdf_index: int, tex_id: str | None) -> bool:
@@ -430,9 +484,302 @@ class AlignmentLabeler:
             "flattener": self.flattener_summary,
             "matches": [asdict(match) for match in self.matches],
             "tex_to_pdf_indices": self.tex_to_pdf_indices,
+            "visual_hierarchy": visual_hierarchy_payload(self.visual_hierarchy),
             "tex_nodes": [asdict(node) for node in self.tex_nodes.values()],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLabelerConfig) -> VisualHierarchy:
+    """Build a lightweight heading/paragraph hierarchy from visual PDF node metadata.
+
+    TeX AST paths are fragile in real arXiv sources. This stack uses only the
+    already ordered MinerU/PyMuPDF records: block type, heading prefix, font
+    statistics, and short standalone-title cues. It intentionally does not
+    model itemize/enumerate; list-like blocks remain ordinary siblings inside
+    the nearest section scope.
+    """
+
+    body_font_size = infer_body_font_size(nodes)
+    heading_candidates = [
+        node.node_index
+        for node in nodes
+        if is_visual_heading_candidate(node, body_font_size=body_font_size, config=config)
+    ]
+    document_title_ids = infer_document_title_ids(nodes, heading_candidates)
+    heading_levels = infer_visual_heading_levels(
+        nodes,
+        heading_candidates,
+        document_title_ids=document_title_ids,
+        body_font_size=body_font_size,
+        config=config,
+    )
+    heading_ids = frozenset(node_id for node_id in heading_candidates if node_id not in document_title_ids)
+    parent_by_node: dict[int, int | None] = {}
+    children_by_parent: dict[int | None, list[int]] = {}
+    stack: list[tuple[int, int]] = []
+
+    for node in nodes:
+        node_id = node.node_index
+        if node_id in document_title_ids:
+            parent_by_node[node_id] = None
+            children_by_parent.setdefault(None, []).append(node_id)
+            continue
+        if node_id in heading_ids:
+            level = heading_levels[node_id]
+            while stack and stack[-1][1] >= level:
+                stack.pop()
+            parent_id = stack[-1][0] if stack else None
+            parent_by_node[node_id] = parent_id
+            children_by_parent.setdefault(parent_id, []).append(node_id)
+            stack.append((node_id, level))
+            continue
+        parent_id = stack[-1][0] if stack else None
+        parent_by_node[node_id] = parent_id
+        children_by_parent.setdefault(parent_id, []).append(node_id)
+
+    child_rank_by_node: dict[int, int] = {}
+    for children in children_by_parent.values():
+        for rank, node_id in enumerate(children):
+            child_rank_by_node[node_id] = rank
+
+    return VisualHierarchy(
+        parent_by_node=parent_by_node,
+        child_rank_by_node=child_rank_by_node,
+        heading_ids=heading_ids,
+        heading_levels=heading_levels,
+        document_title_ids=frozenset(document_title_ids),
+        body_font_size=body_font_size,
+    )
+
+
+def infer_body_font_size(nodes: list[PdfAlignmentNode]) -> float:
+    sizes: list[float] = []
+    for node in nodes:
+        if canonical_pdf_type(node.item) in HEADING_TYPES:
+            continue
+        size = pdf_font_size(node.item)
+        if size > 0:
+            text_len = max(1, min(len(node.text.strip()), 200))
+            sizes.extend([round(size, 1)] * text_len)
+    if not sizes:
+        for node in nodes:
+            size = pdf_font_size(node.item)
+            if size > 0:
+                sizes.append(round(size, 1))
+    if not sizes:
+        return 0.0
+    return float(Counter(sizes).most_common(1)[0][0])
+
+
+def is_visual_heading_candidate(
+    node: PdfAlignmentNode,
+    *,
+    body_font_size: float,
+    config: AlignmentLabelerConfig,
+) -> bool:
+    text = node.text.strip()
+    if not text:
+        return False
+    raw_type = canonical_pdf_type(node.item)
+    if raw_type in HEADING_TYPES:
+        return True
+    if LIST_MARKER_RE.match(text):
+        return False
+    if title_numbering_level(text) is not None and looks_like_standalone_heading(text):
+        return True
+    font_size = pdf_font_size(node.item)
+    if body_font_size > 0 and font_size >= body_font_size * config.visual_heading_font_scale and looks_like_standalone_heading(text):
+        return True
+    if (
+        body_font_size > 0
+        and font_size >= body_font_size * config.visual_bold_heading_font_scale
+        and pdf_bold_ratio(node.item) >= 0.45
+        and looks_like_standalone_heading(text)
+    ):
+        return True
+    return False
+
+
+def infer_document_title_ids(nodes: list[PdfAlignmentNode], heading_candidates: list[int]) -> set[int]:
+    if not heading_candidates:
+        return set()
+    by_id = {node.node_index: node for node in nodes}
+    first_id = heading_candidates[0]
+    first = by_id.get(first_id)
+    if first is None:
+        return set()
+    bbox = first_bbox(first.item.get("bbox"))
+    if bbox is None:
+        return set()
+    page_idx = parse_int(first.item.get("page_idx"))
+    text = first.text.strip()
+    width = max(0.0, bbox[2] - bbox[0])
+    if page_idx == 0 and bbox[1] < 220 and width >= 520 and len(text) >= 35:
+        return {first_id}
+    return set()
+
+
+def infer_visual_heading_levels(
+    nodes: list[PdfAlignmentNode],
+    heading_candidates: list[int],
+    *,
+    document_title_ids: set[int],
+    body_font_size: float,
+    config: AlignmentLabelerConfig,
+) -> dict[int, int]:
+    by_id = {node.node_index: node for node in nodes}
+    sized_headings: list[float] = []
+    for node_id in heading_candidates:
+        if node_id in document_title_ids:
+            continue
+        node = by_id[node_id]
+        if title_numbering_level(node.text) is not None:
+            continue
+        size = pdf_font_size(node.item)
+        if size > 0:
+            sized_headings.append(round(size, 1))
+    unique_sizes = sorted(set(sized_headings), reverse=True)
+    size_to_level = {size: min(index + 1, 3) for index, size in enumerate(unique_sizes)}
+
+    levels: dict[int, int] = {}
+    for node_id in heading_candidates:
+        node = by_id[node_id]
+        if node_id in document_title_ids:
+            levels[node_id] = 0
+            continue
+        numbered_level = title_numbering_level(node.text)
+        if numbered_level is not None:
+            levels[node_id] = min(max(1, numbered_level), 3)
+            continue
+        raw_type = canonical_pdf_type(node.item)
+        if raw_type in SECTION_TYPE_LEVELS:
+            levels[node_id] = SECTION_TYPE_LEVELS[raw_type]
+            continue
+        size = pdf_font_size(node.item)
+        rounded_size = round(size, 1)
+        if rounded_size in size_to_level:
+            levels[node_id] = size_to_level[rounded_size]
+        elif body_font_size > 0 and size >= body_font_size * config.visual_heading_font_scale:
+            levels[node_id] = 1
+        else:
+            levels[node_id] = 1
+    return levels
+
+
+def looks_like_standalone_heading(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    if len(value) > 140:
+        return False
+    if SENTENCE_END_RE.search(value):
+        return False
+    if value.count(",") >= 2:
+        return False
+    return True
+
+
+def canonical_pdf_type(item: dict[str, Any]) -> str:
+    return str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").strip().lower()
+
+
+def pdf_font_size(item: dict[str, Any]) -> float:
+    for key in (
+        "style_baseline_size",
+        "baseline_font_size",
+        "font_size",
+        "font_size_px",
+        "avg_font_size",
+    ):
+        value = numeric_value(item.get(key))
+        if value is not None and value > 0:
+            return value
+    spans = item.get("spans")
+    if isinstance(spans, list):
+        weighted: list[float] = []
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            size = numeric_value(span.get("font_size") or span.get("size"))
+            if size is None or size <= 0:
+                continue
+            text = stringify_text_payload(span.get("text") or span.get("content"))
+            weighted.extend([float(size)] * max(1, min(len(text), 80)))
+        if weighted:
+            return float(Counter(round(size, 1) for size in weighted).most_common(1)[0][0])
+    return 0.0
+
+
+def pdf_bold_ratio(item: dict[str, Any]) -> float:
+    value = numeric_value(item.get("bold_char_ratio"))
+    if value is not None:
+        return max(0.0, min(1.0, value))
+    spans = item.get("spans")
+    if not isinstance(spans, list):
+        return 0.0
+    bold_chars = 0
+    total_chars = 0
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        text = stringify_text_payload(span.get("text") or span.get("content"))
+        length = max(0, len(text.strip()))
+        if length == 0:
+            continue
+        total_chars += length
+        if bool(span.get("is_bold")):
+            bold_chars += length
+    return bold_chars / total_chars if total_chars else 0.0
+
+
+def first_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    chunks = bbox_chunks(value)
+    return chunks[0] if chunks else None
+
+
+def bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return []
+    usable_len = len(value) - (len(value) % 4)
+    chunks: list[tuple[float, float, float, float]] = []
+    for index in range(0, usable_len, 4):
+        try:
+            chunks.append(tuple(float(part) for part in value[index : index + 4]))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    return chunks
+
+
+def parse_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def numeric_value(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def visual_hierarchy_payload(hierarchy: VisualHierarchy | None) -> dict[str, Any] | None:
+    if hierarchy is None:
+        return None
+    return {
+        "strategy": "visual_heading_stack_v1",
+        "body_font_size": hierarchy.body_font_size,
+        "heading_ids": sorted(hierarchy.heading_ids),
+        "heading_levels": {str(key): value for key, value in sorted(hierarchy.heading_levels.items())},
+        "document_title_ids": sorted(hierarchy.document_title_ids),
+        "parent_by_node": {
+            str(key): value for key, value in sorted(hierarchy.parent_by_node.items()) if value is not None
+        },
+    }
 
 
 class _TexSoupPathBuilder:
