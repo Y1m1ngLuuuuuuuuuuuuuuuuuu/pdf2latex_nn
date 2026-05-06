@@ -64,5 +64,9 @@ models/**
 outputs/**
 !outputs/.gitkeep
 
+debug_output/**
+!debug_output/**/
+!debug_output/.gitkeep
+
 # Local transfer/download staging.
 artifacts/local_arxiv_sources/
