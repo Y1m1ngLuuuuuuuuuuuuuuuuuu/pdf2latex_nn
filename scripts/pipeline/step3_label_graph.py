@@ -24,7 +24,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, help="Optional output graph .pt; defaults to overwriting --graph")
     parser.add_argument("--mapping-output", type=Path, help="Optional JSON dump of PDF-to-TeX fuzzy matches")
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
-    parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
+    parser.add_argument("--max-orphan-ratio", type=float, default=0.15)
+    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
+    parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
     parser.add_argument("--abort-on-bad-alignment", action="store_true")
     return parser.parse_args()
 
@@ -34,6 +36,8 @@ def main() -> None:
     config = AlignmentLabelerConfig(
         similarity_threshold=args.similarity_threshold,
         max_orphan_ratio=args.max_orphan_ratio,
+        max_unmapped_tex_ratio=args.max_unmapped_tex_ratio,
+        max_isolated_node_ratio=args.max_isolated_node_ratio,
         abort_on_bad_alignment=args.abort_on_bad_alignment,
         output_mapping_json=args.mapping_output,
     )

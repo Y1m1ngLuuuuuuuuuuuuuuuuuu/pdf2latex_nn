@@ -22,13 +22,17 @@ class LabelGeneratorConfig:
     adjacent_siblings_only: bool = True
     directed_parent_child: bool = False
     orphan_label: int = int(TexRelationLabel.NONE)
-    max_orphan_ratio: float = 0.30
+    max_orphan_ratio: float = 0.15
     min_aligned_nodes: int = 1
     abort_on_bad_alignment: bool = True
 
 
 class AlignmentQualityError(RuntimeError):
     """Raised when PDF-to-TeX alignment is too poor for supervised training."""
+
+
+class LayoutBreakerException(AlignmentQualityError):
+    """Raised when a TeX construct is known to poison text-to-layout alignment."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,13 @@ class TexAlignmentNode:
     text: str
     clean: str
     path_ids: tuple[str, ...]
+    parent_id: str | None = None
+    source_name: str | None = None
+    source_span: tuple[int, int] | None = None
+
+    @property
+    def clean_text(self) -> str:
+        return self.clean
 
 
 @dataclass(frozen=True)
@@ -89,10 +100,14 @@ class AlignmentLabelerConfig:
     score_drop_tolerance: float = 8.0
     tex_lookahead_nodes: int = 4
     tail_absorption_nodes: int = 3
+    equation_blind_alignment_window: int = 2
     relation_strategy: str = "visual_first"
     visual_heading_font_scale: float = 1.12
     visual_bold_heading_font_scale: float = 1.05
-    max_orphan_ratio: float = 0.30
+    max_orphan_ratio: float = 0.15
+    max_unmapped_tex_ratio: float = 0.30
+    max_isolated_node_ratio: float = 0.85
+    min_section_nodes: int = 1
     abort_on_bad_alignment: bool = False
     output_mapping_json: Path | None = None
 
@@ -107,6 +122,8 @@ SECTION_LEVELS = {
     "subparagraph": 6,
 }
 MATH_ENV_NAMES = {
+    "[",
+    "(",
     "$",
     "$$",
     "equation",
@@ -123,6 +140,28 @@ MATH_ENV_NAMES = {
     "displaymath",
 }
 LIST_ENV_NAMES = {"itemize", "enumerate", "description"}
+STANDARD_LIST_NODE = "list_container"
+STANDARD_LIST_ITEM_NODE = "list_item"
+STANDARD_SECTION_NODE = "section"
+STANDARD_PARAGRAPH_NODE = "paragraph"
+STANDARD_EQUATION_NODE = "equation_display"
+STANDARD_FIGURE_CAPTION_NODE = "figure_caption"
+STANDARD_TABLE_CAPTION_NODE = "table_caption"
+ALIGNABLE_TEX_NODE_TYPES = {
+    STANDARD_SECTION_NODE,
+    STANDARD_PARAGRAPH_NODE,
+    STANDARD_EQUATION_NODE,
+    STANDARD_LIST_ITEM_NODE,
+    STANDARD_FIGURE_CAPTION_NODE,
+    STANDARD_TABLE_CAPTION_NODE,
+}
+POISON_TEX_ENV_NAMES = {
+    "tikzpicture",
+    "pgfpicture",
+    "pgfplots",
+    "axis",
+    "pspicture",
+}
 BLOCK_ENV_NAMES = {
     "abstract",
     "algorithm",
@@ -134,6 +173,7 @@ BLOCK_ENV_NAMES = {
     "table",
     "table*",
 }
+CAPTION_PARENT_ENVS = {"figure", "figure*", "table", "table*"}
 CONTAINER_ENV_NAMES = {
     "document",
     "center",
@@ -203,6 +243,7 @@ class AlignmentLabeler:
         self.tex_to_pdf_indices: dict[str, list[int]] = {}
         self.visual_hierarchy: VisualHierarchy | None = None
         self.flattener_summary: dict[str, Any] | None = None
+        self.alignment_quality: dict[str, Any] = {}
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
         graph = self.load_graph()
@@ -224,16 +265,17 @@ class AlignmentLabeler:
         graph.pdf_to_tex_scores = [match.score for match in self.matches]
         graph.label_counts = label_counts(labels)
         graph.alignment_schema = {
-            "strategy": "texsoup_accumulative_sliding_window_path_v2",
+            "strategy": "texsoup_semantic_ast_sliding_window_v3",
             "similarity_threshold": self.config.similarity_threshold,
             "max_window_nodes": self.config.max_window_nodes,
             "tail_absorption_nodes": self.config.tail_absorption_nodes,
+            "equation_blind_alignment_window": self.config.equation_blind_alignment_window,
             "relation_strategy": self.config.relation_strategy,
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
         }
-        self.assert_alignment_quality()
+        self.assert_alignment_quality(graph=graph, labels=labels)
         if self.config.output_mapping_json is not None:
             self.write_mapping_json(self.config.output_mapping_json)
         destination = self.graph_path if output_graph_path is None and overwrite else output_graph_path
@@ -279,12 +321,12 @@ class AlignmentLabeler:
 
         flattened = flatten_latex_file(self.tex_path, config=LatexFlattenerConfig(mask_math=False))
         try:
-            soup = TexSoup(flattened.content)
+            soup = TexSoup(normalize_display_math_for_texsoup(flattened.content))
             self.flattener_summary = flattened.summary()
             self.flattener_summary["mask_math_fallback"] = False
         except Exception:
             flattened = flatten_latex_file(self.tex_path, config=LatexFlattenerConfig(mask_math=True))
-            soup = TexSoup(flattened.content)
+            soup = TexSoup(normalize_display_math_for_texsoup(flattened.content))
             self.flattener_summary = flattened.summary()
             self.flattener_summary["mask_math_fallback"] = True
         builder = _TexSoupPathBuilder(self.config)
@@ -343,13 +385,15 @@ class AlignmentLabeler:
     def is_alignable_tex_node(self, node: TexAlignmentNode) -> bool:
         if len(node.clean) < self.config.min_clean_chars:
             return False
-        if node.node_type in LIST_ENV_NAMES | CONTAINER_ENV_NAMES:
+        if node.node_type == STANDARD_LIST_NODE:
             return False
-        if node.node_type in {"document", "environment"} and node.clean in LIST_ENV_NAMES:
-            return False
-        return True
+        return node.node_type in ALIGNABLE_TEX_NODE_TYPES
 
     def find_alignment_window(self, start_index: int, tex_node: TexAlignmentNode) -> tuple[int, int, float] | None:
+        if tex_node.node_type == STANDARD_EQUATION_NODE:
+            blind = self.find_blind_equation_window(start_index)
+            if blind is not None:
+                return blind
         buffer_parts: list[str] = []
         best_score = 0.0
         best_end = start_index
@@ -372,6 +416,13 @@ class AlignmentLabeler:
                 break
         if self.is_tex_fragment(self.pdf_nodes[start_index].clean, tex_node.clean):
             return start_index, start_index, fragment_ratio_score(self.pdf_nodes[start_index].clean, tex_node.clean)
+        return None
+
+    def find_blind_equation_window(self, start_index: int) -> tuple[int, int, float] | None:
+        upper = min(len(self.pdf_nodes), start_index + max(1, self.config.equation_blind_alignment_window + 1))
+        for index in range(start_index, upper):
+            if canonical_pdf_merge_type(self.pdf_nodes[index].item) == "equation":
+                return index, index, 100.0
         return None
 
     def find_better_tex_candidate(
@@ -493,17 +544,48 @@ class AlignmentLabeler:
             return False
         return source_index != target_index
 
-    def assert_alignment_quality(self) -> None:
+    def assert_alignment_quality(self, *, graph: Any | None = None, labels: Any | None = None) -> None:
         orphan_count = sum(1 for match in self.matches if not match.tex_id)
         orphan_ratio = orphan_count / max(1, len(self.matches))
+        alignable_tex_nodes = [node for node in self.tex_nodes.values() if self.is_alignable_tex_node(node)]
+        mapped_tex_ids = {match.tex_id for match in self.matches if match.tex_id}
+        unmapped_tex_count = sum(1 for node in alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
+        unmapped_tex_ratio = unmapped_tex_count / max(1, len(alignable_tex_nodes))
+        section_count = sum(1 for node in self.tex_nodes.values() if node.node_type == STANDARD_SECTION_NODE)
+        paragraph_pdf_count = sum(1 for node in self.pdf_nodes if canonical_pdf_merge_type(node.item) == "text" and len(node.clean) >= self.config.min_clean_chars)
+        isolated_count = 0
+        isolated_ratio = 0.0
+        if graph is not None and labels is not None and hasattr(graph, "edge_index"):
+            connected = connected_node_indices(graph.edge_index.detach().cpu(), labels.detach().cpu())
+            candidates = [node.node_index for node in self.pdf_nodes if len(node.clean) >= self.config.min_clean_chars]
+            isolated_count = sum(1 for node_index in candidates if node_index not in connected)
+            isolated_ratio = isolated_count / max(1, len(candidates))
+        self.alignment_quality = {
+            "orphan_count": orphan_count,
+            "num_pdf_nodes": len(self.matches),
+            "orphan_ratio": orphan_ratio,
+            "max_orphan_ratio": self.config.max_orphan_ratio,
+            "alignable_tex_count": len(alignable_tex_nodes),
+            "unmapped_tex_count": unmapped_tex_count,
+            "unmapped_tex_ratio": unmapped_tex_ratio,
+            "max_unmapped_tex_ratio": self.config.max_unmapped_tex_ratio,
+            "section_count": section_count,
+            "min_section_nodes": self.config.min_section_nodes,
+            "isolated_node_count": isolated_count,
+            "isolated_node_ratio": isolated_ratio,
+            "max_isolated_node_ratio": self.config.max_isolated_node_ratio,
+        }
+        failures: list[str] = []
         if orphan_ratio > self.config.max_orphan_ratio:
-            message = (
-                "bad fuzzy alignment quality: "
-                f"orphan_count={orphan_count}, num_nodes={len(self.matches)}, "
-                f"orphan_ratio={orphan_ratio:.2%}, max_orphan_ratio={self.config.max_orphan_ratio:.2%}"
-            )
-            if self.config.abort_on_bad_alignment:
-                raise AlignmentQualityError(message)
+            failures.append(f"orphan_ratio={orphan_ratio:.2%} > {self.config.max_orphan_ratio:.2%}")
+        if unmapped_tex_ratio > self.config.max_unmapped_tex_ratio:
+            failures.append(f"unmapped_tex_ratio={unmapped_tex_ratio:.2%} > {self.config.max_unmapped_tex_ratio:.2%}")
+        if paragraph_pdf_count >= 8 and section_count < self.config.min_section_nodes:
+            failures.append(f"section_count={section_count} < min_section_nodes={self.config.min_section_nodes}")
+        if isolated_ratio > self.config.max_isolated_node_ratio:
+            failures.append(f"isolated_node_ratio={isolated_ratio:.2%} > {self.config.max_isolated_node_ratio:.2%}")
+        if failures and self.config.abort_on_bad_alignment:
+            raise AlignmentQualityError("bad alignment quality: " + "; ".join(failures))
 
     def write_mapping_json(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -514,12 +596,19 @@ class AlignmentLabeler:
             "graph_path": str(self.graph_path),
             "similarity_threshold": self.config.similarity_threshold,
             "flattener": self.flattener_summary,
+            "quality": self.alignment_quality,
             "matches": [asdict(match) for match in self.matches],
             "tex_to_pdf_indices": self.tex_to_pdf_indices,
             "visual_hierarchy": visual_hierarchy_payload(self.visual_hierarchy),
-            "tex_nodes": [asdict(node) for node in self.tex_nodes.values()],
+            "tex_nodes": [tex_alignment_node_payload(node) for node in self.tex_nodes.values()],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def tex_alignment_node_payload(node: TexAlignmentNode) -> dict[str, Any]:
+    payload = asdict(node)
+    payload["clean_text"] = node.clean_text
+    return payload
 
 
 def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLabelerConfig) -> VisualHierarchy:
@@ -850,6 +939,36 @@ def visual_hierarchy_payload(hierarchy: VisualHierarchy | None) -> dict[str, Any
     }
 
 
+def semantic_node_type_for_block(name: str) -> str:
+    if name in {"figure", "figure*"}:
+        return "figure"
+    if name in {"table", "table*"}:
+        return "table"
+    if name in {"algorithm", "algorithmic", "algorithm2e"}:
+        return "algorithm"
+    if name == "abstract":
+        return STANDARD_PARAGRAPH_NODE
+    return STANDARD_PARAGRAPH_NODE
+
+
+def normalize_display_math_for_texsoup(tex: str) -> str:
+    """Convert display-math delimiters that TexSoup exposes poorly into environments."""
+
+    tex = re.sub(
+        r"\\\[(.*?)\\\]",
+        lambda match: "\\begin{equation}" + match.group(1) + "\\end{equation}",
+        tex,
+        flags=re.DOTALL,
+    )
+    tex = re.sub(
+        r"\$\$(.*?)\$\$",
+        lambda match: "\\begin{equation}" + match.group(1) + "\\end{equation}",
+        tex,
+        flags=re.DOTALL,
+    )
+    return tex
+
+
 class _TexSoupPathBuilder:
     def __init__(self, config: AlignmentLabelerConfig) -> None:
         self.config = config
@@ -857,44 +976,74 @@ class _TexSoupPathBuilder:
         self.next_id = 1
         self.section_by_level: dict[int, str] = {}
         self.path_by_id: dict[str, tuple[str, ...]] = {"ROOT": ("ROOT",)}
+        self.parent_by_id: dict[str, str | None] = {"ROOT": None}
 
     def walk_soup(self, soup: Any) -> None:
-        self.walk_children(getattr(soup, "contents", []) or [], parent_id="ROOT")
+        contents = getattr(soup, "contents", []) or []
+        for child in contents:
+            if tex_node_name(child) == "document":
+                self.walk_children(getattr(child, "contents", []) or [], parent_id="ROOT", parent_env="document")
+                return
+        self.walk_children(contents, parent_id="ROOT", parent_env=None)
 
-    def walk_children(self, children: list[Any], *, parent_id: str) -> None:
+    def walk_children(self, children: list[Any], *, parent_id: str, parent_env: str | None = None) -> None:
         paragraph_buffer: list[str] = []
         for child in children:
             name = tex_node_name(child)
             if name in SKIP_TEX_NODE_NAMES:
                 continue
+            if name in POISON_TEX_ENV_NAMES:
+                raise LayoutBreakerException(f"Encountered complex drawing environment: {name}")
             if name in CONTAINER_ENV_NAMES:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id))
+                self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
                 continue
             if name in SECTION_LEVELS:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                node_id = self.add_node(name, tex_node_text(child), self.section_parent(name))
+                node_id = self.add_node(
+                    STANDARD_SECTION_NODE,
+                    tex_node_text(child),
+                    self.section_parent(name),
+                    source_name=name,
+                )
                 level = SECTION_LEVELS[name]
-                self.section_by_level = {key: value for key, value in self.section_by_level.items() if key < level}
-                self.section_by_level[level] = node_id
+                if node_id is not None:
+                    self.section_by_level = {key: value for key, value in self.section_by_level.items() if key < level}
+                    self.section_by_level[level] = node_id
                 continue
             if name in LIST_ENV_NAMES:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                env_id = self.add_node(name, name, self.current_parent(parent_id))
-                self.walk_children(getattr(child, "contents", []) or [], parent_id=env_id)
+                env_id = self.add_node(STANDARD_LIST_NODE, name, self.current_parent(parent_id), source_name=name)
+                if env_id is not None:
+                    self.walk_children(getattr(child, "contents", []) or [], parent_id=env_id, parent_env=name)
                 continue
             if name == "item":
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                self.add_node(name, tex_node_text(child), parent_id)
+                self.add_node(STANDARD_LIST_ITEM_NODE, tex_node_text(child), parent_id, source_name=name)
                 continue
             if name in MATH_ENV_NAMES:
-                paragraph_buffer.append(f" {tex_node_text(child)} ")
+                self.flush_paragraphs(paragraph_buffer, parent_id)
+                self.add_node(STANDARD_EQUATION_NODE, tex_node_text(child) or "[MATH]", self.current_parent(parent_id), source_name=name)
+                continue
+            if name == "caption":
+                self.flush_paragraphs(paragraph_buffer, parent_id)
+                caption_type = STANDARD_TABLE_CAPTION_NODE if parent_env in {"table", "table*"} else STANDARD_FIGURE_CAPTION_NODE
+                self.add_node(caption_type, tex_node_text(child), self.current_parent(parent_id), source_name=name)
+                continue
+            if name in {"figure", "figure*", "table", "table*"}:
+                self.flush_paragraphs(paragraph_buffer, parent_id)
+                self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
                 continue
             if name in BLOCK_ENV_NAMES:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
-                block_id = self.add_node(name, tex_node_text(child), self.current_parent(parent_id))
+                block_id = self.add_node(
+                    semantic_node_type_for_block(name),
+                    tex_node_text(child),
+                    self.current_parent(parent_id),
+                    source_name=name,
+                )
                 if block_id is None:
-                    self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id))
+                    self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
                 continue
             if name == "text":
                 paragraph_buffer.append(str(child))
@@ -904,19 +1053,32 @@ class _TexSoupPathBuilder:
                 if text:
                     paragraph_buffer.append(f" {text} ")
                 else:
-                    self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id))
+                    self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
         self.flush_paragraphs(paragraph_buffer, parent_id)
 
-    def add_node(self, node_type: str, text: str, parent_id: str) -> str | None:
-        clean = clean_text(text)
-        if len(clean) < self.config.min_clean_chars and clean != "math":
+    def add_node(self, node_type: str, text: str, parent_id: str, *, source_name: str | None = None) -> str | None:
+        clean = clean_equation_text(text) if node_type == STANDARD_EQUATION_NODE else clean_text(text)
+        if len(clean) < self.config.min_clean_chars and not (
+            clean == "math" or (node_type == STANDARD_EQUATION_NODE and bool(clean))
+        ):
             return None
         tex_id = f"T_{self.next_id:06d}"
         self.next_id += 1
         parent_path = self.path_by_id.get(parent_id, ("ROOT",))
         path = (*parent_path, tex_id)
         self.path_by_id[tex_id] = path
-        self.nodes.append(TexAlignmentNode(tex_id=tex_id, node_type=node_type, text=text.strip(), clean=clean, path_ids=path))
+        self.parent_by_id[tex_id] = None if parent_id == "ROOT" else parent_id
+        self.nodes.append(
+            TexAlignmentNode(
+                tex_id=tex_id,
+                node_type=node_type,
+                text=text.strip(),
+                clean=clean,
+                path_ids=path,
+                parent_id=None if parent_id == "ROOT" else parent_id,
+                source_name=source_name,
+            )
+        )
         return tex_id
 
     def flush_paragraphs(self, paragraph_buffer: list[str], parent_id: str) -> None:
@@ -926,7 +1088,7 @@ class _TexSoupPathBuilder:
         paragraph_buffer.clear()
         for paragraph in re.split(r"(?:\r?\n\s*){2,}", raw_text):
             if paragraph.strip():
-                self.add_node("text", paragraph, self.current_parent(parent_id))
+                self.add_node(STANDARD_PARAGRAPH_NODE, paragraph, self.current_parent(parent_id), source_name="text")
 
     def section_parent(self, name: str) -> str:
         level = SECTION_LEVELS[name]
@@ -951,6 +1113,17 @@ def clean_text(text: Any) -> str:
     value = value.lower()
     value = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?", " ", value)
     value = re.sub(r"\\.", " ", value)
+    value = re.sub(rf"[^0-9a-z\u4e00-\u9fff]+", "", value)
+    return value
+
+
+def clean_equation_text(text: Any) -> str:
+    """Normalize display equations while keeping command-only formulas alignable."""
+
+    value = expose_math_payload(str(text or ""))
+    value = re.sub(r"\\([a-zA-Z]+)\*?", r" \1 ", value)
+    value = re.sub(r"\\.", " ", value)
+    value = value.lower()
     value = re.sub(rf"[^0-9a-z\u4e00-\u9fff]+", "", value)
     return value
 
@@ -1051,6 +1224,17 @@ def tex_node_text(node: Any) -> str:
 def label_counts(labels: Any) -> dict[int, int]:
     values = labels.detach().cpu().tolist()
     return {label: values.count(label) for label in range(3)}
+
+
+def connected_node_indices(edge_index: Any, labels: Any) -> set[int]:
+    connected: set[int] = set()
+    label_values = labels.tolist()
+    for edge_pos, label in enumerate(label_values):
+        if int(label) not in {int(TexRelationLabel.MERGE), int(TexRelationLabel.PARENT_CHILD)}:
+            continue
+        connected.add(int(edge_index[0, edge_pos].item()))
+        connected.add(int(edge_index[1, edge_pos].item()))
+    return connected
 
 
 def levenshtein_ratio_score(source: str, target: str) -> float:

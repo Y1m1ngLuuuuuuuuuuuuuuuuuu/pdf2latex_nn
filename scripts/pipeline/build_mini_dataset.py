@@ -88,6 +88,8 @@ class MiniDatasetConfig:
     mineru_timeout: int
     similarity_threshold: float
     max_orphan_ratio: float
+    max_unmapped_tex_ratio: float
+    max_isolated_node_ratio: float
     min_non_none_edges: int
     reuse_existing: bool
     force_mineru: bool
@@ -135,7 +137,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mineru-command", default=default_mineru_command())
     parser.add_argument("--mineru-timeout", type=int, default=900)
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
-    parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
+    parser.add_argument("--max-orphan-ratio", type=float, default=0.15)
+    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
+    parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
     parser.add_argument("--min-non-none-edges", type=int, default=1)
     parser.add_argument("--no-reuse-existing", action="store_true")
     parser.add_argument("--force-mineru", action="store_true")
@@ -219,6 +223,8 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         mineru_timeout=int(args.mineru_timeout),
         similarity_threshold=float(args.similarity_threshold),
         max_orphan_ratio=float(args.max_orphan_ratio),
+        max_unmapped_tex_ratio=float(args.max_unmapped_tex_ratio),
+        max_isolated_node_ratio=float(args.max_isolated_node_ratio),
         min_non_none_edges=int(args.min_non_none_edges),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=bool(args.force_mineru),
@@ -423,6 +429,8 @@ def label_graph(
         config=AlignmentLabelerConfig(
             similarity_threshold=config.similarity_threshold,
             max_orphan_ratio=config.max_orphan_ratio,
+            max_unmapped_tex_ratio=config.max_unmapped_tex_ratio,
+            max_isolated_node_ratio=config.max_isolated_node_ratio,
             abort_on_bad_alignment=True,
             output_mapping_json=mapping_path,
         ),
