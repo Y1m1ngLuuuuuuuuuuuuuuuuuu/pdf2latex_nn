@@ -1,57 +1,49 @@
 # PDF2LaTeX NN
 
-**Last updated**: 2026-04-27  
-**Current focus**: research-paper PDF structure recovery for LaTeX/IR reconstruction.
+**Last updated**: 2026-05-07
 
-This project investigates a structure-aware PDF-to-LaTeX pipeline for born-digital research papers. The core target is not generic OCR. The target is to recover document structure: reading order, section hierarchy, formula/table/caption placement, and parent-child relations that can later drive LaTeX generation.
+This project builds a structure-aware PDF-to-LaTeX pipeline for born-digital research papers. The current target is not generic OCR. The target is to recover reading order, document hierarchy, formulas, lists, references, and graph relations that can drive LaTeX/IR reconstruction.
 
-## Current Position
-
-The main working direction is:
+## Current Pipeline
 
 ```text
-arXiv source + compiled PDF
-  -> SyncTeX / OCR / layout nodes
-  -> structural labels and block-level features
-  -> GNN parent/structure prediction
-  -> predicted IR
-  -> LaTeX reconstruction
+PDF + TeX source
+  -> MinerU extraction
+  -> v7 JSON cleanup and PyMuPDF style injection
+  -> SciBERT + geometry/style/sequence graph features
+  -> TeX/PDF automatic truth-label generation
+  -> GNN edge training and inference
+  -> decoder / renderer
+  -> generated LaTeX
 ```
 
-The project has moved past the earliest smoke-test stage. The current bottleneck is **block-level layout consolidation quality**, not raw model capacity. Recent debugging found that many bad visualizations came from upstream block boxes before GNN inference:
+The active PDF-side JSON contract is:
 
-- cross-column paragraph boxes,
-- empty paragraph shadow boxes,
-- section/header shadow fragments,
-- formula-adjacent fragmentation,
-- over-merged paragraph blocks.
+```text
+*_content_list_v7.json
+*_content_list_v7_styles.json
+```
 
-The latest code filters empty paragraph nodes, infers per-page column splits, tightens paragraph merging, and makes section merging content-aware. This improves the worst cross-column and empty-box failures, but formula/heading fragmentation still needs more work before full regeneration and retraining.
+v7 keeps MinerU block granularity and raw bbox coordinates. It adds only the metadata needed for robust downstream modeling: list marker recognition, column reading-order repair, reference item preservation, and PyMuPDF style spans. Cross-page or cross-paragraph merging is no longer written back into preprocessing JSON; it belongs to decoder/generator logic.
 
-## Code Size
+## Current Graph Target
 
-Maintained project code, excluding `data/`, logs, reports, backups, archives, model caches, and generated artifacts:
+The GNN edge task is a three-class problem:
 
-| Scope | Files | Lines | Size |
-|---|---:|---:|---:|
-| `source_code/` + `scripts/` + root configs/scripts | 63 | 19,215 | 647.1 KiB |
-| Python only | 44 | 17,298 | 593.7 KiB |
-| Shell scripts | 11 | 1,190 | 39.6 KiB |
-| YAML configs | 5 | 579 | 10.7 KiB |
+```text
+MERGE = 0
+PARENT_CHILD = 1
+NONE = 2
+```
 
-The whole local workspace is about `1.8G`, mostly because it contains data, backups, logs, reports, and experiment artifacts.
+`SIBLING` has been removed. Sibling ordering is handled by reading order and renderer sorting.
 
-## Active Documents
+## Key Documents
 
-- [docs/PROJECT_STATUS_REPORT.md](docs/PROJECT_STATUS_REPORT.md): current local/remote state and known blockers.
-- [docs/NEXT_STEPS_PLAN.md](docs/NEXT_STEPS_PLAN.md): recommended execution order from here.
-- [docs/BLOCK_CONSOLIDATION.md](docs/BLOCK_CONSOLIDATION.md): current block consolidation diagnosis and fixes.
-- [docs/PAPER_SCOPE_2026_04_26.md](docs/PAPER_SCOPE_2026_04_26.md): paper scope and research framing.
-- [docs/IR_SCHEMA.md](docs/IR_SCHEMA.md): IR schema reference.
-- [docs/DATASET_DOCUMENTATION.md](docs/DATASET_DOCUMENTATION.md): dataset and supervision format notes.
-- [docs/PROJECT_LAYOUT.md](docs/PROJECT_LAYOUT.md): repository layout.
-
-Historical and server-cache material is left under `archive/` and `server_cache_backup/` for provenance, but it is no longer treated as current guidance.
+- [docs/PROJECT_SOURCE_OF_TRUTH.md](docs/PROJECT_SOURCE_OF_TRUTH.md): local / GitHub / AutoDL boundary and source-of-truth rules.
+- [docs/feature_schema_v0.md](docs/feature_schema_v0.md): PDF IR, node features, edge features, and tensor dimensions.
+- [docs/ground_truth_labeling_v0.md](docs/ground_truth_labeling_v0.md): TeX AST parsing, fuzzy alignment, label rules, and strict quality gates.
+- [docs/LOCAL_CONFIGURATION.md](docs/LOCAL_CONFIGURATION.md): local private configuration notes.
 
 ## Important Paths
 
@@ -61,7 +53,7 @@ Local project root:
 /Users/lu/Code/Project/pdf2latex_nn/test_4_19
 ```
 
-Remote AutoDL project root:
+AutoDL project root:
 
 ```text
 /root/autodl-tmp/pdf2latex_nn
@@ -70,20 +62,74 @@ Remote AutoDL project root:
 Main source directories:
 
 ```text
-source_code/     core pipeline and model code
-scripts/         operational and QA scripts
-docs/            current maintained documentation
-data/            generated/runtime data
-logs*/           generated logs
-reports*/        generated qualitative reports
+src/
+scripts/pipeline/
+tools/
+tests/
+docs/
 ```
 
-## Current Recommendation
+Runtime data directories:
 
-Do not retrain yet. First finish block-level QA:
+```text
+data/01_raw_pdfs/
+data/02_mineru_outputs/
+data/03_tex_source_pool/
+data/04_ground_truth_ir/
+data/06_graph_features/
+data/08_output_latex/
+data/09_eval_reports/
+```
 
-1. Fix formula-adjacent fragmentation and header shadow-node issues.
-2. Re-run a 50-sample block consolidation QA batch.
-3. Inspect worst-case overlays, not only aggregate metrics.
-4. Only after the overlays are acceptable, regenerate all 947 enhanced block samples.
-5. Then retrain the block-level GNN on the regenerated features.
+Bulk PDFs, MinerU outputs, graph caches, model checkpoints, and generated reports stay out of Git.
+
+## Common Commands
+
+Run the full test suite on AutoDL:
+
+```bash
+cd /root/autodl-tmp/pdf2latex_nn
+/root/miniconda3/envs/pdf2latex/bin/python -m pytest tests -q
+```
+
+Label one graph with TeX-derived truth:
+
+```bash
+python scripts/pipeline/step3_label_graph.py \
+  --content-json data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json \
+  --tex data/03_tex_source_pool/2501.00050/aaai25.tex \
+  --graph data/06_graph_features_oracle/2501.00050_v7_oracle_graph.pt \
+  --output data/06_graph_features_oracle/2501.00050_v7_truthgen_labeled_graph.pt \
+  --mapping-output data/06_graph_features_oracle/2501.00050_v7_truthgen_mapping.json \
+  --similarity-threshold 65
+```
+
+Build a strict 10-document mini dataset:
+
+```bash
+python scripts/pipeline/build_mini_dataset.py \
+  --target 10 \
+  --similarity-threshold 65 \
+  --max-orphan-ratio 0.15 \
+  --max-unmapped-tex-ratio 0.30 \
+  --max-isolated-node-ratio 0.85
+```
+
+## Current Status
+
+The source pipeline is synced through GitHub to AutoDL. The latest validated state includes:
+
+```text
+v7 JSON input contract
+818-dimensional node features
+15-dimensional edge attributes
+3-class graph labels
+TexSoup-based automatic truth labeler
+strict bad-sample rejection gates
+```
+
+Last AutoDL verification:
+
+```text
+142 passed
+```

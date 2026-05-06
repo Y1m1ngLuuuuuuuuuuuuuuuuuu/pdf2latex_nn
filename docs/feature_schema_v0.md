@@ -279,6 +279,22 @@ inline_code_char_ratio = inline_code_chars / styled_chars
 Data(x, edge_index, edge_attr)
 ```
 
+监督标注后，`Data` 会额外带上三分类边标签：
+
+```python
+Data(x, edge_index, edge_attr, y)
+```
+
+标签契约固定为：
+
+```text
+MERGE = 0
+PARENT_CHILD = 1
+NONE = 2
+```
+
+真值生成器契约见 `docs/ground_truth_labeling_v0.md`。`SIBLING` 不再作为训练类别；同级顺序依赖 v7 reading order 和 generator 渲染排序。
+
 `edge_attr` 是候选边的 directed relation feature。建图使用双重视角邻居采样：
 
 ```text

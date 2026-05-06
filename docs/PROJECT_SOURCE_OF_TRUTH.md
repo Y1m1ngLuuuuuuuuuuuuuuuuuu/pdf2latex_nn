@@ -1,6 +1,6 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-04-29
+**Last updated**: 2026-05-07
 
 This project should be managed as a source repository plus external runtime artifacts. The source repository is for code and reproducibility metadata. AutoDL is for data, feature caches, training, and generated outputs.
 
@@ -49,13 +49,22 @@ docs/
 data/00_manifests/
 data/01_raw_pdfs/
 data/02_mineru_outputs/
-data/03_tex_sources/
+data/03_tex_source_pool/
 data/04_ground_truth_ir/
 data/05_observed_ir/
 data/06_graph_features/
 data/07_predicted_ir/
 data/08_output_latex/
 data/09_eval_reports/
+```
+
+Current maintained docs:
+
+```text
+docs/PROJECT_SOURCE_OF_TRUTH.md      repository / AutoDL boundary
+docs/feature_schema_v0.md            PDF IR and tensor feature contract
+docs/ground_truth_labeling_v0.md     TeX-to-PDF alignment and GNN label contract
+docs/LOCAL_CONFIGURATION.md          local private configuration notes
 ```
 
 Legacy reference material is stored outside the active skeleton:
@@ -114,8 +123,10 @@ Commit:
 ```text
 README.md
 目标.md
-source_code/
+src/
 scripts/
+tools/
+tests/
 docs/
 requirements.txt
 requirements_server.txt
@@ -167,6 +178,35 @@ output root
 ```
 
 The manifest can be committed. The bulk data should stay on AutoDL or external storage.
+
+## Current Pipeline Contracts
+
+The current PDF-side production JSON format is:
+
+```text
+*_content_list_v7.json
+*_content_list_v7_styles.json
+```
+
+v7 keeps MinerU block granularity and raw bbox coordinates. It only adds list-marker metadata, column-reading-order repair, reference item preservation, and PyMuPDF style spans. Cross-paragraph and cross-page text merging should happen in decoder/generator logic, not in the v7 preprocessing JSON.
+
+The current graph supervision target is a three-class edge label:
+
+```text
+MERGE = 0
+PARENT_CHILD = 1
+NONE = 2
+```
+
+`SIBLING` is intentionally removed. Sibling order is recovered from v7 reading order and renderer sorting, not from GNN labels.
+
+The current automatic truth-labeling contract is documented in:
+
+```text
+docs/ground_truth_labeling_v0.md
+```
+
+Batch labeling must use strict quality gates for training data. Samples with high PDF orphan ratio, high unmapped TeX ratio, missing core section structure, or excessive isolated nodes should be skipped rather than saved as dirty `.pt` files.
 
 ## Current Cleanup Decision
 
