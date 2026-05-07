@@ -33,6 +33,7 @@ from src.perception.style_spans import StyleConfig, enrich_content_with_styles  
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig, AlignmentQualityError  # noqa: E402
+from tools.profile_candidate_edge_recall import profile_candidate_recall  # noqa: E402
 
 
 def default_mineru_command() -> str:
@@ -59,9 +60,11 @@ class ProcessedSample:
     alignment_mapping: Path
     label_counts: dict[int, int]
     orphan_ratio: float
+    candidate_edge_recall: float | None = None
+    candidate_edge_missing: int | None = None
 
     def manifest_record(self) -> dict[str, Any]:
-        return {
+        payload = {
             "document_id": self.document_id,
             "pdf_path": str(self.pdf_path.resolve()),
             "content_json": str(self.content_json.resolve()),
@@ -71,6 +74,11 @@ class ProcessedSample:
             "label_counts": {str(key): int(value) for key, value in self.label_counts.items()},
             "orphan_ratio": self.orphan_ratio,
         }
+        if self.candidate_edge_recall is not None:
+            payload["candidate_edge_recall"] = float(self.candidate_edge_recall)
+        if self.candidate_edge_missing is not None:
+            payload["candidate_edge_missing"] = int(self.candidate_edge_missing)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -94,6 +102,7 @@ class MiniDatasetConfig:
     max_unmapped_tex_ratio: float
     max_isolated_node_ratio: float
     min_non_none_edges: int
+    min_candidate_recall: float
     reuse_existing: bool
     force_mineru: bool
     force_json: bool
@@ -144,6 +153,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
     parser.add_argument("--min-non-none-edges", type=int, default=1)
+    parser.add_argument(
+        "--min-candidate-recall",
+        type=float,
+        default=1.0,
+        help="Required oracle positive-edge recall in graph.edge_index. Default demands zero missing true edges.",
+    )
     parser.add_argument("--no-reuse-existing", action="store_true")
     parser.add_argument("--force-mineru", action="store_true")
     parser.add_argument("--force-json", action="store_true")
@@ -229,6 +244,7 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         max_unmapped_tex_ratio=float(args.max_unmapped_tex_ratio),
         max_isolated_node_ratio=float(args.max_isolated_node_ratio),
         min_non_none_edges=int(args.min_non_none_edges),
+        min_candidate_recall=float(args.min_candidate_recall),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=bool(args.force_mineru),
         force_json=bool(args.force_json),
@@ -286,10 +302,16 @@ def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> 
 
     content_json = ensure_content_v7_styles(candidate, paths, config)
     graph_path = ensure_graph(content_json, paths["unlabeled_graph"], config)
-    label_graph(candidate, content_json, graph_path, paths["labeled_graph"], paths["mapping"], config)
+    labeled_graph, labeler = label_graph(candidate, content_json, graph_path, paths["labeled_graph"], paths["mapping"], config)
+    recall_report = assert_candidate_edge_recall(
+        labeled_graph,
+        labeler,
+        config,
+        output_graph_path=paths["labeled_graph"],
+    )
     if not graph_is_valid_labeled(paths["labeled_graph"], config):
         raise RuntimeError(f"labeled graph failed validation: {paths['labeled_graph']}")
-    return summarize_processed_sample(candidate, paths)
+    return summarize_processed_sample(candidate, paths, recall_report=recall_report)
 
 
 def sample_paths(candidate: CandidateSample, config: MiniDatasetConfig) -> dict[str, Path]:
@@ -516,7 +538,7 @@ def label_graph(
     output_graph_path: Path,
     mapping_path: Path,
     config: MiniDatasetConfig,
-) -> None:
+) -> tuple[Any, AlignmentLabeler]:
     labeler = AlignmentLabeler(
         content_json_path=content_json,
         tex_path=candidate.main_tex_path,
@@ -530,7 +552,31 @@ def label_graph(
             output_mapping_json=mapping_path,
         ),
     )
-    labeler.run(output_graph_path=output_graph_path, overwrite=False)
+    graph = labeler.run(output_graph_path=output_graph_path, overwrite=False)
+    return graph, labeler
+
+
+def assert_candidate_edge_recall(
+    graph: Any,
+    labeler: AlignmentLabeler,
+    config: MiniDatasetConfig,
+    *,
+    output_graph_path: Path,
+) -> dict[str, Any]:
+    report = profile_candidate_recall(graph, labeler, max_examples=5)
+    recall = float(report["overall"]["recall"])
+    if recall < config.min_candidate_recall:
+        missing = int(report["overall"]["missing_edges"])
+        raise RuntimeError(
+            "candidate edge recall below threshold: "
+            f"recall={recall:.2%} < {config.min_candidate_recall:.2%}; missing={missing}"
+        )
+    graph.candidate_edge_recall = recall
+    graph.candidate_edge_recall_report = report
+    import torch
+
+    torch.save(graph, output_graph_path)
+    return report
 
 
 def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
@@ -548,12 +594,21 @@ def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
         labels = torch.where(graph.y.detach().cpu().long() >= 2, torch.full_like(graph.y.detach().cpu().long(), 2), graph.y.detach().cpu().long())
         counts = torch.bincount(labels, minlength=3).tolist()
         non_none = int(sum(counts[:2]))
+        if config.min_candidate_recall > 0:
+            recall = getattr(graph, "candidate_edge_recall", None)
+            if recall is None or float(recall) < config.min_candidate_recall:
+                return False
         return non_none >= config.min_non_none_edges
     except Exception:
         return False
 
 
-def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path]) -> ProcessedSample:
+def summarize_processed_sample(
+    candidate: CandidateSample,
+    paths: dict[str, Path],
+    *,
+    recall_report: dict[str, Any] | None = None,
+) -> ProcessedSample:
     import torch
 
     graph = torch.load(paths["labeled_graph"], map_location="cpu", weights_only=False)
@@ -570,6 +625,16 @@ def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path
         alignment_mapping=paths["mapping"],
         label_counts={idx: int(counts[idx]) for idx in range(3)},
         orphan_ratio=orphan_ratio,
+        candidate_edge_recall=(
+            float(recall_report["overall"]["recall"]) if recall_report is not None else getattr(graph, "candidate_edge_recall", None)
+        ),
+        candidate_edge_missing=(
+            int(recall_report["overall"]["missing_edges"])
+            if recall_report is not None
+            else int(graph.candidate_edge_recall_report["overall"]["missing_edges"])
+            if hasattr(graph, "candidate_edge_recall_report")
+            else None
+        ),
     )
 
 
