@@ -53,6 +53,7 @@ python -u scripts/pipeline/build_v7_dataset_staged.py \
   --manifest-output data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS.json \
   --error-log data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS_errors.jsonl \
   --mineru-batch-size 64 \
+  --preflight-workers 4 \
   --process-workers 2 \
   --max-orphan-ratio 0.30 \
   --max-unmapped-tex-ratio 0.60 \

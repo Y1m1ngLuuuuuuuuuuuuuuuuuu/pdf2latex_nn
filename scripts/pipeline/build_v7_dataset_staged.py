@@ -43,7 +43,6 @@ from scripts.pipeline.build_mini_dataset import (  # noqa: E402
     graph_is_valid_labeled,
     log_processing_error,
     process_candidate,
-    progress_iter,
     run_command_with_process_group_timeout,
     sample_paths,
     scan_candidates,
@@ -66,6 +65,8 @@ class StagedConfig:
     mineru_batch_timeout: int
     mineru_batch_command: str
     mineru_fallback_single: bool
+    preflight_workers: int
+    preflight_backlog: int
     process_workers: int
     process_backlog: int
     preflight_tex: bool
@@ -144,6 +145,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mineru-batch-size", type=int, default=64)
     parser.add_argument("--mineru-batch-timeout", type=int, default=7200)
     parser.add_argument("--no-mineru-fallback-single", action="store_true")
+    parser.add_argument("--preflight-workers", type=int, default=4)
+    parser.add_argument("--preflight-backlog", type=int, default=32)
     parser.add_argument("--process-workers", type=int, default=2)
     parser.add_argument("--process-backlog", type=int, default=8)
     parser.add_argument("--max-preflight-fail-ratio", type=float, default=0.60)
@@ -229,6 +232,8 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         mineru_batch_timeout=max(1, int(args.mineru_batch_timeout)),
         mineru_batch_command=str(args.mineru_batch_command),
         mineru_fallback_single=not bool(args.no_mineru_fallback_single),
+        preflight_workers=max(1, int(args.preflight_workers)),
+        preflight_backlog=max(1, int(args.preflight_backlog)),
         process_workers=max(1, int(args.process_workers)),
         process_backlog=max(1, int(args.process_backlog)),
         preflight_tex=not bool(args.skip_preflight),
@@ -263,6 +268,7 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
                 "existing_valid_labeled_graphs": labeled_existing,
                 "mineru_missing": len(candidates) - mineru_existing,
                 "process_workers": config.process_workers,
+                "preflight_workers": config.preflight_workers,
                 "mineru_batch_size": config.mineru_batch_size,
             },
             ensure_ascii=False,
@@ -283,13 +289,33 @@ def run_preflight_stage(candidates: list[CandidateSample], config: StagedConfig)
     stage_log.parent.mkdir(parents=True, exist_ok=True)
     if stage_log.exists():
         stage_log.unlink()
-    for candidate in progress_iter(candidates):
-        result = preflight_tex(candidate, config)
-        if result.ok:
-            ok.append(candidate)
-        else:
-            failed += 1
-            append_jsonl(stage_log, preflight_result_payload(result))
+    print(
+        f"[staged] preflight pending={len(candidates)} workers={config.preflight_workers}",
+        flush=True,
+    )
+    with ProcessPoolExecutor(max_workers=config.preflight_workers) as executor:
+        futures: set[Future[PreflightResult]] = set()
+        cursor = 0
+        while cursor < len(candidates) or futures:
+            while cursor < len(candidates) and len(futures) < config.preflight_backlog:
+                candidate = candidates[cursor]
+                cursor += 1
+                futures.add(executor.submit(preflight_tex_worker, candidate, config.mini))
+            done, futures = wait(futures, timeout=2.0, return_when=FIRST_COMPLETED)
+            for future in done:
+                result = future.result()
+                if result.ok:
+                    ok.append(result.candidate)
+                else:
+                    failed += 1
+                    append_jsonl(stage_log, preflight_result_payload(result))
+                total_done = len(ok) + failed
+                if total_done == 1 or total_done % 50 == 0 or total_done == len(candidates):
+                    print(
+                        f"[staged] preflight progress={total_done}/{len(candidates)} "
+                        f"ok={len(ok)} failed={failed}",
+                        flush=True,
+                    )
     fail_ratio = failed / max(1, len(candidates))
     print(f"[staged] preflight ok={len(ok)} failed={failed} fail_ratio={fail_ratio:.2%}", flush=True)
     if fail_ratio > config.max_preflight_fail_ratio:
@@ -299,17 +325,17 @@ def run_preflight_stage(candidates: list[CandidateSample], config: StagedConfig)
     return ok
 
 
-def preflight_tex(candidate: CandidateSample, config: StagedConfig) -> PreflightResult:
+def preflight_tex_worker(candidate: CandidateSample, config: MiniDatasetConfig) -> PreflightResult:
     try:
         labeler = AlignmentLabeler(
             content_json_path=Path("__preflight_content__.json"),
             tex_path=candidate.main_tex_path,
             graph_path=Path("__preflight_graph__.pt"),
             config=AlignmentLabelerConfig(
-                similarity_threshold=config.mini.similarity_threshold,
-                max_orphan_ratio=config.mini.max_orphan_ratio,
-                max_unmapped_tex_ratio=config.mini.max_unmapped_tex_ratio,
-                max_isolated_node_ratio=config.mini.max_isolated_node_ratio,
+                similarity_threshold=config.similarity_threshold,
+                max_orphan_ratio=config.max_orphan_ratio,
+                max_unmapped_tex_ratio=config.max_unmapped_tex_ratio,
+                max_isolated_node_ratio=config.max_isolated_node_ratio,
                 min_section_nodes=1,
                 abort_on_bad_alignment=False,
             ),
