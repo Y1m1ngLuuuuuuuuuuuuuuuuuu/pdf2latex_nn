@@ -214,8 +214,8 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
     )
     data = Data(
         x=torch.zeros((6, 4), dtype=torch.float32),
-        edge_index=torch.tensor([[0, 1, 3, 5], [1, 2, 4, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((4, 15), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1, 1, 3, 5], [1, 2, 0, 4, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((5, 15), dtype=torch.float32),
     )
     torch.save(data, graph_path)
 
@@ -232,8 +232,9 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
         int(TexRelationLabel.MERGE),
         int(TexRelationLabel.NONE),
         int(TexRelationLabel.NONE),
+        int(TexRelationLabel.NONE),
     ]
-    assert graph.label_counts == {0: 1, 1: 1, 2: 2}
+    assert graph.label_counts == {0: 1, 1: 1, 2: 3}
     assert mapping_path.exists()
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert all({"node_type", "clean_text", "parent_id"} <= set(node) for node in mapping["tex_nodes"])

@@ -20,7 +20,7 @@ from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relat
 class LabelGeneratorConfig:
     similarity_threshold: float = 0.55
     adjacent_siblings_only: bool = True
-    directed_parent_child: bool = False
+    directed_parent_child: bool = True
     orphan_label: int = int(TexRelationLabel.NONE)
     max_orphan_ratio: float = 0.15
     min_aligned_nodes: int = 1

@@ -192,6 +192,8 @@ text + equation/table/figure/algorithm -> NONE
 parent_tex_id -> child_tex_id
 ```
 
+`PARENT_CHILD` 是严格有向标签。若 `A -> B` 是 `PARENT_CHILD=1`，反向 `B -> A` 必须是 `NONE=2`；双向候选边只用于给模型看见两个方向的有向特征，不代表标签对称。
+
 只在父节点映射的第一个 PDF bbox 与子节点映射的第一个 PDF bbox 之间打 `PARENT_CHILD=1`，避免一个逻辑父节点对所有碎片重复连边。
 
 ### NONE

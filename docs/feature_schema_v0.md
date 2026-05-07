@@ -295,6 +295,8 @@ PARENT_CHILD = 1
 NONE = 2
 ```
 
+`PARENT_CHILD` 是有向标签，只有 `parent -> child` 为 `1`；反向 `child -> parent` 必须是 `NONE=2`。`MERGE` 可以在双向候选边上同为 `0`。
+
 真值生成器契约见 `docs/ground_truth_labeling_v0.md`。`SIBLING` 不再作为训练类别；同级顺序依赖 v7 reading order 和 generator 渲染排序。
 
 `edge_attr` 是候选边的 directed relation feature。建图使用高召回 Dual-View 采样：

@@ -102,7 +102,7 @@ def test_document_dataset_filters_empty_edge_and_all_orphan_graphs(tmp_path):
     assert sample.document_id == "valid"
     assert sample.x.dtype == torch.float32
     assert sample.edge_attr.dtype == torch.float32
-    assert sample.y.tolist() == [1, 1]
+    assert sample.y.tolist() == [1, 2]
     skipped = (tmp_path / "dataset" / "processed" / "skipped_records.jsonl").read_text(encoding="utf-8")
     assert "empty edge graph" in skipped
     assert "all-orphan graph" in skipped

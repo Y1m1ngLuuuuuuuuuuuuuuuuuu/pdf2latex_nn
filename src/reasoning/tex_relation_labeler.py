@@ -21,7 +21,7 @@ def label_tex_relation(
     ast_nodes: dict[str, dict[str, Any]] | list[dict[str, Any]] | dict[str, Any],
     *,
     adjacent_siblings_only: bool = True,
-    directed_parent_child: bool = False,
+    directed_parent_child: bool = True,
 ) -> TexRelationLabel:
     """Return Merge/Parent-Child/None using path-encoded TeX nodes.
 
@@ -62,7 +62,7 @@ def label_pdf_edge(
     ast_nodes: dict[str, dict[str, Any]] | list[dict[str, Any]] | dict[str, Any],
     *,
     adjacent_siblings_only: bool = True,
-    directed_parent_child: bool = False,
+    directed_parent_child: bool = True,
 ) -> TexRelationLabel:
     return label_tex_relation(
         pdf_to_tex.get(source_pdf_id),
@@ -79,7 +79,7 @@ def label_pdf_edges(
     ast_nodes: dict[str, dict[str, Any]] | list[dict[str, Any]] | dict[str, Any],
     *,
     adjacent_siblings_only: bool = True,
-    directed_parent_child: bool = False,
+    directed_parent_child: bool = True,
 ) -> list[int]:
     return [
         int(

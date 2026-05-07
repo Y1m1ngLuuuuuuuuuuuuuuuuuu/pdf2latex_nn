@@ -54,10 +54,22 @@ def test_label_tex_relation_uses_path_encoding():
 
     assert label_tex_relation(items[0]["tex_id"], items[0]["tex_id"], nodes) == TexRelationLabel.MERGE
     assert label_tex_relation(itemize["tex_id"], items[0]["tex_id"], nodes) == TexRelationLabel.PARENT_CHILD
-    assert label_tex_relation(items[0]["tex_id"], itemize["tex_id"], nodes) == TexRelationLabel.PARENT_CHILD
+    assert label_tex_relation(items[0]["tex_id"], itemize["tex_id"], nodes) == TexRelationLabel.NONE
     assert label_tex_relation(items[0]["tex_id"], items[1]["tex_id"], nodes) == TexRelationLabel.NONE
     assert label_tex_relation(items[0]["tex_id"], items[2]["tex_id"], nodes) == TexRelationLabel.NONE
     assert label_tex_relation(method["tex_id"], results["tex_id"], nodes) == TexRelationLabel.NONE
+
+
+def test_label_tex_relation_can_opt_into_legacy_undirected_parent_child():
+    payload = build_tex_ast(SAMPLE_TEX)
+    nodes = tex_nodes_by_id(payload)
+    itemize = node_by_text(nodes, "itemize")
+    items = nodes_by_type(nodes, "item")
+
+    assert (
+        label_tex_relation(items[0]["tex_id"], itemize["tex_id"], nodes, directed_parent_child=False)
+        == TexRelationLabel.PARENT_CHILD
+    )
 
 
 def test_label_tex_relation_treats_distant_siblings_as_none_even_when_requested():

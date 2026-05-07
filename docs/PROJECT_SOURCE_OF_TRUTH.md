@@ -209,6 +209,7 @@ NONE = 2
 ```
 
 `SIBLING` is intentionally removed. Sibling order is recovered from v7 reading order and renderer sorting, not from GNN labels.
+`PARENT_CHILD` is strictly directed: `parent -> child` is label `1`, while `child -> parent` is label `2` (`NONE`) even when bidirectional candidate edges exist.
 
 Candidate edge construction is recall-first. The default graph builder uses:
 
