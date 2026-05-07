@@ -21,6 +21,27 @@ The watcher reads:
 It reports success count, skip count, skip error types, pass rate, projected
 success count, and rough ETA. It is read-only.
 
+## Source Pool Backfill
+
+`build_mini_dataset.py` scans `data/03_tex_source_pool` for TeX sources. If
+compiled and PDF-matched sources exist in `data/03_tex_sources` but are missing
+from the pool, backfill them without overwriting existing pool entries:
+
+```bash
+python tools/sync_compiled_sources_to_pool.py \
+  --raw-pdf-dir data/01_raw_pdfs \
+  --compiled-source-dir data/03_tex_sources \
+  --source-pool-dir data/03_tex_source_pool \
+  --report-json data/09_eval_reports/source_pool_sync_YYYYMMDD_HHMMSS.json
+```
+
+The default copy mode is `hardlink`, so files appear in the pool without
+duplicating storage when both directories are on the same filesystem. The tool
+writes each document through a temporary directory and then renames it into
+place, so interrupted runs do not leave half-synced samples. A running batch
+builder will not see newly added samples because its candidate list is created
+at startup; use the expanded pool for the next or supplement run.
+
 ## Full GNN Training
 
 After the batch manifest is written, start full training from the generated
