@@ -42,6 +42,40 @@ place, so interrupted runs do not leave half-synced samples. A running batch
 builder will not see newly added samples because its candidate list is created
 at startup; use the expanded pool for the next or supplement run.
 
+## Staged Dataset Builder
+
+For large runs, prefer the staged builder over the original single-document
+loop:
+
+```bash
+python -u scripts/pipeline/build_v7_dataset_staged.py \
+  --target 1000 \
+  --manifest-output data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS.json \
+  --error-log data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS_errors.jsonl \
+  --mineru-batch-size 64 \
+  --process-workers 2 \
+  --max-orphan-ratio 0.30 \
+  --max-unmapped-tex-ratio 0.60 \
+  --max-isolated-node-ratio 0.90 \
+  --min-candidate-recall 1.0
+```
+
+The staged builder keeps the final graph, label, manifest, and recall contracts
+from `build_mini_dataset.py`, but changes scheduling for throughput:
+
+- TeX preflight rejects obvious parser-breaking sources before MinerU work.
+- MinerU receives directories of staged PDFs, amortizing service/model startup
+  over many documents.
+- Existing MinerU/v7/graph/label artifacts are reused unless a force flag is
+  supplied.
+- Graph building and label quality gates run through a bounded worker pool.
+
+Use `--dry-run` first to inspect candidate counts, already cached MinerU
+outputs, and existing valid labeled graphs. If another script is currently
+writing to the same MinerU output directory, do not start the staged MinerU
+stage at the same time; use `--skip-mineru-stage` to process only already cached
+outputs.
+
 ## Full GNN Training
 
 After the batch manifest is written, start full training from the generated
