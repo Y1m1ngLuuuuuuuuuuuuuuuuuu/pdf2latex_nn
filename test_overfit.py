@@ -72,7 +72,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-hidden-dim", type=int, default=64)
     parser.add_argument("--layout-hidden-dim", type=int, default=32)
     parser.add_argument("--loss", choices=["cross_entropy", "focal"], default="cross_entropy")
-    parser.add_argument("--class-weights", choices=["inverse", "default", "none"], default="inverse")
+    parser.add_argument(
+        "--class-weights",
+        choices=["inverse", "default", "none"],
+        default="none",
+        help=(
+            "Class weighting strategy. The overfit sanity check defaults to no "
+            "weights so it verifies memorization rather than long-tail tuning."
+        ),
+    )
     parser.add_argument("--gamma", type=float, default=2.0, help="Focal loss gamma")
     parser.add_argument("--loss-threshold", type=float, default=0.05)
     parser.add_argument("--f1-threshold", type=float, default=0.99)
@@ -232,7 +240,7 @@ def build_overfit_loss(args: argparse.Namespace, labels: Any, *, device: Any, to
     if args.class_weights == "inverse":
         weights = compute_inverse_frequency_weights(labels.detach().cpu()).to(device)
     elif args.class_weights == "default":
-        weights = torch.tensor([4.0, 5.0, 1.5, 1.0], dtype=torch.float32, device=device)
+        weights = torch.tensor([4.0, 5.0, 1.0], dtype=torch.float32, device=device)
     else:
         weights = None
     if args.loss == "focal":
