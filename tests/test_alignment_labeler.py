@@ -483,6 +483,164 @@ def test_alignment_labeler_refuses_merge_across_intermediate_list_marker(tmp_pat
     assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
 
 
+def test_alignment_labeler_exempts_expected_page_noise_from_orphan_ratio(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "bbox": [100, 100, 300, 120]},
+                    {"type": "paragraph", "text_for_embedding": "Body paragraph.", "bbox": [100, 140, 500, 180]},
+                    {"type": "page_number", "text_for_embedding": "2", "bbox": [490, 982, 510, 995]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        Body paragraph.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=True,
+            max_orphan_ratio=0.0,
+            max_isolated_node_ratio=0.0,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.PARENT_CHILD)]
+    assert graph.alignment_quality["raw_orphan_count"] == 1
+    assert graph.alignment_quality["orphan_count"] == 0
+    assert graph.alignment_quality["expected_visual_orphan_exempt_count"] == 1
+
+
+def test_alignment_labeler_treats_matched_pre_section_text_as_document_root_scoped(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "Abstract. This paper introduces a small method.",
+                        "bbox": [100, 120, 500, 170],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text("Abstract. This paper introduces a small method.", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((1, 4), dtype=torch.float32),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.zeros((0, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=True,
+            max_orphan_ratio=0.0,
+            max_isolated_node_ratio=0.0,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == []
+    assert graph.pdf_to_tex[0] is not None
+    assert graph.alignment_quality["document_root_scoped_count"] == 1
+    assert graph.alignment_quality["isolated_node_count"] == 0
+
+
+def test_alignment_labeler_global_caption_fallback_recovers_missed_float_caption(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "bbox": [100, 100, 300, 120]},
+                    {"type": "paragraph", "text_for_embedding": "Body paragraph.", "bbox": [100, 140, 500, 180]},
+                    {"type": "paragraph", "text_for_embedding": "Figure 1: GPU kernel timeline.", "bbox": [120, 500, 480, 525]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        Body paragraph.
+        \begin{figure}
+        \caption{Figure 1: GPU kernel timeline.}
+        \end{figure}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 0], [1, 2]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            similarity_threshold=101.0,
+            max_orphan_ratio=1.0,
+            max_window_nodes=1,
+            caption_fallback_threshold=80.0,
+        ),
+    ).run()
+
+    caption_tex_id = graph.pdf_to_tex[2]
+    assert caption_tex_id is not None
+    assert graph.pdf_to_tex_scores[2] >= 80.0
+
+
 def test_alignment_labeler_merges_reference_list_blocks_even_when_fuzzy_alignment_misses(tmp_path):
     if not has_alignment_deps():
         return

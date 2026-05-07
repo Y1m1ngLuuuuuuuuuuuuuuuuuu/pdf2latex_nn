@@ -54,7 +54,16 @@ def main() -> None:
     print(f"saved_graph={args.output or args.graph}")
     print(f"num_nodes={int(graph.num_nodes)} num_edges={int(graph.edge_index.shape[1])}")
     print(f"label_counts={{0: {counts[0]}, 1: {counts[1]}, 2: {counts[2]}}}")
-    print(f"orphan_count={orphan_count} orphan_ratio={orphan_ratio:.2%}")
+    quality = getattr(labeler, "alignment_quality", {}) or {}
+    effective_orphan_count = int(quality.get("orphan_count", orphan_count))
+    effective_orphan_ratio = float(quality.get("orphan_ratio", orphan_ratio))
+    exempt_count = int(quality.get("expected_visual_orphan_exempt_count", 0))
+    root_scoped_count = int(quality.get("document_root_scoped_count", 0))
+    print(
+        f"orphan_count={effective_orphan_count} orphan_ratio={effective_orphan_ratio:.2%} "
+        f"raw_orphan_count={orphan_count} raw_orphan_ratio={orphan_ratio:.2%}"
+    )
+    print(f"expected_visual_orphan_exempt_count={exempt_count} document_root_scoped_count={root_scoped_count}")
 
 
 if __name__ == "__main__":

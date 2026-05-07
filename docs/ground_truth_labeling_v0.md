@@ -130,6 +130,7 @@ display equation 使用专门的 `clean_equation_text()`。它会保留 `\alpha`
 | `tex_lookahead_nodes` | `4` | TeX 侧错位时向前查找多少节点 |
 | `tail_absorption_nodes` | `3` | 长段落尾部碎片吸收窗口 |
 | `equation_blind_alignment_window` | `2` | 公式盲对齐的 PDF 邻近窗口 |
+| `caption_fallback_threshold` | `80.0` | caption 全局弱匹配阈值 |
 
 ### Equation Blind Alignment
 
@@ -143,6 +144,17 @@ formula
 ```
 
 如果找到，直接赋予 `score=100.0`。这解决 `\frac{a}{b}` 和视觉 OCR `a/b` 不可比的问题。
+
+### Caption Global Fallback
+
+浮动体 caption 允许一轮窄域全局弱匹配。顺序滑动窗口结束后，对仍未匹配的 PDF 节点，只和未匹配的 `figure_caption` / `table_caption` TeX 节点比较：
+
+```text
+score = max(partial_ratio, levenshtein_ratio)
+threshold = caption_fallback_threshold (default 80.0)
+```
+
+该兜底只处理 caption，不扩大到普通 paragraph，避免把主文顺序约束打碎。
 
 ## Label Rules
 
@@ -199,6 +211,20 @@ non-anchor duplicate edge
 ## Quality Gates
 
 严格模式由 `--abort-on-bad-alignment` 开启。失败时抛出 `AlignmentQualityError`，批处理跳过样本。
+
+质量统计使用“有效 PDF 节点”口径，而不是把模板噪声和正文同等计算：
+
+```text
+expected visual orphans:
+  page_header / page_footer / page_number / header / footer / footnote / watermark
+  或页面极靠上/靠下、文本很短的边缘节点
+
+document root scoped:
+  成功匹配、TeX parent_id=None、且不是 section 的前置元数据节点
+  例如 title/authors/abstract/keywords 这类第一个 section 之前的内容
+```
+
+前者不参与 orphan ratio 和 isolated ratio；后者不参与 isolated ratio。Graph 里暂不额外插入 `DOCUMENT_ROOT` 节点，以保持 `graph.pt` 节点维度契约稳定；TreeDecoder 端已经有虚拟 root 来承接这些顶级节点。
 
 默认熔断阈值：
 

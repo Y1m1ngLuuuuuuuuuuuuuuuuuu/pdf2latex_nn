@@ -110,6 +110,11 @@ class AlignmentLabelerConfig:
     min_section_nodes: int = 1
     abort_on_bad_alignment: bool = False
     output_mapping_json: Path | None = None
+    exclude_expected_visual_orphans: bool = True
+    page_edge_y_threshold: float = 45.0
+    page_bottom_y_threshold: float = 955.0
+    max_expected_orphan_clean_chars: int = 24
+    caption_fallback_threshold: float = 80.0
 
 
 SECTION_LEVELS = {
@@ -204,6 +209,18 @@ SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
+CAPTION_TEX_NODE_TYPES = {STANDARD_FIGURE_CAPTION_NODE, STANDARD_TABLE_CAPTION_NODE}
+AUXILIARY_PDF_TYPES = {
+    "page_header",
+    "page_footer",
+    "page_number",
+    "header",
+    "footer",
+    "page_aside_text",
+    "page_footnote",
+    "footnote",
+    "watermark",
+}
 NON_HEADING_PDF_TYPES = {
     "equation",
     "equation_interline",
@@ -279,6 +296,7 @@ class AlignmentLabeler:
             "flattener": self.flattener_summary,
         }
         self.assert_alignment_quality(graph=graph, labels=labels)
+        graph.alignment_quality = self.alignment_quality
         if self.config.output_mapping_json is not None:
             self.write_mapping_json(self.config.output_mapping_json)
         destination = self.graph_path if output_graph_path is None and overwrite else output_graph_path
@@ -383,7 +401,59 @@ class AlignmentLabeler:
             pdf_cursor = next_index
             tex_cursor += 1
 
+        self.apply_global_caption_fallback(matches)
         return matches
+
+    def apply_global_caption_fallback(self, matches: list[AlignmentMatch]) -> None:
+        """Weakly recover missed figure/table captions after monotonic alignment.
+
+        Floats are often written far from their rendered location. The main
+        sliding-window pass stays monotonic to avoid O(N^2) noise, then this
+        narrow fallback only considers caption TeX nodes and still assigns each
+        caption at most once.
+        """
+
+        if self.config.caption_fallback_threshold <= 0:
+            return
+        used_tex_ids = {match.tex_id for match in matches if match.tex_id}
+        available_captions = [
+            node
+            for node in self.tex_nodes.values()
+            if node.node_type in CAPTION_TEX_NODE_TYPES
+            and node.tex_id not in used_tex_ids
+            and len(node.clean) >= self.config.min_clean_chars
+        ]
+        if not available_captions:
+            return
+
+        for pdf_node in self.pdf_nodes:
+            if matches[pdf_node.node_index].tex_id is not None:
+                continue
+            if self.is_expected_visual_orphan(pdf_node):
+                continue
+            if len(pdf_node.clean) < self.config.min_clean_chars:
+                continue
+            best_caption: TexAlignmentNode | None = None
+            best_score = 0.0
+            for caption in available_captions:
+                score = max(
+                    fragment_ratio_score(pdf_node.clean, caption.clean),
+                    levenshtein_ratio_score(pdf_node.clean, caption.clean),
+                )
+                if score > best_score:
+                    best_caption = caption
+                    best_score = score
+            if best_caption is None or best_score < self.config.caption_fallback_threshold:
+                continue
+            matches[pdf_node.node_index] = AlignmentMatch(
+                pdf_node_index=pdf_node.node_index,
+                tex_id=best_caption.tex_id,
+                score=best_score,
+            )
+            self.tex_to_pdf_indices.setdefault(best_caption.tex_id, []).append(pdf_node.node_index)
+            available_captions = [caption for caption in available_captions if caption.tex_id != best_caption.tex_id]
+            if not available_captions:
+                return
 
     def is_alignable_tex_node(self, node: TexAlignmentNode) -> bool:
         if node.node_type == STANDARD_EQUATION_NODE:
@@ -550,8 +620,21 @@ class AlignmentLabeler:
         return source_index != target_index
 
     def assert_alignment_quality(self, *, graph: Any | None = None, labels: Any | None = None) -> None:
-        orphan_count = sum(1 for match in self.matches if not match.tex_id)
-        orphan_ratio = orphan_count / max(1, len(self.matches))
+        exempt_visual_orphans = {
+            node.node_index
+            for node in self.pdf_nodes
+            if self.is_expected_visual_orphan(node)
+        }
+        document_root_scoped = {
+            match.pdf_node_index
+            for match in self.matches
+            if self.is_document_root_scoped_match(match)
+        }
+        effective_matches = [
+            match for match in self.matches if match.pdf_node_index not in exempt_visual_orphans
+        ]
+        orphan_count = sum(1 for match in effective_matches if not match.tex_id)
+        orphan_ratio = orphan_count / max(1, len(effective_matches))
         alignable_tex_nodes = [node for node in self.tex_nodes.values() if self.is_alignable_tex_node(node)]
         mapped_tex_ids = {match.tex_id for match in self.matches if match.tex_id}
         unmapped_tex_count = sum(1 for node in alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
@@ -562,14 +645,24 @@ class AlignmentLabeler:
         isolated_ratio = 0.0
         if graph is not None and labels is not None and hasattr(graph, "edge_index"):
             connected = connected_node_indices(graph.edge_index.detach().cpu(), labels.detach().cpu())
-            candidates = [node.node_index for node in self.pdf_nodes if len(node.clean) >= self.config.min_clean_chars]
+            candidates = [
+                node.node_index
+                for node in self.pdf_nodes
+                if len(node.clean) >= self.config.min_clean_chars
+                and node.node_index not in exempt_visual_orphans
+                and node.node_index not in document_root_scoped
+            ]
             isolated_count = sum(1 for node_index in candidates if node_index not in connected)
             isolated_ratio = isolated_count / max(1, len(candidates))
         self.alignment_quality = {
             "orphan_count": orphan_count,
+            "raw_orphan_count": sum(1 for match in self.matches if not match.tex_id),
             "num_pdf_nodes": len(self.matches),
+            "effective_pdf_nodes": len(effective_matches),
             "orphan_ratio": orphan_ratio,
             "max_orphan_ratio": self.config.max_orphan_ratio,
+            "expected_visual_orphan_exempt_count": len(exempt_visual_orphans),
+            "document_root_scoped_count": len(document_root_scoped),
             "alignable_tex_count": len(alignable_tex_nodes),
             "unmapped_tex_count": unmapped_tex_count,
             "unmapped_tex_ratio": unmapped_tex_ratio,
@@ -594,6 +687,12 @@ class AlignmentLabeler:
 
     def write_mapping_json(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        expected_orphan_exemptions = [
+            node.node_index for node in self.pdf_nodes if self.is_expected_visual_orphan(node)
+        ]
+        document_root_scoped = [
+            match.pdf_node_index for match in self.matches if self.is_document_root_scoped_match(match)
+        ]
         payload = {
             "schema_version": "alignment_mapping_v1",
             "content_json_path": str(self.content_json_path),
@@ -604,10 +703,49 @@ class AlignmentLabeler:
             "quality": self.alignment_quality,
             "matches": [asdict(match) for match in self.matches],
             "tex_to_pdf_indices": self.tex_to_pdf_indices,
+            "expected_orphan_exemptions": expected_orphan_exemptions,
+            "document_root_scoped": document_root_scoped,
             "visual_hierarchy": visual_hierarchy_payload(self.visual_hierarchy),
             "tex_nodes": [tex_alignment_node_payload(node) for node in self.tex_nodes.values()],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def is_expected_visual_orphan(self, node: PdfAlignmentNode) -> bool:
+        if not self.config.exclude_expected_visual_orphans:
+            return False
+        raw_type = canonical_pdf_type(node.item)
+        if raw_type in AUXILIARY_PDF_TYPES:
+            return True
+        if raw_type in HEADING_TYPES:
+            return False
+        bbox = first_bbox(node.item.get("bbox"))
+        if bbox is None:
+            return False
+        y0, y1 = bbox[1], bbox[3]
+        near_page_edge = y0 <= self.config.page_edge_y_threshold or y1 >= self.config.page_bottom_y_threshold
+        if not near_page_edge:
+            return False
+        clean = node.clean
+        text = " ".join(node.text.split())
+        if not clean:
+            return True
+        if len(clean) <= self.config.max_expected_orphan_clean_chars and len(text) <= 80:
+            return True
+        if re.fullmatch(r"\d{1,4}", clean):
+            return True
+        return False
+
+    def is_document_root_scoped_match(self, match: AlignmentMatch) -> bool:
+        if not match.tex_id:
+            return False
+        tex_node = self.tex_nodes.get(match.tex_id)
+        if tex_node is None:
+            return False
+        if tex_node.parent_id is not None:
+            return False
+        if tex_node.node_type == STANDARD_SECTION_NODE:
+            return False
+        return True
 
 
 def tex_alignment_node_payload(node: TexAlignmentNode) -> dict[str, Any]:

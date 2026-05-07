@@ -208,6 +208,8 @@ docs/ground_truth_labeling_v0.md
 
 Batch labeling must use strict quality gates for training data. Samples with high PDF orphan ratio, high unmapped TeX ratio, missing core section structure, or excessive isolated nodes should be skipped rather than saved as dirty `.pt` files.
 
+Orphan accounting is not raw node accounting. Expected visual-only artifacts such as page headers, footers, page numbers, and very short edge noise are exempt from orphan/isolated ratios. Successfully matched pre-section metadata such as title, authors, abstract, and keywords is treated as scoped under a virtual `DOCUMENT_ROOT` for quality checks and TreeDecoder rendering, while the stored graph node count remains unchanged.
+
 ## Current Cleanup Decision
 
 The working tree currently contains many tracked deletions from previous cleanup/deletion attempts. Do not stage them automatically.
