@@ -65,7 +65,7 @@ class DocumentDatasetConfig:
     sequential_window: int = 15
     spatial_k: int = 3
     long_sight_window: int = 40
-    scope_anchor_window: int = 80
+    scope_anchor_window: int = 160
     float_skip_window: int = 40
     bidirectional_edges: bool = True
     alignment_threshold: float = 0.55

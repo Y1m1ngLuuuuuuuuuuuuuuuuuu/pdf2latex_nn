@@ -305,7 +305,7 @@ NONE = 2
 sequential_window = 15
 spatial_k = 3
 long_sight_window = 40
-scope_anchor_window = 80
+scope_anchor_window = 160
 float_skip_window = 40
 ```
 
@@ -317,7 +317,7 @@ reading-order neighbors: 每个节点连接单双栏状态机阅读序列前后�
 line-of-sight neighbors: 每个节点在同页向下、向右各寻找最近 k 个空间邻居
 same-column long sight: 在同页同栏内向后看更远的正文/公式候选，防止长段、长列表断链
 float skip: 正文被 figure/table/algorithm/equation 等大浮动体隔开时，补一条跨浮动体 continuation 候选边
-scope anchor: title/reference/list marker 向局部 scope 内节点补边，提升长 section、references 和列表 run 的 PARENT_CHILD 召回率
+scope anchor: title/reference/list marker 向局部 scope 内节点补边；标题还会向后连接同一 scope 内的低一级/更低级标题，提升长 section、references 和列表 run 的 PARENT_CHILD 召回率
 ```
 
 重复边只保留第一条，当前优先级为 `sequential_forced`、`sequential`、`spatial_down/right`、`same_column_long_sight`、`float_skip`、`scope_anchor`、`list_run_scope`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。

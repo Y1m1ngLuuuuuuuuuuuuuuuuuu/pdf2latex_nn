@@ -30,7 +30,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequential-window", type=int, default=15, help="Reading-order neighbors on each side")
     parser.add_argument("--spatial-k", type=int, default=3, help="Line-of-sight neighbors per down/right direction")
     parser.add_argument("--long-sight-window", type=int, default=40, help="Forward window for same-column long sight-line edges")
-    parser.add_argument("--scope-anchor-window", type=int, default=80, help="Forward window for heading/list/reference scope edges")
+    parser.add_argument("--scope-anchor-window", type=int, default=160, help="Forward window for heading/list/reference scope edges")
     parser.add_argument("--float-skip-window", type=int, default=40, help="Forward window for text continuations across large floats")
     parser.add_argument("--directed", action="store_true", help="Use only forward reading-order window edges")
     parser.add_argument(

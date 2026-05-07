@@ -228,6 +228,29 @@ def test_candidate_edges_add_scope_and_float_skip_recall_edges():
     assert any(source == 4 and target == 5 for source, target, _ in pairs)
 
 
+def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
+    items = [
+        {**item("2 Results", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        item("Introductory results text.", [80, 100, 480, 130], page=0),
+        {**item("2.1 Main Study", [80, 500, 480, 530], page=0), "type": "title"},
+        item("Subsection text.", [80, 550, 480, 590], page=0),
+        {**item("2.2 Ablations", [80, 850, 480, 880], page=0), "type": "title"},
+        {**item("3 Methods", [80, 940, 920, 980], page=0, full=True), "type": "title"},
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=1,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 2, "scope_anchor") in typed
+    assert (0, 4, "scope_anchor") in typed
+    assert (0, 5, "scope_anchor") not in typed
+
+
 def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
     if not has_torch():
         return

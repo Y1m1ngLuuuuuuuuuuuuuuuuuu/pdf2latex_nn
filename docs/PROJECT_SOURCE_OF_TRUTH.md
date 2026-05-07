@@ -217,7 +217,7 @@ Candidate edge construction is recall-first. The default graph builder uses:
 sequential_window = 15
 spatial_k = 3
 long_sight_window = 40
-scope_anchor_window = 80
+scope_anchor_window = 160
 float_skip_window = 40
 ```
 

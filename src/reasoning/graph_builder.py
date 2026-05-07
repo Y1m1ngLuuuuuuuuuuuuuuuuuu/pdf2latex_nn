@@ -26,7 +26,7 @@ from src.perception.schema import (
 from src.perception.reading_order import fuse_micro_nodes
 from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
 from src.perception.xy_cut import sort_node_indices_by_reading_order
-from src.perception.title_features import title_pattern_flags
+from src.perception.title_features import title_numbering_level, title_pattern_flags
 from src.pipeline.v7_contract import V7_GRAPH_SCHEMA_VERSION, V7_PIPELINE_VERSION
 
 PAGE_SIZE = 1000.0
@@ -146,7 +146,7 @@ class GraphBuildConfig:
     sequential_window: int = 15
     spatial_k: int = 3
     long_sight_window: int = 40
-    scope_anchor_window: int = 80
+    scope_anchor_window: int = 160
     float_skip_window: int = 40
     fuse_micro_nodes: bool = False
 
@@ -879,6 +879,8 @@ def add_scope_anchor_edges(
         if _is_heading_item(source):
             for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window):
                 add_edge(source_idx, target_idx, "scope_anchor")
+            for target_idx in _iter_heading_scope_targets(items, order, source_pos, max_window=max_window):
+                add_edge(source_idx, target_idx, "scope_anchor")
             continue
         if _is_list_item_like(source):
             for target_idx in _iter_list_run_targets(items, order, source_pos, max_window=max_window):
@@ -905,6 +907,34 @@ def _iter_scope_targets(
             continue
         if not reference_only and not _is_scope_child_candidate(target):
             continue
+        targets.append(target_idx)
+    return targets
+
+
+def _iter_heading_scope_targets(
+    items: list[dict[str, Any]],
+    order: list[int],
+    source_pos: int,
+    *,
+    max_window: int,
+) -> list[int]:
+    """Return lower-level heading nodes inside the source heading's scope."""
+
+    source = items[order[source_pos]]
+    source_level = _heading_level(source)
+    if source_level is None:
+        return []
+    targets: list[int] = []
+    for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+        target_idx = order[target_pos]
+        target = items[target_idx]
+        if not _is_heading_item(target):
+            continue
+        target_level = _heading_level(target)
+        if target_level is None:
+            break
+        if target_level <= source_level:
+            break
         targets.append(target_idx)
     return targets
 
@@ -1556,6 +1586,18 @@ def _is_auxiliary_item(item: dict[str, Any]) -> bool:
 
 def _is_heading_item(item: dict[str, Any]) -> bool:
     return canonical_type(item) == "title"
+
+
+def _heading_level(item: dict[str, Any]) -> int | None:
+    if not _is_heading_item(item):
+        return None
+    numbered_level = title_numbering_level(_item_text(item))
+    if numbered_level is not None:
+        return numbered_level
+    value = item.get("heading_level")
+    if isinstance(value, int) and value > 0:
+        return value
+    return 1
 
 
 def _is_reference_heading(item: dict[str, Any]) -> bool:
