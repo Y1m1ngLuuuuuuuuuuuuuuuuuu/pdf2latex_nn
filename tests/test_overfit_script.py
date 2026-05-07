@@ -22,7 +22,7 @@ def test_overfit_parser_defaults_match_single_batch_sanity_check():
     assert args.max_docs == 8
     assert args.epochs == 200
     assert args.lr == 1e-3
-    assert args.class_weights == "inverse"
+    assert args.class_weights == "none"
 
 
 def test_select_dataset_samples_uses_first_deterministic_single_batch_slice():
