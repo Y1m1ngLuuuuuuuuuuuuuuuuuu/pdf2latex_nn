@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import shlex
 import subprocess
 import sys
@@ -327,16 +329,7 @@ def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path],
     config.mineru_output_dir.mkdir(parents=True, exist_ok=True)
     command = format_mineru_command(candidate, config)
     print(f"[mini-dataset] mineru id={candidate.document_id} cmd={command}")
-    completed = subprocess.run(
-        command,
-        shell=True,
-        cwd=config.project_root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=config.mineru_timeout,
-        check=False,
-    )
+    completed = run_command_with_process_group_timeout(command, cwd=config.project_root, timeout=config.mineru_timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             f"MinerU failed returncode={completed.returncode} output_tail={completed.stdout[-4000:]}"
@@ -345,6 +338,50 @@ def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path],
     if content_source is None:
         raise FileNotFoundError(f"MinerU did not produce content_list_v2 for {candidate.document_id}")
     return normalize_mineru_content_to_v2(content_source, paths["v2"])
+
+
+def run_command_with_process_group_timeout(command: str, *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run a shell command and kill the whole process group on timeout.
+
+    MinerU can spawn a local fast_api process. Killing only the shell leaves that
+    child alive and holding GPU memory, so each sample gets its own process
+    group and the whole group is terminated together.
+    """
+
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        stdout, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_group(process)
+        try:
+            stdout, _ = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            kill_process_group(process)
+            stdout, _ = process.communicate()
+        raise RuntimeError(f"MinerU timed out after {timeout}s output_tail={stdout[-4000:]}") from exc
+    return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=None)
+
+
+def terminate_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+
+def kill_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
 
 
 def find_mineru_content_source(document_id: str, mineru_output_dir: Path) -> Path | None:
