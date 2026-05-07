@@ -329,10 +329,16 @@ def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path],
     config.mineru_output_dir.mkdir(parents=True, exist_ok=True)
     command = format_mineru_command(candidate, config)
     print(f"[mini-dataset] mineru id={candidate.document_id} cmd={command}")
-    completed = run_command_with_process_group_timeout(command, cwd=config.project_root, timeout=config.mineru_timeout)
+    mineru_log_path = paths["auto_dir"].parent / "mineru_command.log"
+    completed = run_command_with_process_group_timeout(
+        command,
+        cwd=config.project_root,
+        timeout=config.mineru_timeout,
+        log_path=mineru_log_path,
+    )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"MinerU failed returncode={completed.returncode} output_tail={completed.stdout[-4000:]}"
+            f"MinerU failed returncode={completed.returncode} log={mineru_log_path} output_tail={completed.stdout[-4000:]}"
         )
     content_source = find_mineru_content_source(candidate.document_id, config.mineru_output_dir)
     if content_source is None:
@@ -340,25 +346,34 @@ def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path],
     return normalize_mineru_content_to_v2(content_source, paths["v2"])
 
 
-def run_command_with_process_group_timeout(command: str, *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+def run_command_with_process_group_timeout(
+    command: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    log_path: Path,
+) -> subprocess.CompletedProcess[str]:
     """Run a shell command and kill the whole process group on timeout.
 
     MinerU can spawn a local fast_api process. Killing only the shell leaves that
-    child alive and holding GPU memory, so each sample gets its own process
-    group and the whole group is terminated together.
+    child alive and holding GPU memory. Each sample gets its own process group,
+    and stdout is redirected to a per-sample log file so a detached child cannot
+    keep Python blocked on a pipe.
     """
 
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("w", encoding="utf-8", errors="replace")
     process = subprocess.Popen(
         command,
         shell=True,
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
     try:
-        stdout, _ = process.communicate(timeout=timeout)
+        returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         terminate_process_group(process)
         cleanup_mineru_fast_api_processes()
@@ -371,14 +386,18 @@ def run_command_with_process_group_timeout(command: str, *, cwd: Path, timeout: 
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-        stdout = normalize_timeout_output(exc.output)
+        log_file.close()
+        stdout = read_text_tail(log_path)
         return subprocess.CompletedProcess(
             command,
             124,
             stdout=f"{stdout}\n[MinerU timed out after {timeout}s; process group cleaned]\n",
             stderr=None,
         )
-    return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=None)
+    finally:
+        if not log_file.closed:
+            log_file.close()
+    return subprocess.CompletedProcess(command, returncode, stdout=read_text_tail(log_path), stderr=None)
 
 
 def terminate_process_group(process: subprocess.Popen[str]) -> None:
@@ -407,12 +426,10 @@ def cleanup_mineru_fast_api_processes(*, kill: bool = False) -> None:
     )
 
 
-def normalize_timeout_output(output: Any) -> str:
-    if output is None:
+def read_text_tail(path: Path, *, max_chars: int = 4000) -> str:
+    if not path.exists():
         return ""
-    if isinstance(output, bytes):
-        return output.decode("utf-8", errors="replace")
-    return str(output)
+    return path.read_text(encoding="utf-8", errors="replace")[-max_chars:]
 
 
 def find_mineru_content_source(document_id: str, mineru_output_dir: Path) -> Path | None:
