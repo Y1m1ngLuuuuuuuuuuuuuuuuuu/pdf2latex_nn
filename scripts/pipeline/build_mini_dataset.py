@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import shlex
 import subprocess
@@ -282,11 +283,71 @@ def build_pdf_index(raw_pdf_dir: Path) -> dict[str, Path]:
 
 
 def first_existing_tex_entry(tex_dir: Path, names: tuple[str, ...]) -> Path | None:
+    tex_files = [
+        path
+        for path in sorted(tex_dir.rglob("*.tex"))
+        if ".ipynb_checkpoints" not in path.parts and "checkpoint" not in path.name
+    ]
     for name in names:
         candidate = tex_dir / name
         if candidate.is_file():
             return candidate
+        for path in tex_files:
+            if path.name.lower() == name.lower():
+                return path
+    root_like = [path for path in tex_files if looks_like_latex_root(path)]
+    if root_like:
+        return sorted(root_like, key=tex_entry_sort_key(tex_dir))[0]
+    root_level = [path for path in tex_files if path.parent == tex_dir and not is_auxiliary_tex_file(path)]
+    if len(root_level) == 1:
+        return root_level[0]
     return None
+
+
+ROOT_TEX_RE = re.compile(r"\\(?:documentclass|documentstyle)\b")
+AUXILIARY_TEX_NAMES = {
+    "abstract.tex",
+    "appendix.tex",
+    "conclusion.tex",
+    "intro.tex",
+    "introduction.tex",
+    "macros.tex",
+    "math_commands.tex",
+    "preamble.tex",
+    "references.tex",
+    "related.tex",
+    "related_work.tex",
+}
+
+
+def looks_like_latex_root(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return bool(ROOT_TEX_RE.search(text))
+
+
+def is_auxiliary_tex_file(path: Path) -> bool:
+    name = path.name.lower()
+    if name in AUXILIARY_TEX_NAMES:
+        return True
+    return any(token in name for token in ("macro", "preamble", "reference", "bibliograph", "command"))
+
+
+def tex_entry_sort_key(tex_dir: Path) -> Any:
+    def key(path: Path) -> tuple[int, int, str]:
+        try:
+            rel_depth = len(path.relative_to(tex_dir).parts)
+        except ValueError:
+            rel_depth = 99
+        name = path.name.lower()
+        preferred_rank = 0 if name in {"main.tex", "paper.tex", "article.tex"} else 1
+        if name == f"{tex_dir.name.lower()}.tex":
+            preferred_rank = 0
+        return (preferred_rank, rel_depth, str(path).lower())
+
+    return key
 
 
 def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> ProcessedSample:
