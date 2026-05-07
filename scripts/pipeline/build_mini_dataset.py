@@ -104,7 +104,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--raw-pdf-dir", type=Path, default=REPO_ROOT / "data/01_raw_pdfs")
-    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_sources")
+    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_source_pool")
     parser.add_argument(
         "--mineru-output-dir",
         type=Path,
