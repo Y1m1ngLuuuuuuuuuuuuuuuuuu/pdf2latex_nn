@@ -19,7 +19,7 @@ from src.reasoning.postprocess import PARENT_CHILD, node_physical_index  # noqa:
 DEFAULT_CONTENT_JSON = Path(
     "data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json"
 )
-DEFAULT_GRAPH = Path("data/06_graph_features/2501.00050_graph.pt")
+DEFAULT_GRAPH = Path("data/06_graph_features_v7/2501.00050_v7_truthgen_labeled_graph.pt")
 DEFAULT_CHECKPOINT = Path("data/10_checkpoints/overfit_10_docs_ce_big_700_lr5e4.pth")
 DEFAULT_LOGITS = Path("data/07_predicted_ir/2501.00050_logits.pt")
 

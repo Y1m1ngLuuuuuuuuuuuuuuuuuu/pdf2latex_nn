@@ -28,6 +28,7 @@ from src.perception.reading_order import (  # noqa: E402
     write_json,
 )
 from src.perception.style_spans import StyleConfig, enrich_content_with_styles  # noqa: E402
+from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig, AlignmentQualityError  # noqa: E402
 
@@ -109,7 +110,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=REPO_ROOT / "data/02_mineru_outputs/mineru_output",
     )
-    parser.add_argument("--graph-output-dir", type=Path, default=REPO_ROOT / "data/06_graph_features")
+    parser.add_argument("--graph-output-dir", type=Path, default=REPO_ROOT / "data/06_graph_features_v7")
     parser.add_argument("--ground-truth-dir", type=Path, default=REPO_ROOT / "data/04_ground_truth_ir")
     parser.add_argument(
         "--manifest-output",
@@ -277,15 +278,15 @@ def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> 
         and not config.force_label
         and paths["styles"].exists()
         and paths["mapping"].exists()
-        and graph_is_valid_labeled(paths["graph"], config)
+        and graph_is_valid_labeled(paths["labeled_graph"], config)
     ):
         return summarize_processed_sample(candidate, paths)
 
     content_json = ensure_content_v7_styles(candidate, paths, config)
-    graph_path = ensure_graph(content_json, paths["graph"], config)
-    label_graph(candidate, content_json, graph_path, paths["mapping"], config)
-    if not graph_is_valid_labeled(graph_path, config):
-        raise RuntimeError(f"labeled graph failed validation: {graph_path}")
+    graph_path = ensure_graph(content_json, paths["unlabeled_graph"], config)
+    label_graph(candidate, content_json, graph_path, paths["labeled_graph"], paths["mapping"], config)
+    if not graph_is_valid_labeled(paths["labeled_graph"], config):
+        raise RuntimeError(f"labeled graph failed validation: {paths['labeled_graph']}")
     return summarize_processed_sample(candidate, paths)
 
 
@@ -296,14 +297,16 @@ def sample_paths(candidate: CandidateSample, config: MiniDatasetConfig) -> dict[
         "v2": auto_dir / f"{candidate.document_id}_content_list_v2.json",
         "v7": auto_dir / f"{candidate.document_id}_content_list_v7.json",
         "styles": auto_dir / f"{candidate.document_id}_content_list_v7_styles.json",
-        "graph": config.graph_output_dir / f"{candidate.document_id}_graph.pt",
-        "mapping": config.ground_truth_dir / f"{candidate.document_id}_alignment_mapping.json",
+        "unlabeled_graph": config.graph_output_dir / f"{candidate.document_id}_v7_graph.pt",
+        "labeled_graph": config.graph_output_dir / f"{candidate.document_id}_v7_truthgen_labeled_graph.pt",
+        "mapping": config.ground_truth_dir / f"{candidate.document_id}_v7_alignment_mapping.json",
     }
 
 
 def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> Path:
     styles_path = paths["styles"]
     if config.reuse_existing and not config.force_json and styles_path.exists():
+        assert_v7_content_json(styles_path, require_styles=True)
         return styles_path
 
     content_v2 = ensure_mineru_content_v2(candidate, paths, config)
@@ -312,6 +315,7 @@ def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path],
     write_json(paths["v7"], v7_payload)
 
     enrich_content_with_styles(paths["v7"], candidate.pdf_path, styles_path, StyleConfig())
+    assert_v7_content_json(styles_path, require_styles=True)
     return styles_path
 
 
@@ -409,7 +413,12 @@ def format_mineru_command(candidate: CandidateSample, config: MiniDatasetConfig)
 
 def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig) -> Path:
     if config.reuse_existing and not config.force_graph and graph_path.exists():
+        import torch
+
+        graph = torch.load(graph_path, map_location="cpu", weights_only=False)
+        assert_v7_graph_data(graph, graph_path)
         return graph_path
+    assert_v7_content_json(content_json, require_styles=True)
     graph_config = GraphBuildConfig(model_path=config.model_path)
     build_graph_from_content_v7(content_json, graph_path, graph_config)
     return graph_path
@@ -419,6 +428,7 @@ def label_graph(
     candidate: CandidateSample,
     content_json: Path,
     graph_path: Path,
+    output_graph_path: Path,
     mapping_path: Path,
     config: MiniDatasetConfig,
 ) -> None:
@@ -435,7 +445,7 @@ def label_graph(
             output_mapping_json=mapping_path,
         ),
     )
-    labeler.run(overwrite=True)
+    labeler.run(output_graph_path=output_graph_path, overwrite=False)
 
 
 def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
@@ -445,6 +455,7 @@ def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
         import torch
 
         graph = torch.load(graph_path, map_location="cpu", weights_only=False)
+        assert_v7_graph_data(graph, graph_path)
         if not hasattr(graph, "edge_index") or not hasattr(graph, "y"):
             return False
         if graph.y.ndim != 1 or int(graph.y.shape[0]) != int(graph.edge_index.shape[1]):
@@ -460,7 +471,7 @@ def graph_is_valid_labeled(graph_path: Path, config: MiniDatasetConfig) -> bool:
 def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path]) -> ProcessedSample:
     import torch
 
-    graph = torch.load(paths["graph"], map_location="cpu", weights_only=False)
+    graph = torch.load(paths["labeled_graph"], map_location="cpu", weights_only=False)
     labels = torch.where(graph.y.detach().cpu().long() >= 2, torch.full_like(graph.y.detach().cpu().long(), 2), graph.y.detach().cpu().long())
     counts = torch.bincount(labels, minlength=3).tolist()
     pdf_to_tex = list(getattr(graph, "pdf_to_tex", []))
@@ -469,7 +480,7 @@ def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path
         document_id=candidate.document_id,
         pdf_path=candidate.pdf_path,
         content_json=paths["styles"],
-        graph_path=paths["graph"],
+        graph_path=paths["labeled_graph"],
         tex_path=candidate.main_tex_path,
         alignment_mapping=paths["mapping"],
         label_counts={idx: int(counts[idx]) for idx in range(3)},
@@ -480,7 +491,7 @@ def summarize_processed_sample(candidate: CandidateSample, paths: dict[str, Path
 def write_manifest(path: Path, samples: list[ProcessedSample], config: MiniDatasetConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": "overfit_10_docs_manifest_v1",
+        "schema_version": "overfit_10_docs_manifest_v7",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target": config.target,
         "success_count": len(samples),

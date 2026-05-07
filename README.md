@@ -76,7 +76,7 @@ data/01_raw_pdfs/
 data/02_mineru_outputs/
 data/03_tex_source_pool/
 data/04_ground_truth_ir/
-data/06_graph_features/
+data/06_graph_features_v7/
 data/08_output_latex/
 data/09_eval_reports/
 ```
@@ -98,9 +98,9 @@ Label one graph with TeX-derived truth:
 python scripts/pipeline/step3_label_graph.py \
   --content-json data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json \
   --tex data/03_tex_source_pool/2501.00050/aaai25.tex \
-  --graph data/06_graph_features_oracle/2501.00050_v7_oracle_graph.pt \
-  --output data/06_graph_features_oracle/2501.00050_v7_truthgen_labeled_graph.pt \
-  --mapping-output data/06_graph_features_oracle/2501.00050_v7_truthgen_mapping.json \
+  --graph data/06_graph_features_v7/2501.00050_v7_graph.pt \
+  --output data/06_graph_features_v7/2501.00050_v7_truthgen_labeled_graph.pt \
+  --mapping-output data/04_ground_truth_ir/2501.00050_v7_alignment_mapping.json \
   --similarity-threshold 65
 ```
 
@@ -121,6 +121,7 @@ The source pipeline is synced through GitHub to AutoDL. The latest validated sta
 
 ```text
 v7 JSON input contract
+v7-only graph contract (`graph_schema_version=graph_v7`)
 818-dimensional node features
 15-dimensional edge attributes
 3-class graph labels

@@ -20,6 +20,9 @@ def make_graph(torch, Data, *, edge_index=None, x=None, edge_attr=None):
         edge_attr=torch.zeros((edge_count, 15), dtype=torch.float64) if edge_attr is None else edge_attr,
     )
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}]
+    data.pipeline_version = "v7"
+    data.graph_schema_version = "graph_v7"
+    data.source_path = "synthetic_content_list_v7_styles.json"
     return data
 
 
@@ -144,6 +147,9 @@ def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path
     edge_index = torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long)
     data = Data(x=torch.zeros((3, 818)), edge_index=edge_index, edge_attr=torch.zeros((3, 15)))
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
+    data.pipeline_version = "v7"
+    data.graph_schema_version = "graph_v7"
+    data.source_path = "synthetic_content_list_v7_styles.json"
     torch.save(data, bad_graph)
 
     tex_path = tmp_path / "doc.tex"

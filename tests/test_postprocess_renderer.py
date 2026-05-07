@@ -487,6 +487,36 @@ def test_tree_decoder_preserves_inline_formula_segments_in_paragraph_blocks():
     assert r"\textbackslash{}" not in tex
 
 
+def test_tree_decoder_preserves_bare_inline_latex_math_inside_caption_text():
+    records = [
+        {
+            "type": "figure",
+            "text": r'''Fig. 3. Access order, ``j'' reactions and " \mathrm { p } ^ { \mathrm { , } \mathrm { , } } the number.''',
+        }
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r'``j' in tex
+    assert r"$\mathrm { p } ^ { \mathrm { , } \mathrm { , } }$ the number" in tex
+    assert r"\textbackslash{}mathrm" not in tex
+
+
+def test_generation_renderer_preserves_bare_inline_latex_math_inside_caption_text():
+    root = type("Root", (), {})()
+    root.children = [
+        {
+            "type": "figure",
+            "text": r'''Fig. 3. Access order, ``j'' reactions and " \mathrm { p } ^ { \mathrm { , } \mathrm { , } } the number.''',
+        }
+    ]
+
+    tex = render_latex_document(root)
+
+    assert r"$\mathrm { p } ^ { \mathrm { , } \mathrm { , } }$ the number" in tex
+    assert r"\textbackslash{}mathrm" not in tex
+
+
 def test_tree_decoder_renders_list_children_as_items_with_raw_equations():
     records = [
         {"type": "list", "text": "Contributions"},

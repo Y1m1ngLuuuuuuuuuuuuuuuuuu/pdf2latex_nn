@@ -50,6 +50,9 @@ def test_overfit_script_runs_one_epoch_on_tiny_valid_graph(tmp_path):
         edge_attr=torch.zeros((2, 15), dtype=torch.float32),
     )
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}]
+    data.pipeline_version = "v7"
+    data.graph_schema_version = "graph_v7"
+    data.source_path = "synthetic_content_list_v7_styles.json"
     torch.save(data, graph_path)
 
     tex_path = tmp_path / "doc.tex"

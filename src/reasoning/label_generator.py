@@ -285,7 +285,8 @@ class AlignmentLabeler:
         graph.pdf_to_tex_scores = [match.score for match in self.matches]
         graph.label_counts = label_counts(labels)
         graph.alignment_schema = {
-            "strategy": "texsoup_semantic_ast_sliding_window_v3",
+            "strategy": "v7_texsoup_ast_sliding_window_v1",
+            "pipeline_version": "v7",
             "similarity_threshold": self.config.similarity_threshold,
             "max_window_nodes": self.config.max_window_nodes,
             "tail_absorption_nodes": self.config.tail_absorption_nodes,

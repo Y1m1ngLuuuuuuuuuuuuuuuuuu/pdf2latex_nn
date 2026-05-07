@@ -252,9 +252,9 @@ unmapped_tex_ratio=81.28% > 30.00%
 python scripts/pipeline/step3_label_graph.py \
   --content-json data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json \
   --tex data/03_tex_source_pool/2501.00050/aaai25.tex \
-  --graph data/06_graph_features_oracle/2501.00050_v7_oracle_graph.pt \
-  --output data/06_graph_features_oracle/2501.00050_v7_truthgen_labeled_graph.pt \
-  --mapping-output data/06_graph_features_oracle/2501.00050_v7_truthgen_mapping.json \
+  --graph data/06_graph_features_v7/2501.00050_v7_graph.pt \
+  --output data/06_graph_features_v7/2501.00050_v7_truthgen_labeled_graph.pt \
+  --mapping-output data/04_ground_truth_ir/2501.00050_v7_alignment_mapping.json \
   --similarity-threshold 65
 ```
 

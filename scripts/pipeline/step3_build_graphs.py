@@ -10,6 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.pipeline.v7_contract import assert_v7_content_json  # noqa: E402
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 
 
@@ -39,6 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    assert_v7_content_json(args.input, require_styles=True)
     config = GraphBuildConfig(
         model_path=args.model_path,
         max_length=args.max_length,

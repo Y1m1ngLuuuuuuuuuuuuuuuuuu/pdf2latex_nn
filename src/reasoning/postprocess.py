@@ -21,6 +21,76 @@ DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "mult
 MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
 NON_PARENT_RENDER_TYPES = {"equation", "inline_math", "algorithm", "code"}
 DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
+INLINE_MATH_COMMANDS = {
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "varepsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "vartheta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "varphi",
+    "chi",
+    "psi",
+    "omega",
+    "Gamma",
+    "Delta",
+    "Theta",
+    "Lambda",
+    "Xi",
+    "Pi",
+    "Sigma",
+    "Phi",
+    "Psi",
+    "Omega",
+    "mathrm",
+    "mathbf",
+    "mathit",
+    "mathsf",
+    "mathtt",
+    "mathcal",
+    "mathbfcal",
+    "operatorname",
+    "frac",
+    "dfrac",
+    "tfrac",
+    "sqrt",
+    "left",
+    "right",
+    "leq",
+    "geq",
+    "neq",
+    "approx",
+    "sim",
+    "simeq",
+    "times",
+    "cdot",
+    "pm",
+    "mp",
+    "prime",
+    "partial",
+    "nabla",
+    "sum",
+    "prod",
+    "int",
+    "in",
+    "notin",
+}
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
@@ -42,6 +112,7 @@ PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
 PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
+MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
 
 
 @dataclass(frozen=True)
@@ -646,7 +717,7 @@ class TreeDecoder:
         if block_type == "table":
             return render_table_placeholder(node.record, node_verbatim_text(node), node_id=node.node_id)
         if block_type == "figure":
-            caption = escape_latex(text) if text else "Figure"
+            caption = render_text_with_inline_latex(text) if text else "Figure"
             return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
         if block_type == "reference":
             return render_references(node.record, text)
@@ -1641,7 +1712,9 @@ def render_textual_node(node: ResolvedNode) -> str:
             rendered_parts.append(rendered)
     if used_structured_content and rendered_parts:
         return merge_latex_fragments(rendered_parts)
-    return escape_latex(node.text)
+    if rendered_parts:
+        return normalize_latex_text(" ".join(rendered_parts))
+    return render_text_with_inline_latex(node.text)
 
 
 def render_textual_node_without_list_marker(node: ResolvedNode) -> str:
@@ -1713,7 +1786,7 @@ def strip_list_marker_from_record(record: dict[str, Any]) -> dict[str, Any]:
 def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
     segments = extract_content_segments(record)
     if not segments:
-        return escape_latex(fallback_text)
+        return render_text_with_inline_latex(fallback_text)
     rendered: list[str] = []
     for segment in segments:
         segment_type = str(segment.get("type") or "").lower()
@@ -1725,7 +1798,7 @@ def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
         elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
             rendered.append("\n\n" + render_equation(content) + "\n\n")
         else:
-            rendered.append(escape_latex(content))
+            rendered.append(render_text_with_inline_latex(content, strip=False))
     return normalize_latex_text("".join(rendered))
 
 
@@ -1762,6 +1835,126 @@ def merge_latex_fragments(parts: list[str]) -> str:
 
 def normalize_latex_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", str(text)).strip()
+
+
+def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
+    """Escape prose while preserving inline TeX math fragments embedded in it.
+
+    MinerU sometimes keeps raw snippets such as ``\\mathrm { p }`` inside an
+    otherwise ordinary caption/text block instead of emitting an ``inline_math``
+    segment. Treat only explicit math delimiters and known math commands as raw
+    math; everything else still goes through normal LaTeX escaping.
+    """
+
+    value = str(text or "")
+    if not value:
+        return ""
+    rendered: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        span = find_next_inline_latex_span(value, cursor)
+        if span is None:
+            rendered.append(escape_latex(value[cursor:]))
+            break
+        start, end = span
+        if start > cursor:
+            rendered.append(escape_latex(value[cursor:start]))
+        raw_math = value[start:end].strip()
+        if raw_math:
+            rendered.append(render_inline_math(raw_math))
+        cursor = end
+    output = re.sub(r"\n{3,}", "\n\n", "".join(rendered))
+    return output.strip() if strip else output
+
+
+def find_next_inline_latex_span(text: str, start_index: int) -> tuple[int, int] | None:
+    candidates: list[tuple[int, int]] = []
+    dollar = text.find("$", start_index)
+    if dollar >= 0 and not text.startswith("$$", dollar):
+        end = find_unescaped(text, "$", dollar + 1)
+        if end is not None:
+            candidates.append((dollar, end + 1))
+    paren = text.find(r"\(", start_index)
+    if paren >= 0:
+        end = text.find(r"\)", paren + 2)
+        if end >= 0:
+            candidates.append((paren, end + 2))
+    command_match = find_next_math_command(text, start_index)
+    if command_match is not None:
+        command_start, _command_name = command_match
+        end = consume_bare_latex_math(text, command_start)
+        if end > command_start:
+            candidates.append((command_start, end))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])
+
+
+def find_unescaped(text: str, needle: str, start_index: int) -> int | None:
+    index = text.find(needle, start_index)
+    while index >= 0:
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return index
+        index = text.find(needle, index + 1)
+    return None
+
+
+def find_next_math_command(text: str, start_index: int) -> tuple[int, str] | None:
+    for match in MATH_COMMAND_RE.finditer(text, start_index):
+        command_name = match.group(1)
+        if command_name in INLINE_MATH_COMMANDS:
+            return match.start(), command_name
+    return None
+
+
+def consume_bare_latex_math(text: str, start_index: int) -> int:
+    index = start_index
+    brace_depth = 0
+    saw_command = False
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            command = MATH_COMMAND_RE.match(text, index)
+            if command:
+                saw_command = True
+                index = command.end()
+                continue
+            if index + 1 < len(text):
+                saw_command = True
+                index += 2
+                continue
+            break
+        if char == "{":
+            brace_depth += 1
+            index += 1
+            continue
+        if char == "}":
+            if brace_depth <= 0:
+                break
+            brace_depth -= 1
+            index += 1
+            continue
+        if brace_depth > 0:
+            index += 1
+            continue
+        if char.isspace():
+            next_index = index + 1
+            while next_index < len(text) and text[next_index].isspace():
+                next_index += 1
+            if next_index < len(text) and (text[next_index] == "\\" or text[next_index] in "{}_^+-=*/<>,.()[]|"):
+                index = next_index
+                continue
+            break
+        if char in "_^+-=*/<>,.()[]|" or char.isdigit():
+            index += 1
+            continue
+        break
+    return index if saw_command else start_index
 
 
 def render_references(record: dict[str, Any], fallback_text: str) -> str:

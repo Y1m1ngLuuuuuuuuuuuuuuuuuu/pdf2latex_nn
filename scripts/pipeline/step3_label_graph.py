@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig  # noqa: E402
 
 
@@ -33,6 +34,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    assert_v7_content_json(args.content_json, require_styles=True)
+    source_graph = torch.load(args.graph, map_location="cpu", weights_only=False)
+    assert_v7_graph_data(source_graph, args.graph)
     config = AlignmentLabelerConfig(
         similarity_threshold=args.similarity_threshold,
         max_orphan_ratio=args.max_orphan_ratio,

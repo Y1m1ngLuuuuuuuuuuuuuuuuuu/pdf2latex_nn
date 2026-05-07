@@ -26,6 +26,7 @@ from src.perception.reading_order import fuse_micro_nodes
 from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
 from src.perception.xy_cut import sort_node_indices_by_reading_order
 from src.perception.title_features import title_pattern_flags
+from src.pipeline.v7_contract import V7_GRAPH_SCHEMA_VERSION, V7_PIPELINE_VERSION
 
 PAGE_SIZE = 1000.0
 FULL_WIDTH_THRESHOLD = 620.0
@@ -133,11 +134,18 @@ class GraphBuildConfig:
 
 
 def load_content_v7(path: Path) -> list[dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = _load_content_v7_payload(path)
     items = data.get("items")
     if not isinstance(items, list):
         raise ValueError(f"Expected {path} to contain an items list")
     return [item for item in items if isinstance(item, dict)]
+
+
+def _load_content_v7_payload(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected {path} to contain a v7 content object")
+    return data
 
 
 def build_graph_from_content_v7(input_path: Path, output_path: Path, config: GraphBuildConfig) -> Any:
@@ -146,6 +154,7 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     import torch
     from torch_geometric.data import Data
 
+    payload = _load_content_v7_payload(input_path)
     raw_items = load_content_v7(input_path)
     items = fuse_micro_nodes(raw_items) if config.fuse_micro_nodes else raw_items
     texts = [text_for_embedding(item) for item in items]
@@ -212,6 +221,9 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     }
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
+    data.pipeline_version = V7_PIPELINE_VERSION
+    data.graph_schema_version = V7_GRAPH_SCHEMA_VERSION
+    data.content_schema_version = str(payload.get("schema_version") or "")
     data.micro_fusion_applied = bool(config.fuse_micro_nodes)
     data.micro_fusion_node_count_before = len(raw_items)
     data.micro_fusion_node_count_after = len(items)

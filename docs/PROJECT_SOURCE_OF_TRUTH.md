@@ -52,7 +52,7 @@ data/02_mineru_outputs/
 data/03_tex_source_pool/
 data/04_ground_truth_ir/
 data/05_observed_ir/
-data/06_graph_features/
+data/06_graph_features_v7/
 data/07_predicted_ir/
 data/08_output_latex/
 data/09_eval_reports/
@@ -189,6 +189,16 @@ The current PDF-side production JSON format is:
 ```
 
 v7 keeps MinerU block granularity and raw bbox coordinates. It only adds list-marker metadata, column-reading-order repair, reference item preservation, and PyMuPDF style spans. Cross-paragraph and cross-page text merging should happen in decoder/generator logic, not in the v7 preprocessing JSON.
+
+All graph-producing and graph-consuming scripts must use the v7 contract:
+
+```text
+graph_schema_version = graph_v7
+pipeline_version = v7
+source_path = *_content_list_v7_styles.json
+```
+
+Old v3/v4/v5 JSONs and old `data/06_graph_features/` graph caches are legacy diagnostics only. They must not be used for feature extraction, training, inference, or generator QA.
 
 The current graph supervision target is a three-class edge label:
 

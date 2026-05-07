@@ -9,6 +9,8 @@ schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
 node_feature_dim: 818
 edge_attr_dim: 15
+graph_schema_version: graph_v7
+pipeline_version: v7
 ```
 
 坐标统一使用 MinerU 当前输出的页面归一化坐标，页面左上角是 `(0, 0)`，右下角近似是 `(1000, 1000)`。如果后续需要保留 PDF 原始点坐标，应新增字段，不覆盖现有归一化坐标。

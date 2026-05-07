@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.perception.reading_order import fuse_micro_nodes  # noqa: E402
+from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
 
@@ -39,6 +40,9 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = torch.load(args.graph, map_location=device, weights_only=False)
+    assert_v7_graph_data(data, args.graph)
+    if args.content_json is not None:
+        assert_v7_content_json(args.content_json, require_styles=True)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
     state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint

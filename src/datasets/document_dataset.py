@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.perception.schema import FeatureTensorSchema
+from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data, V7ContractError
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7
 from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges_from_paths
 
@@ -69,6 +70,7 @@ class DocumentDatasetConfig:
     expected_edge_dim: int = FEATURE_SCHEMA.edge_attr_dim
     drop_empty_edge_graphs: bool = True
     drop_all_orphan_graphs: bool = True
+    require_v7_contract: bool = True
 
     def graph_config(self) -> GraphBuildConfig:
         if self.model_path is None:
@@ -153,7 +155,7 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
                 data.document_id = record.document_id
                 data = sanitize_graph_data(data, config=self.config, require_labels=True)
                 assert_graph_is_trainable(data, config=self.config)
-            except (GraphFilterError, AlignmentQualityError) as exc:
+            except (GraphFilterError, AlignmentQualityError, V7ContractError) as exc:
                 append_skip_log(skipped_path, record, reason=str(exc))
                 continue
             torch.save(data, output)
@@ -170,9 +172,14 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
 
     def _load_or_build_graph(self, record: DocumentRecord, output_path: Path) -> Any:
         if record.graph_path is not None:
-            return torch.load(record.graph_path, map_location="cpu", weights_only=False)
+            data = torch.load(record.graph_path, map_location="cpu", weights_only=False)
+            if self.config.require_v7_contract:
+                assert_v7_graph_data(data, record.graph_path)
+            return data
         if record.content_json is None:
             raise ValueError(f"Record {record.document_id} must provide graph_path or content_json")
+        if self.config.require_v7_contract:
+            assert_v7_content_json(record.content_json, require_styles=True)
         return build_graph_from_content_v7(record.content_json, output_path, self.config.graph_config())
 
     def _processed_index(self) -> list[dict[str, Any]]:

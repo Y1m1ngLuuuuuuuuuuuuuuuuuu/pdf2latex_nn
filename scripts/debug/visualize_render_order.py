@@ -35,7 +35,7 @@ DEFAULT_COLOR = (0.15, 0.15, 0.15)
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pdf", type=Path, required=True, help="Original source PDF")
-    parser.add_argument("--content-json", type=Path, required=True, help="content_v*_styles.json used by graph generation")
+    parser.add_argument("--content-json", type=Path, required=True, help="*_content_list_v7_styles.json used by graph generation")
     parser.add_argument("--graph", type=Path, help="PyG graph .pt; needed to match micro-fused records")
     parser.add_argument("--logits", type=Path, help="Saved edge logits/probabilities from step5_generate_tex.py")
     parser.add_argument("--checkpoint", type=Path, help="Optional checkpoint; used only when --logits is absent")

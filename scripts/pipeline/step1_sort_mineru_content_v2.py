@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build page-local visual reading order for MinerU content_list_v2 JSON."""
+"""Legacy diagnostic v2 visual-order builder.
+
+The active pipeline uses `step1_build_content_v7.py`, which consumes MinerU's
+native content_list_v2 output and writes the v7 contract. This script is kept
+only for comparing historical sorting behavior.
+"""
 
 from __future__ import annotations
 
