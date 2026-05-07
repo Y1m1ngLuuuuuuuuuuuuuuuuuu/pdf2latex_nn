@@ -62,6 +62,7 @@ class StagedConfig:
     run_name: str
     stage_root: Path
     mineru_batch_size: int
+    mineru_batch_max_pages: int
     mineru_batch_timeout: int
     mineru_batch_command: str
     mineru_fallback_single: bool
@@ -143,6 +144,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mineru-timeout", type=int, default=900, help="Timeout for single-PDF fallback.")
     parser.add_argument("--mineru-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--mineru-batch-max-pages",
+        type=int,
+        default=192,
+        help="Soft maximum total PDF pages per MinerU directory batch. Keeps large PDFs from forming a 900-page batch.",
+    )
     parser.add_argument("--mineru-batch-timeout", type=int, default=7200)
     parser.add_argument("--no-mineru-fallback-single", action="store_true")
     parser.add_argument("--preflight-workers", type=int, default=4)
@@ -229,6 +236,7 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         run_name=str(args.run_name),
         stage_root=args.stage_root.resolve() / str(args.run_name),
         mineru_batch_size=max(1, int(args.mineru_batch_size)),
+        mineru_batch_max_pages=max(1, int(args.mineru_batch_max_pages)),
         mineru_batch_timeout=max(1, int(args.mineru_batch_timeout)),
         mineru_batch_command=str(args.mineru_batch_command),
         mineru_fallback_single=not bool(args.no_mineru_fallback_single),
@@ -270,6 +278,7 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
                 "process_workers": config.process_workers,
                 "preflight_workers": config.preflight_workers,
                 "mineru_batch_size": config.mineru_batch_size,
+                "mineru_batch_max_pages": config.mineru_batch_max_pages,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -372,12 +381,18 @@ def run_mineru_stage(candidates: list[CandidateSample], config: StagedConfig) ->
     batch_root.mkdir(parents=True, exist_ok=True)
     log_root.mkdir(parents=True, exist_ok=True)
 
-    for batch_index, batch in enumerate(chunked(missing, config.mineru_batch_size)):
+    batches = build_mineru_batches(missing, config)
+    print(f"[staged] mineru planned_batches={len(batches)}", flush=True)
+    for batch_index, batch in enumerate(batches):
         batch_dir = batch_root / f"batch_{batch_index:05d}"
         prepare_pdf_batch_dir(batch, batch_dir)
         log_path = log_root / f"batch_{batch_index:05d}.log"
         command = format_mineru_batch_command(batch_dir, config)
-        print(f"[staged] mineru batch={batch_index} size={len(batch)} cmd={command}", flush=True)
+        batch_pages = sum(estimate_pdf_pages(candidate.pdf_path) for candidate in batch)
+        print(
+            f"[staged] mineru batch={batch_index} docs={len(batch)} pages={batch_pages} cmd={command}",
+            flush=True,
+        )
         completed = run_command_with_process_group_timeout(
             command,
             cwd=config.mini.project_root,
@@ -550,6 +565,42 @@ def default_mineru_batch_command() -> str:
 
 def chunked(items: list[CandidateSample], size: int) -> list[list[CandidateSample]]:
     return [items[index : index + size] for index in range(0, len(items), max(1, size))]
+
+
+def build_mineru_batches(candidates: list[CandidateSample], config: StagedConfig) -> list[list[CandidateSample]]:
+    """Pack MinerU directory batches by both document count and page count.
+
+    A document-count-only batch can accidentally contain hundreds of pages,
+    causing MinerU to sit in long, low-utilization windows. Page-aware packing
+    keeps batches smaller while preserving document order.
+    """
+
+    batches: list[list[CandidateSample]] = []
+    current: list[CandidateSample] = []
+    current_pages = 0
+    for candidate in candidates:
+        pages = max(1, estimate_pdf_pages(candidate.pdf_path))
+        would_exceed_docs = len(current) >= config.mineru_batch_size
+        would_exceed_pages = bool(current) and current_pages + pages > config.mineru_batch_max_pages
+        if would_exceed_docs or would_exceed_pages:
+            batches.append(current)
+            current = []
+            current_pages = 0
+        current.append(candidate)
+        current_pages += pages
+    if current:
+        batches.append(current)
+    return batches
+
+
+def estimate_pdf_pages(path: Path) -> int:
+    try:
+        import fitz
+
+        with fitz.open(path) as doc:
+            return int(doc.page_count)
+    except Exception:
+        return 1
 
 
 def load_excluded_document_ids(paths: tuple[Path, ...]) -> set[str]:

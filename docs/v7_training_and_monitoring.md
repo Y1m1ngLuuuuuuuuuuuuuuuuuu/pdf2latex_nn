@@ -52,7 +52,8 @@ python -u scripts/pipeline/build_v7_dataset_staged.py \
   --target 1000 \
   --manifest-output data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS.json \
   --error-log data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS_errors.jsonl \
-  --mineru-batch-size 64 \
+  --mineru-batch-size 16 \
+  --mineru-batch-max-pages 160 \
   --preflight-workers 4 \
   --process-workers 2 \
   --max-orphan-ratio 0.30 \
@@ -66,7 +67,8 @@ from `build_mini_dataset.py`, but changes scheduling for throughput:
 
 - TeX preflight rejects obvious parser-breaking sources before MinerU work.
 - MinerU receives directories of staged PDFs, amortizing service/model startup
-  over many documents.
+  over many documents. Batches are capped by both document count and estimated
+  page count so a few long PDFs do not create a 900-page low-utilization batch.
 - Existing MinerU/v7/graph/label artifacts are reused unless a force flag is
   supplied.
 - Graph building and label quality gates run through a bounded worker pool.
