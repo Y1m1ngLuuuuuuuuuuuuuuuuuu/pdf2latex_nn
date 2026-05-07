@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,20 @@ from src.pipeline.v7_contract import V7_GRAPH_SCHEMA_VERSION, V7_PIPELINE_VERSIO
 PAGE_SIZE = 1000.0
 FULL_WIDTH_THRESHOLD = 620.0
 TYPE_VOCAB = FEATURE_TYPE_VOCAB
+EDGE_SOURCE_TYPES = [
+    "sequential_forced",
+    "sequential",
+    "spatial_down",
+    "spatial_right",
+    "same_column_long_sight",
+    "float_skip",
+    "scope_anchor",
+    "list_run_scope",
+]
+LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
+TEXT_FLOW_TYPES = {"text", "list", "reference"}
+AUXILIARY_TYPES = {"page_header", "header", "page_footer", "footer", "page_number"}
 
 
 @dataclass(frozen=True)
@@ -128,8 +143,11 @@ class GraphBuildConfig:
     stride: int = 384
     batch_size: int = 16
     bidirectional_edges: bool = True
-    sequential_window: int = 3
+    sequential_window: int = 15
     spatial_k: int = 3
+    long_sight_window: int = 40
+    scope_anchor_window: int = 80
+    float_skip_window: int = 40
     fuse_micro_nodes: bool = False
 
 
@@ -191,6 +209,10 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
         spatial_k=config.spatial_k,
         bidirectional=config.bidirectional_edges,
         reading_order_indices=regime_order,
+        column_ids=column_ids,
+        long_sight_window=config.long_sight_window,
+        scope_anchor_window=config.scope_anchor_window,
+        float_skip_window=config.float_skip_window,
     )
     edge_index = build_edge_index_from_pairs(edge_pairs)
     edge_attr = build_edge_attr_matrix(
@@ -216,7 +238,10 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
             "strategy": "dual_view_knn",
             "sequential_window": config.sequential_window,
             "spatial_k": config.spatial_k,
-            "edge_source_types": ["sequential_forced", "sequential", "spatial_down", "spatial_right"],
+            "long_sight_window": config.long_sight_window,
+            "scope_anchor_window": config.scope_anchor_window,
+            "float_skip_window": config.float_skip_window,
+            "edge_source_types": EDGE_SOURCE_TYPES,
         },
     }
     data.source_path = str(input_path)
@@ -665,8 +690,19 @@ def build_candidate_edge_pairs(
     spatial_k: int = 3,
     bidirectional: bool = True,
     reading_order_indices: list[int] | None = None,
+    column_ids: list[int] | None = None,
+    long_sight_window: int = 40,
+    scope_anchor_window: int = 80,
+    float_skip_window: int = 40,
 ) -> list[tuple[int, int, str]]:
-    """Build dual-view candidate edges: reading-order window plus spatial sight lines."""
+    """Build candidate edges with high positive-edge recall.
+
+    The base graph is still dual-view: reading-order windows plus spatial
+    sight lines. Extra long-range edges cover two known blind spots:
+    section/list scope edges and text continuations separated by large floats.
+    These rules are PDF-only and must run for both training and inference; they
+    do not inspect TeX truth labels.
+    """
 
     edge_pairs: list[tuple[int, int, str]] = []
     seen: set[tuple[int, int]] = set()
@@ -682,6 +718,9 @@ def build_candidate_edge_pairs(
 
     node_count = len(items)
     order = sort_node_indices_by_reading_order(items) if reading_order_indices is None else _valid_reading_order_indices(reading_order_indices, node_count)
+    ranks = _ranks_from_order(order, node_count)
+    if column_ids is None:
+        column_ids = infer_column_ids(items)
     for pos in range(max(0, node_count - 1)):
         source_idx = order[pos]
         target_idx = order[pos + 1]
@@ -696,30 +735,204 @@ def build_candidate_edge_pairs(
         for target_pos in range(start, end):
             add_edge(source_idx, order[target_pos], "sequential")
 
-    if spatial_k <= 0:
-        return edge_pairs
-
-    centers = [_node_center(item) for item in items]
-    pages = [_first_item_page(item) for item in items]
-    for source_idx, (source_center, source_page) in enumerate(zip(centers, pages)):
-        if source_center is None or source_page is None:
-            continue
-        down_candidates = []
-        right_candidates = []
-        for target_idx, (target_center, target_page) in enumerate(zip(centers, pages)):
-            if target_idx == source_idx or target_center is None or target_page != source_page:
+    if spatial_k > 0:
+        centers = [_node_center(item) for item in items]
+        pages = [_first_item_page(item) for item in items]
+        for source_idx, (source_center, source_page) in enumerate(zip(centers, pages)):
+            if source_center is None or source_page is None:
                 continue
-            distance = _center_distance(source_center, target_center)
-            if target_center[1] > source_center[1]:
-                down_candidates.append((distance, target_idx))
-            if target_center[0] > source_center[0]:
-                right_candidates.append((distance, target_idx))
-        for _, target_idx in sorted(down_candidates)[:spatial_k]:
-            add_edge(source_idx, target_idx, "spatial_down")
-        for _, target_idx in sorted(right_candidates)[:spatial_k]:
-            add_edge(source_idx, target_idx, "spatial_right")
+            down_candidates = []
+            right_candidates = []
+            for target_idx, (target_center, target_page) in enumerate(zip(centers, pages)):
+                if target_idx == source_idx or target_center is None or target_page != source_page:
+                    continue
+                distance = _center_distance(source_center, target_center)
+                if target_center[1] > source_center[1]:
+                    down_candidates.append((distance, target_idx))
+                if target_center[0] > source_center[0]:
+                    right_candidates.append((distance, target_idx))
+            for _, target_idx in sorted(down_candidates)[:spatial_k]:
+                add_edge(source_idx, target_idx, "spatial_down")
+            for _, target_idx in sorted(right_candidates)[:spatial_k]:
+                add_edge(source_idx, target_idx, "spatial_right")
+
+    add_same_column_long_sight_edges(
+        items,
+        order=order,
+        column_ids=column_ids,
+        add_edge=add_edge,
+        max_window=long_sight_window,
+    )
+    add_float_skip_edges(
+        items,
+        order=order,
+        add_edge=add_edge,
+        max_window=float_skip_window,
+        bidirectional=bidirectional,
+    )
+    add_scope_anchor_edges(
+        items,
+        order=order,
+        ranks=ranks,
+        add_edge=add_edge,
+        max_window=scope_anchor_window,
+    )
 
     return edge_pairs
+
+
+def add_same_column_long_sight_edges(
+    items: list[dict[str, Any]],
+    *,
+    order: list[int],
+    column_ids: list[int],
+    add_edge: Any,
+    max_window: int,
+) -> None:
+    """Add sparse long sight-line edges inside the same logical column."""
+
+    if max_window <= 0:
+        return
+    for source_pos, source_idx in enumerate(order):
+        source = items[source_idx]
+        source_bbox = _last_bbox(source.get("bbox"))
+        source_page = _last_item_page(source)
+        source_column = column_ids[source_idx] if source_idx < len(column_ids) else 2
+        if source_bbox is None or source_page is None or not _is_flow_candidate(source):
+            continue
+        found = 0
+        for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+            target_idx = order[target_pos]
+            target = items[target_idx]
+            if _is_heading_item(target):
+                break
+            target_bbox = _first_bbox(target.get("bbox"))
+            target_page = _first_item_page(target)
+            target_column = column_ids[target_idx] if target_idx < len(column_ids) else 2
+            if target_bbox is None or target_page != source_page or target_column != source_column:
+                continue
+            if not _is_flow_candidate(target):
+                continue
+            if target_bbox[1] <= source_bbox[3]:
+                continue
+            add_edge(source_idx, target_idx, "same_column_long_sight")
+            found += 1
+            if found >= 2:
+                break
+
+
+def add_float_skip_edges(
+    items: list[dict[str, Any]],
+    *,
+    order: list[int],
+    add_edge: Any,
+    max_window: int,
+    bidirectional: bool,
+) -> None:
+    """Connect text before and after large non-text barriers."""
+
+    if max_window <= 0:
+        return
+    for source_pos, source_idx in enumerate(order):
+        source = items[source_idx]
+        if not _is_text_continuation_source(source):
+            continue
+        skipped_structural = False
+        skipped_nodes = 0
+        for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+            target_idx = order[target_pos]
+            target = items[target_idx]
+            if _is_heading_item(target):
+                break
+            if _is_structural_skip_item(target):
+                skipped_structural = True
+                skipped_nodes += 1
+                continue
+            if not _is_text_continuation_target(target):
+                skipped_nodes += 1
+                continue
+            if skipped_structural or skipped_nodes >= 4:
+                add_edge(source_idx, target_idx, "float_skip")
+                if bidirectional:
+                    add_edge(target_idx, source_idx, "float_skip")
+            break
+
+
+def add_scope_anchor_edges(
+    items: list[dict[str, Any]],
+    *,
+    order: list[int],
+    ranks: list[int],
+    add_edge: Any,
+    max_window: int,
+) -> None:
+    """Add heading/reference/list anchors to their local logical scope."""
+
+    if max_window <= 0:
+        return
+    for source_pos, source_idx in enumerate(order):
+        source = items[source_idx]
+        if _is_reference_heading(source):
+            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window, reference_only=True):
+                add_edge(source_idx, target_idx, "scope_anchor")
+            continue
+        if _is_heading_item(source):
+            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window):
+                add_edge(source_idx, target_idx, "scope_anchor")
+            continue
+        if _is_list_item_like(source):
+            for target_idx in _iter_list_run_targets(items, order, source_pos, max_window=max_window):
+                add_edge(source_idx, target_idx, "list_run_scope")
+
+
+def _iter_scope_targets(
+    items: list[dict[str, Any]],
+    order: list[int],
+    source_pos: int,
+    *,
+    max_window: int,
+    reference_only: bool = False,
+) -> list[int]:
+    targets: list[int] = []
+    for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+        target_idx = order[target_pos]
+        target = items[target_idx]
+        if _is_heading_item(target):
+            break
+        if _is_auxiliary_item(target):
+            continue
+        if reference_only and canonical_type(target) != "reference":
+            continue
+        if not reference_only and not _is_scope_child_candidate(target):
+            continue
+        targets.append(target_idx)
+    return targets
+
+
+def _iter_list_run_targets(
+    items: list[dict[str, Any]],
+    order: list[int],
+    source_pos: int,
+    *,
+    max_window: int,
+) -> list[int]:
+    targets: list[int] = []
+    saw_next_marker = False
+    for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+        target_idx = order[target_pos]
+        target = items[target_idx]
+        if _is_heading_item(target):
+            break
+        if _is_list_item_like(target):
+            saw_next_marker = True
+            targets.append(target_idx)
+            continue
+        if saw_next_marker and canonical_type(target) == "equation":
+            targets.append(target_idx)
+            continue
+        if saw_next_marker and _is_text_continuation_target(target) and not _is_list_item_like(target):
+            break
+    return targets
 
 
 def build_edge_attr_matrix(
@@ -1333,6 +1546,61 @@ def _item_is_bold(item: dict[str, Any]) -> bool:
         if span.get("is_bold"):
             bold_chars += count
     return total_chars > 0 and bold_chars / total_chars >= 0.5
+
+
+def _is_auxiliary_item(item: dict[str, Any]) -> bool:
+    raw_type = str(item.get("type") or item.get("raw_type") or "").lower()
+    canonical = canonical_type(item)
+    return raw_type in AUXILIARY_TYPES or canonical in AUXILIARY_TYPES
+
+
+def _is_heading_item(item: dict[str, Any]) -> bool:
+    return canonical_type(item) == "title"
+
+
+def _is_reference_heading(item: dict[str, Any]) -> bool:
+    if not _is_heading_item(item):
+        return False
+    text = _item_text(item).strip().lower()
+    normalized = re.sub(r"[^a-z]", "", text)
+    return normalized in {"references", "bibliography"}
+
+
+def _is_scope_child_candidate(item: dict[str, Any]) -> bool:
+    if _is_auxiliary_item(item):
+        return False
+    return canonical_type(item) in {"text", "list", "equation", "figure", "table", "algorithm", "code", "reference"}
+
+
+def _is_flow_candidate(item: dict[str, Any]) -> bool:
+    return canonical_type(item) in {"text", "list", "equation", "reference"}
+
+
+def _is_text_continuation_source(item: dict[str, Any]) -> bool:
+    if canonical_type(item) not in TEXT_FLOW_TYPES:
+        return False
+    text = _item_text(item).strip()
+    return bool(text)
+
+
+def _is_text_continuation_target(item: dict[str, Any]) -> bool:
+    return canonical_type(item) in TEXT_FLOW_TYPES and bool(_item_text(item).strip())
+
+
+def _is_structural_skip_item(item: dict[str, Any]) -> bool:
+    return canonical_type(item) in STRUCTURAL_SKIP_TYPES
+
+
+def _is_list_item_like(item: dict[str, Any]) -> bool:
+    if item.get("list_marker"):
+        return True
+    if canonical_type(item) == "list":
+        return True
+    return bool(LIST_MARKER_RE.match(_item_text(item)))
+
+
+def _item_text(item: dict[str, Any]) -> str:
+    return str(item.get("text_for_embedding") or item.get("text") or item.get("content") or "")
 
 
 def _style_char_ratio(item: dict[str, Any], flag: str) -> float:

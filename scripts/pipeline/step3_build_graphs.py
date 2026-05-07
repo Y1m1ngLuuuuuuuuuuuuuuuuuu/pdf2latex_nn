@@ -27,8 +27,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=384)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--sequential-window", type=int, default=3, help="Reading-order neighbors on each side")
+    parser.add_argument("--sequential-window", type=int, default=15, help="Reading-order neighbors on each side")
     parser.add_argument("--spatial-k", type=int, default=3, help="Line-of-sight neighbors per down/right direction")
+    parser.add_argument("--long-sight-window", type=int, default=40, help="Forward window for same-column long sight-line edges")
+    parser.add_argument("--scope-anchor-window", type=int, default=80, help="Forward window for heading/list/reference scope edges")
+    parser.add_argument("--float-skip-window", type=int, default=40, help="Forward window for text continuations across large floats")
     parser.add_argument("--directed", action="store_true", help="Use only forward reading-order window edges")
     parser.add_argument(
         "--fuse-micro-nodes",
@@ -49,6 +52,9 @@ def main() -> int:
         bidirectional_edges=not args.directed,
         sequential_window=args.sequential_window,
         spatial_k=args.spatial_k,
+        long_sight_window=args.long_sight_window,
+        scope_anchor_window=args.scope_anchor_window,
+        float_skip_window=args.float_skip_window,
         fuse_micro_nodes=args.fuse_micro_nodes,
     )
     data = build_graph_from_content_v7(args.input, args.output, config)

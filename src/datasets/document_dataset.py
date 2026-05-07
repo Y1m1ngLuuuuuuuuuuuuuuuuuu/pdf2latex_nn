@@ -62,8 +62,11 @@ class DocumentDatasetConfig:
     max_length: int = 512
     stride: int = 384
     batch_size: int = 16
-    sequential_window: int = 3
+    sequential_window: int = 15
     spatial_k: int = 3
+    long_sight_window: int = 40
+    scope_anchor_window: int = 80
+    float_skip_window: int = 40
     bidirectional_edges: bool = True
     alignment_threshold: float = 0.55
     expected_node_dim: int = FEATURE_SCHEMA.node_feature_dim
@@ -82,6 +85,9 @@ class DocumentDatasetConfig:
             batch_size=self.batch_size,
             sequential_window=self.sequential_window,
             spatial_k=self.spatial_k,
+            long_sight_window=self.long_sight_window,
+            scope_anchor_window=self.scope_anchor_window,
+            float_skip_window=self.float_skip_window,
             bidirectional_edges=self.bidirectional_edges,
         )
 

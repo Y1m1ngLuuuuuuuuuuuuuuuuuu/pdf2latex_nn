@@ -210,6 +210,18 @@ NONE = 2
 
 `SIBLING` is intentionally removed. Sibling order is recovered from v7 reading order and renderer sorting, not from GNN labels.
 
+Candidate edge construction is recall-first. The default graph builder uses:
+
+```text
+sequential_window = 15
+spatial_k = 3
+long_sight_window = 40
+scope_anchor_window = 80
+float_skip_window = 40
+```
+
+Before training on a rebuilt graph batch, run `tools/profile_candidate_edge_recall.py` on representative labeled samples. If any MERGE or PARENT_CHILD oracle edge is absent from `edge_index`, training on that sample is invalid because the GNN can never predict a label for an edge it was not given.
+
 The current automatic truth-labeling contract is documented in:
 
 ```text

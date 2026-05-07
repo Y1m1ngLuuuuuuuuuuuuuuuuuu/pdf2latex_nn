@@ -297,22 +297,40 @@ NONE = 2
 
 真值生成器契约见 `docs/ground_truth_labeling_v0.md`。`SIBLING` 不再作为训练类别；同级顺序依赖 v7 reading order 和 generator 渲染排序。
 
-`edge_attr` 是候选边的 directed relation feature。建图使用双重视角邻居采样：
+`edge_attr` 是候选边的 directed relation feature。建图使用高召回 Dual-View 采样：
 
 ```text
-sequential_window = 3
+sequential_window = 15
 spatial_k = 3
+long_sight_window = 40
+scope_anchor_window = 80
+float_skip_window = 40
 ```
 
-候选边来自两类视角：
+候选边来自基础邻居和三个召回补丁：
 
 ```text
 forced sequential neighbors: 按单双栏状态机阅读序强制连接 `i -> i+1`，默认同时连接 `i+1 -> i`
 reading-order neighbors: 每个节点连接单双栏状态机阅读序列前后各 k 个节点
 line-of-sight neighbors: 每个节点在同页向下、向右各寻找最近 k 个空间邻居
+same-column long sight: 在同页同栏内向后看更远的正文/公式候选，防止长段、长列表断链
+float skip: 正文被 figure/table/algorithm/equation 等大浮动体隔开时，补一条跨浮动体 continuation 候选边
+scope anchor: title/reference/list marker 向局部 scope 内节点补边，提升长 section、references 和列表 run 的 PARENT_CHILD 召回率
 ```
 
-重复边只保留第一条，优先级为 `sequential_forced`、reading-order，再是 `spatial_down`，最后是 `spatial_right`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。
+重复边只保留第一条，当前优先级为 `sequential_forced`、`sequential`、`spatial_down/right`、`same_column_long_sight`、`float_skip`、`scope_anchor`、`list_run_scope`。`Data.edge_source_types` 与 `edge_index` 列对齐，用于记录候选边来源。
+
+训练前必须用 oracle recall 探针检查真值正边是否都出现在 `edge_index` 中：
+
+```bash
+python tools/profile_candidate_edge_recall.py \
+  --content-json data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json \
+  --tex data/03_tex_source_pool/2501.00050/aaai25.tex \
+  --graph data/06_graph_features_v7/2501.00050_v7_graph.pt \
+  --output-json data/09_eval_reports/2501.00050_candidate_edge_recall.json
+```
+
+如果 `Candidate Edge Recall` 低于 100%，这篇样本不应进入训练；先扩大窗口或补召回规则，再重新 build graph。
 
 固定维度：
 

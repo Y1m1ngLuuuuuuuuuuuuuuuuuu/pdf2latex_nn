@@ -203,6 +203,31 @@ def test_candidate_edges_use_dual_view_neighbors():
     assert len({(source, target) for source, target, _ in pairs}) == len(pairs)
 
 
+def test_candidate_edges_add_scope_and_float_skip_recall_edges():
+    items = [
+        {**item("1. Method", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        item("Opening paragraph without ending", [80, 100, 480, 150], page=0),
+        {**item("", [80, 170, 920, 550], page=0, full=True), "type": "figure"},
+        item("continues after the figure.", [80, 580, 480, 630], page=0),
+        {**item("1. First item", [80, 660, 480, 700], page=0), "list_marker": "1."},
+        {**item("2. Second item", [80, 860, 480, 900], page=0), "list_marker": "2."},
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=1,
+        spatial_k=0,
+        long_sight_window=10,
+        scope_anchor_window=10,
+        float_skip_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 5, "scope_anchor") in typed
+    assert any(source == 1 and target == 3 for source, target, _ in pairs)
+    assert any(source == 4 and target == 5 for source, target, _ in pairs)
+
+
 def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
     if not has_torch():
         return
