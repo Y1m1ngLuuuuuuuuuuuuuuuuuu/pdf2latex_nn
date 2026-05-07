@@ -46,6 +46,7 @@ LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a
 STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
 TEXT_FLOW_TYPES = {"text", "list", "reference"}
 AUXILIARY_TYPES = {"page_header", "header", "page_footer", "footer", "page_number"}
+FOOTNOTE_TYPES = {"page_footnote", "footnote"}
 
 
 @dataclass(frozen=True)
@@ -930,9 +931,10 @@ def _iter_heading_scope_targets(
         target = items[target_idx]
         if not _is_heading_item(target):
             continue
-        target_level = _heading_level(target)
+        target_level = _heading_explicit_level(target)
         if target_level is None:
-            break
+            targets.append(target_idx)
+            continue
         if target_level <= source_level:
             break
         targets.append(target_idx)
@@ -1591,13 +1593,20 @@ def _is_heading_item(item: dict[str, Any]) -> bool:
 def _heading_level(item: dict[str, Any]) -> int | None:
     if not _is_heading_item(item):
         return None
+    numbered_level = _heading_explicit_level(item)
+    if numbered_level is not None:
+        return numbered_level
+    return 1
+
+
+def _heading_explicit_level(item: dict[str, Any]) -> int | None:
     numbered_level = title_numbering_level(_item_text(item))
     if numbered_level is not None:
         return numbered_level
     value = item.get("heading_level")
     if isinstance(value, int) and value > 0:
         return value
-    return 1
+    return None
 
 
 def _is_reference_heading(item: dict[str, Any]) -> bool:
@@ -1611,6 +1620,9 @@ def _is_reference_heading(item: dict[str, Any]) -> bool:
 def _is_scope_child_candidate(item: dict[str, Any]) -> bool:
     if _is_auxiliary_item(item):
         return False
+    raw_type = str(item.get("type") or item.get("raw_type") or "").lower()
+    if raw_type in FOOTNOTE_TYPES:
+        return True
     return canonical_type(item) in {"text", "list", "equation", "figure", "table", "algorithm", "code", "reference"}
 
 

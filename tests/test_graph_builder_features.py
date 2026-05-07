@@ -251,6 +251,26 @@ def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
     assert (0, 5, "scope_anchor") not in typed
 
 
+def test_candidate_edges_treat_unnumbered_and_appendix_headings_as_scope_children():
+    items = [
+        {**item("4 Methods", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        {**item("Tokenizing road users", [80, 160, 480, 190], page=0), "type": "title"},
+        {**item("C Additional Details", [80, 500, 920, 540], page=0, full=True), "type": "title"},
+        {**item("C.1 Maps and Jacobians", [80, 620, 480, 650], page=0), "type": "title"},
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=1,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 1, "scope_anchor") in typed
+    assert (2, 3, "scope_anchor") in typed
+
+
 def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
     if not has_torch():
         return
