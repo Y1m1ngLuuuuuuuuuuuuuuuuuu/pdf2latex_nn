@@ -254,8 +254,10 @@ def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
 def test_candidate_edges_treat_unnumbered_and_appendix_headings_as_scope_children():
     items = [
         {**item("4 Methods", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        item("Introductory methods text.", [80, 100, 480, 130], page=0),
         {**item("Tokenizing road users", [80, 160, 480, 190], page=0), "type": "title"},
         {**item("C Additional Details", [80, 500, 920, 540], page=0, full=True), "type": "title"},
+        item("Appendix introductory text.", [80, 560, 480, 590], page=0),
         {**item("C.1 Maps and Jacobians", [80, 620, 480, 650], page=0), "type": "title"},
     ]
 
@@ -267,8 +269,8 @@ def test_candidate_edges_treat_unnumbered_and_appendix_headings_as_scope_childre
     )
     typed = {(source, target, source_type) for source, target, source_type in pairs}
 
-    assert (0, 1, "scope_anchor") in typed
-    assert (2, 3, "scope_anchor") in typed
+    assert (0, 2, "scope_anchor") in typed
+    assert (3, 5, "scope_anchor") in typed
 
 
 def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
