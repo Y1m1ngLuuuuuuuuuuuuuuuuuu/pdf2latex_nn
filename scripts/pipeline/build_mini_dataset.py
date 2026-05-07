@@ -361,12 +361,23 @@ def run_command_with_process_group_timeout(command: str, *, cwd: Path, timeout: 
         stdout, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         terminate_process_group(process)
+        cleanup_mineru_fast_api_processes()
         try:
-            stdout, _ = process.communicate(timeout=10)
+            process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             kill_process_group(process)
-            stdout, _ = process.communicate()
-        raise RuntimeError(f"MinerU timed out after {timeout}s output_tail={stdout[-4000:]}") from exc
+            cleanup_mineru_fast_api_processes(kill=True)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        stdout = normalize_timeout_output(exc.output)
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=f"{stdout}\n[MinerU timed out after {timeout}s; process group cleaned]\n",
+            stderr=None,
+        )
     return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=None)
 
 
@@ -382,6 +393,26 @@ def kill_process_group(process: subprocess.Popen[str]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
+
+
+def cleanup_mineru_fast_api_processes(*, kill: bool = False) -> None:
+    """Best-effort cleanup for MinerU's detached local API worker."""
+
+    signal_name = "-KILL" if kill else "-TERM"
+    subprocess.run(
+        ["pkill", signal_name, "-f", "mineru.cli.fast_api"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def normalize_timeout_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return str(output)
 
 
 def find_mineru_content_source(document_id: str, mineru_output_dir: Path) -> Path | None:
