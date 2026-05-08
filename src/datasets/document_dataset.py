@@ -36,6 +36,8 @@ PYG_EXCLUDE_KEYS = [
     "pdf_to_tex",
     "pdf_to_tex_scores",
     "alignment_schema",
+    "alignment_quality",
+    "candidate_edge_recall_report",
     "source_path",
 ]
 
@@ -62,6 +64,7 @@ class DocumentDatasetConfig:
     max_length: int = 512
     stride: int = 384
     batch_size: int = 16
+    embedding_device: str = "cpu"
     sequential_window: int = 15
     spatial_k: int = 3
     long_sight_window: int = 40
@@ -83,6 +86,7 @@ class DocumentDatasetConfig:
             max_length=self.max_length,
             stride=self.stride,
             batch_size=self.batch_size,
+            embedding_device=self.embedding_device,
             sequential_window=self.sequential_window,
             spatial_k=self.spatial_k,
             long_sight_window=self.long_sight_window,
@@ -268,11 +272,19 @@ def sanitize_graph_data(
     data.edge_attr = torch.nan_to_num(data.edge_attr.to(dtype=torch.float32), nan=0.0, posinf=1e4, neginf=-1e4)
     data.edge_index = data.edge_index.to(dtype=torch.long)
 
-    if data.x.ndim != 2 or int(data.x.shape[1]) != cfg.expected_node_dim:
+    if data.x.ndim != 2:
+        raise GraphFilterError(f"bad node feature shape: {tuple(data.x.shape)}")
+    if int(data.x.shape[1]) < cfg.expected_node_dim:
+        data.x = torch.nn.functional.pad(data.x, (0, cfg.expected_node_dim - int(data.x.shape[1])))
+    elif int(data.x.shape[1]) > cfg.expected_node_dim:
         raise GraphFilterError(f"bad node feature shape: {tuple(data.x.shape)}")
     if data.edge_index.ndim != 2 or int(data.edge_index.shape[0]) != 2:
         raise GraphFilterError(f"bad edge_index shape: {tuple(data.edge_index.shape)}")
-    if data.edge_attr.ndim != 2 or int(data.edge_attr.shape[1]) != cfg.expected_edge_dim:
+    if data.edge_attr.ndim != 2:
+        raise GraphFilterError(f"bad edge_attr shape: {tuple(data.edge_attr.shape)}")
+    if int(data.edge_attr.shape[1]) < cfg.expected_edge_dim:
+        data.edge_attr = torch.nn.functional.pad(data.edge_attr, (0, cfg.expected_edge_dim - int(data.edge_attr.shape[1])))
+    elif int(data.edge_attr.shape[1]) > cfg.expected_edge_dim:
         raise GraphFilterError(f"bad edge_attr shape: {tuple(data.edge_attr.shape)}")
     if int(data.edge_attr.shape[0]) != int(data.edge_index.shape[1]):
         raise GraphFilterError("edge_attr rows must match edge_index columns")

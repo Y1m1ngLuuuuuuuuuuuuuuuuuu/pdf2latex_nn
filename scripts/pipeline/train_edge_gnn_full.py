@@ -48,12 +48,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--predictor-hidden-dims", default="1024,512,128")
+    parser.add_argument("--predictor-layer-norm", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--semantic-hidden-dim", type=int, default=96)
     parser.add_argument("--layout-hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--loss", choices=["cross_entropy", "focal"], default="cross_entropy")
-    parser.add_argument("--class-weights", choices=["none", "default", "inverse"], default="none")
+    parser.add_argument("--class-weights", choices=["none", "default", "inverse", "custom"], default="none")
+    parser.add_argument(
+        "--class-weight-values",
+        default="",
+        help="Comma-separated custom class weights for MERGE,PARENT_CHILD,NONE, e.g. 100,10,1.",
+    )
     parser.add_argument("--gamma", type=float, default=2.0, help="Focal loss gamma")
+    parser.add_argument(
+        "--positive-weight-multiplier",
+        type=float,
+        default=1.0,
+        help="Extra multiplier applied to MERGE and PARENT_CHILD class weights.",
+    )
+    parser.add_argument(
+        "--train-negative-dropout",
+        type=float,
+        default=0.0,
+        help="Training-only probability of dropping NONE edges before model forward.",
+    )
+    parser.add_argument(
+        "--ohem-negative-ratio",
+        type=float,
+        default=0.0,
+        help="Training-only OHEM: keep all positive edges and top ratio*positive_count NONE losses. 0 disables.",
+    )
+    parser.add_argument(
+        "--ohem-min-negatives",
+        type=int,
+        default=32,
+        help="Minimum hard NONE edges kept per training batch when OHEM is enabled.",
+    )
     parser.add_argument("--train-ratio", type=float, default=0.80)
     parser.add_argument("--val-ratio", type=float, default=0.10)
     parser.add_argument("--test-ratio", type=float, default=0.10)
@@ -98,6 +129,8 @@ def main() -> int:
         for name, samples in split_samples.items()
         if samples
     }
+    if "train" in loaders:
+        setattr(loaders["train"], "train_negative_dropout", args.train_negative_dropout)
 
     device = resolve_device(args.device, torch=torch)
     model = build_model(args).to(device)
@@ -111,13 +144,28 @@ def main() -> int:
     print(f"manifest={args.manifest}")
     print(f"dataset_size={len(dataset)} split_docs={ {key: len(value) for key, value in split_samples.items()} }")
     print(f"train_class_counts={count_labels(train_labels, torch=torch)}")
-    print(f"device={device} epochs={args.epochs} batch_size={args.batch_size} loss={args.loss} weights={args.class_weights}")
+    print(
+        f"device={device} epochs={args.epochs} batch_size={args.batch_size} "
+        f"loss={args.loss} weights={args.class_weights} "
+        f"positive_weight_multiplier={args.positive_weight_multiplier} "
+        f"train_negative_dropout={args.train_negative_dropout} "
+        f"ohem_negative_ratio={args.ohem_negative_ratio}"
+    )
 
     best_metric = -1.0
     best_epoch = 0
     history: list[dict[str, Any]] = []
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, loaders["train"], optimizer, loss_fn, device=device, torch=torch)
+        train_loss = train_one_epoch(
+            model,
+            loaders["train"],
+            optimizer,
+            loss_fn,
+            device=device,
+            torch=torch,
+            ohem_negative_ratio=args.ohem_negative_ratio,
+            ohem_min_negatives=args.ohem_min_negatives,
+        )
         row: dict[str, Any] = {"epoch": epoch, "train_loss": train_loss}
         for split_name, loader in loaders.items():
             metrics = evaluate(model, loader, loss_fn, device=device, torch=torch)
@@ -163,31 +211,86 @@ def build_model(args: argparse.Namespace) -> EdgeRelationGAT:
             heads=args.heads,
             num_layers=args.num_layers,
             dropout=args.dropout,
+            predictor_hidden_dims=parse_int_tuple(args.predictor_hidden_dims),
+            predictor_layer_norm=bool(args.predictor_layer_norm),
         )
     )
 
 
+def parse_int_tuple(value: str) -> tuple[int, ...]:
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    if not parts:
+        return ()
+    dims = tuple(int(part) for part in parts)
+    if any(dim <= 0 for dim in dims):
+        raise ValueError("predictor hidden dims must be positive integers")
+    return dims
+
+
 def build_loss(args: argparse.Namespace, train_labels: Any, *, device: Any, torch: Any) -> Any:
-    if args.class_weights == "inverse":
-        weights = compute_inverse_frequency_weights(train_labels.detach().cpu()).to(device)
-    elif args.class_weights == "default":
-        weights = default_class_weight_tensor(device=device)
-    else:
-        weights = None
+    weights = build_class_weights(args, train_labels, device=device, torch=torch)
     if args.loss == "focal":
         return FocalLoss(gamma=args.gamma, weight=weights)
     return torch.nn.CrossEntropyLoss(weight=weights)
 
 
-def train_one_epoch(model: Any, loader: Any, optimizer: Any, loss_fn: Any, *, device: Any, torch: Any) -> float:
+def build_class_weights(args: argparse.Namespace, train_labels: Any, *, device: Any, torch: Any) -> Any | None:
+    if args.class_weights == "custom":
+        weights = parse_class_weight_values(args.class_weight_values, device=device, torch=torch)
+    elif args.class_weights == "inverse":
+        weights = compute_inverse_frequency_weights(train_labels.detach().cpu()).to(device)
+    elif args.class_weights == "default":
+        weights = default_class_weight_tensor(device=device)
+    else:
+        weights = None
+    if weights is not None and args.positive_weight_multiplier != 1.0:
+        weights = weights.clone()
+        weights[:2] = weights[:2] * float(args.positive_weight_multiplier)
+    return weights
+
+
+def parse_class_weight_values(value: str, *, device: Any, torch: Any) -> Any:
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    if len(parts) != 3:
+        raise ValueError("--class-weight-values must contain exactly 3 comma-separated values")
+    weights = [float(part) for part in parts]
+    if any(weight <= 0 for weight in weights):
+        raise ValueError("--class-weight-values must be positive")
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def train_one_epoch(
+    model: Any,
+    loader: Any,
+    optimizer: Any,
+    loss_fn: Any,
+    *,
+    device: Any,
+    torch: Any,
+    ohem_negative_ratio: float = 0.0,
+    ohem_min_negatives: int = 32,
+) -> float:
     model.train()
     total_loss = 0.0
     batches = 0
     for batch in loader:
         batch = batch.to(device)
+        negative_dropout = float(getattr(loader, "train_negative_dropout", 0.0))
+        if negative_dropout > 0.0:
+            batch = apply_train_negative_edge_dropout(batch, negative_dropout, torch=torch)
         optimizer.zero_grad(set_to_none=True)
         logits = model(batch)
-        loss = loss_fn(logits, batch.y)
+        if ohem_negative_ratio > 0.0:
+            loss = ohem_cross_entropy_loss(
+                logits,
+                batch.y,
+                negative_ratio=ohem_negative_ratio,
+                min_negatives=ohem_min_negatives,
+                class_weights=getattr(loss_fn, "weight", None),
+                torch=torch,
+            )
+        else:
+            loss = loss_fn(logits, batch.y)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite training loss: {float(loss.detach().cpu().item())}")
         loss.backward()
@@ -195,6 +298,84 @@ def train_one_epoch(model: Any, loader: Any, optimizer: Any, loss_fn: Any, *, de
         total_loss += float(loss.detach().cpu().item())
         batches += 1
     return total_loss / max(1, batches)
+
+
+def ohem_cross_entropy_loss(
+    logits: Any,
+    target: Any,
+    *,
+    negative_ratio: float,
+    min_negatives: int,
+    class_weights: Any | None,
+    torch: Any,
+) -> Any:
+    """Online hard example mining for edge classification.
+
+    All MERGE/PARENT_CHILD edges are kept.  NONE edges are sorted by their
+    unreduced CE loss, and only the hardest K are kept, where
+    K ~= negative_ratio * positive_count.
+    """
+
+    y = torch.where(target.long() >= 2, torch.full_like(target.long(), 2), target.long())
+    weights = class_weights
+    if weights is not None:
+        weights = weights.to(device=logits.device, dtype=logits.dtype)
+    per_edge_loss = torch.nn.functional.cross_entropy(logits, y, weight=weights, reduction="none")
+    positive_mask = y != 2
+    negative_mask = y == 2
+    positive_loss = per_edge_loss[positive_mask]
+    negative_loss = per_edge_loss[negative_mask]
+
+    positive_count = int(positive_loss.numel())
+    negative_count = int(negative_loss.numel())
+    if negative_count > 0:
+        if positive_count > 0:
+            keep_negatives = max(int(round(positive_count * max(0.0, float(negative_ratio)))), int(min_negatives))
+        else:
+            keep_negatives = int(min_negatives)
+        keep_negatives = max(1, min(negative_count, keep_negatives))
+        negative_loss = torch.topk(negative_loss, k=keep_negatives, largest=True).values
+
+    if positive_count == 0:
+        selected = negative_loss
+    elif int(negative_loss.numel()) == 0:
+        selected = positive_loss
+    else:
+        selected = torch.cat([positive_loss, negative_loss], dim=0)
+    if int(selected.numel()) == 0:
+        return per_edge_loss.mean()
+    return selected.mean()
+
+
+def apply_train_negative_edge_dropout(batch: Any, dropout: float, *, torch: Any) -> Any:
+    """Drop a random subset of NONE edges for training-time forward/loss only.
+
+    The full graph distribution is still used by validation and test loaders.
+    This keeps the training signal from being washed out by the dominant NONE
+    class while preserving an honest evaluation distribution.
+    """
+
+    dropout = max(0.0, min(float(dropout), 0.999))
+    if dropout <= 0.0 or not hasattr(batch, "y") or int(batch.y.numel()) == 0:
+        return batch
+
+    y = torch.where(batch.y.long() >= 2, torch.full_like(batch.y.long(), 2), batch.y.long())
+    positive_mask = y != 2
+    negative_indices = torch.nonzero(y == 2, as_tuple=False).flatten()
+    keep_mask = positive_mask.clone()
+    if int(negative_indices.numel()) > 0:
+        random_keep = torch.rand(int(negative_indices.numel()), device=y.device) >= dropout
+        keep_mask[negative_indices] = random_keep
+    if int(keep_mask.sum().item()) == 0:
+        keep_mask[torch.randint(0, int(y.numel()), (1,), device=y.device)] = True
+
+    filtered = batch.clone()
+    filtered.edge_index = filtered.edge_index[:, keep_mask]
+    filtered.edge_attr = filtered.edge_attr[keep_mask]
+    filtered.y = y[keep_mask]
+    if hasattr(filtered, "edge_label") and filtered.edge_label is not None:
+        filtered.edge_label = filtered.y
+    return filtered
 
 
 def evaluate(model: Any, loader: Any, loss_fn: Any, *, device: Any, torch: Any) -> dict[str, Any]:

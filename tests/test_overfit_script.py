@@ -1,6 +1,7 @@
 import pytest
 
 import test_overfit
+from src.perception.schema import FeatureTensorSchema
 
 
 class TinyDataset:
@@ -45,7 +46,7 @@ def test_overfit_script_runs_one_epoch_on_tiny_valid_graph(tmp_path):
 
     graph_path = tmp_path / "graph.pt"
     data = Data(
-        x=torch.zeros((2, 818), dtype=torch.float32),
+        x=torch.zeros((2, FeatureTensorSchema().node_feature_dim), dtype=torch.float32),
         edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
         edge_attr=torch.zeros((2, 15), dtype=torch.float32),
     )

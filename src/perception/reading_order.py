@@ -88,6 +88,25 @@ FULL_WIDTH_TYPES = {
 }
 
 REFERENCE_LIST_TYPE = "reference_list"
+LAYOUT_LAYER_MAIN_TEXT = "main_text_flow"
+LAYOUT_LAYER_MATH = "math_layer"
+LAYOUT_LAYER_FLOAT = "float_layer"
+LAYOUT_LAYER_METADATA = "metadata_layer"
+LAYOUT_LAYER_NOISE = "noise_layer"
+LAYOUT_LAYER_OTHER = "other_layer"
+MATH_LAYOUT_TYPES = MICRO_INLINE_MATH_TYPES | MICRO_EQUATION_TYPES
+FLOAT_LAYOUT_TYPES = {"figure", "image", "chart", "table", "algorithm"}
+METADATA_LAYOUT_TYPES = {"title", "author", "affiliation", "abstract"}
+NOISE_LAYOUT_TYPES = AUXILIARY_TYPES | {"header", "footer"}
+FRONT_MATTER_AFFILIATION_RE = re.compile(
+    r"\b("
+    r"affiliation|department|university|institute|school|college|faculty|"
+    r"laborator(?:y|ies)|\blab\b|centre|center|research|academy|"
+    r"cnrs|inria|google|microsoft|norway|china|usa|uk|germany|france|italy"
+    r")\b",
+    re.IGNORECASE,
+)
+FRONT_MATTER_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 
 @dataclass(frozen=True)
@@ -331,9 +350,23 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
             item["column_fix_page_order"] = page_order
             ordered.append(item)
 
+    band_global_ids: dict[tuple[int, int], int] = {}
     for global_order, item in enumerate(ordered):
         item["global_order"] = global_order
         item["column_fix_global_order"] = global_order
+        item["layout_flow_order"] = global_order
+        page_idx = item.get("page_idx")
+        band_id = item.get("layout_band_id")
+        if isinstance(page_idx, int) and isinstance(band_id, int):
+            key = (page_idx, band_id)
+            if key not in band_global_ids:
+                band_global_ids[key] = len(band_global_ids)
+            item["layout_band_global_id"] = band_global_ids[key]
+            item["layout_band_global_order"] = band_global_ids[key]
+        else:
+            item["layout_band_global_id"] = None
+            item["layout_band_global_order"] = None
+    refine_front_matter_layers(ordered)
 
     return {
         "schema_version": "content_v7_columnfix_listmarkers",
@@ -350,6 +383,65 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
         },
         "items": ordered,
     }
+
+
+def refresh_content_v7_layout_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    """Recompute v7 layer/band/order metadata on an existing styled v7 JSON.
+
+    Older ``*_content_list_v7_styles.json`` files predate the explicit
+    layer/band contract. This function preserves all existing text, style and
+    bbox fields, but reruns the safe page-level column order repair so graph
+    building and relabeling see the same upgraded node order.
+    """
+
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise ValueError("Expected v7 payload with an items list")
+    page_groups: dict[int, list[dict[str, Any]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        page_idx = item.get("page_idx")
+        page = page_idx if isinstance(page_idx, int) else 0
+        hydrated = dict(item)
+        hydrate_empty_text_fields(hydrated)
+        page_groups.setdefault(page, []).append(hydrated)
+
+    ordered: list[dict[str, Any]] = []
+    for page_idx in sorted(page_groups):
+        fixed_page = fix_columnar_reading_order(page_groups[page_idx])
+        for page_order, item in enumerate(fixed_page):
+            item["column_fix_page_order"] = page_order
+            ordered.append(item)
+
+    band_global_ids: dict[tuple[int, int], int] = {}
+    for global_order, item in enumerate(ordered):
+        item["global_order"] = global_order
+        item["column_fix_global_order"] = global_order
+        item["layout_flow_order"] = global_order
+        page_idx = item.get("page_idx")
+        band_id = item.get("layout_band_id")
+        if isinstance(page_idx, int) and isinstance(band_id, int):
+            key = (page_idx, band_id)
+            if key not in band_global_ids:
+                band_global_ids[key] = len(band_global_ids)
+            item["layout_band_global_id"] = band_global_ids[key]
+            item["layout_band_global_order"] = band_global_ids[key]
+        else:
+            item["layout_band_global_id"] = None
+            item["layout_band_global_order"] = None
+    refine_front_matter_layers(ordered)
+
+    refreshed = dict(payload)
+    refreshed["schema_version"] = str(payload.get("schema_version") or "content_v7_columnfix_listmarkers")
+    refreshed["items"] = ordered
+    refreshed["layout_metadata_refreshed"] = True
+    refreshed["layout_metadata_version"] = "layer_band_v1"
+    config = dict(refreshed.get("config") or {})
+    config["page_object_layers"] = True
+    config["local_band_metadata"] = True
+    refreshed["config"] = config
+    return refreshed
 
 
 def fix_columnar_reading_order(
@@ -400,26 +492,40 @@ def fix_columnar_reading_order(
     if current_half_block:
         blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
 
-    ordered_views: list[ColumnarOrderView] = []
-    for block_type, block in blocks:
+    ordered_entries: list[tuple[ColumnarOrderView, int, str, int, int]] = []
+    for band_id, (block_type, block) in enumerate(blocks):
         if block_type == "FULL_SPAN":
-            ordered_views.extend(block)
+            for local_order, view in enumerate(block):
+                ordered_entries.append((view, band_id, "full_span", local_order, 2))
             continue
         left_list = [view for view in block if view.column_label == "LEFT_COL"]
         right_list = [view for view in block if view.column_label == "RIGHT_COL"]
         left_list.sort(key=_columnar_top_key)
         right_list.sort(key=_columnar_top_key)
-        ordered_views.extend(left_list + right_list)
+        combined = left_list + right_list
+        for local_order, view in enumerate(combined):
+            band_column_id = 0 if view.column_label == "LEFT_COL" else 1
+            ordered_entries.append((view, band_id, "double_column", local_order, band_column_id))
 
     ordered_nodes = []
-    for order, view in enumerate(ordered_views):
+    for order, (view, band_id, band_type, band_local_order, band_column_id) in enumerate(ordered_entries):
         node = dict(view.node)
+        layer = infer_layout_layer(node)
         node["column_fix_index"] = order
         node["column_fix_span"] = view.span_label
         node["column_fix_column"] = view.column_label
         node["column_fix_page_width"] = page_width
         node["column_fix_center_x"] = center_x
         node["column_fix_center_margin"] = margin
+        node["layout_layer"] = layer
+        node["layout_role"] = infer_layout_role(node, layer=layer)
+        node["layout_band_id"] = band_id
+        node["layout_band_type"] = band_type
+        node["layout_band_local_order"] = band_local_order
+        node["layout_band_column_id"] = band_column_id
+        node["layout_band_column"] = {0: "left", 1: "right", 2: "full"}.get(band_column_id, "unknown")
+        node["layout_is_band_boundary"] = is_layout_band_boundary_node(node, span_label=view.span_label, layer=layer)
+        node["is_main_flow_candidate"] = layer == LAYOUT_LAYER_MAIN_TEXT
         ordered_nodes.append(node)
     return ordered_nodes
 
@@ -614,12 +720,22 @@ def _annotate_columnar_order(
     annotated = []
     for order, node in enumerate(nodes):
         item = dict(node)
+        layer = infer_layout_layer(item)
         item["column_fix_index"] = order
         item["column_fix_span"] = "FULL_SPAN"
         item["column_fix_column"] = None
         item["column_fix_page_width"] = page_width
         item["column_fix_center_x"] = center_x
         item["column_fix_center_margin"] = margin
+        item["layout_layer"] = layer
+        item["layout_role"] = infer_layout_role(item, layer=layer)
+        item["layout_band_id"] = order
+        item["layout_band_type"] = "full_span"
+        item["layout_band_local_order"] = 0
+        item["layout_band_column_id"] = 2
+        item["layout_band_column"] = "full"
+        item["layout_is_band_boundary"] = is_layout_band_boundary_node(item, span_label="FULL_SPAN", layer=layer)
+        item["is_main_flow_candidate"] = layer == LAYOUT_LAYER_MAIN_TEXT
         annotated.append(item)
     return annotated
 
@@ -681,6 +797,255 @@ def _columnar_order_view(
 
 def _columnar_top_key(view: ColumnarOrderView) -> tuple[float, float, int]:
     return (view.y0, view.x0, view.original_index)
+
+
+def infer_layout_layer(node: dict[str, Any]) -> str:
+    """Assign a coarse page-object layer before graph construction.
+
+    This keeps main text flow, floats, display math, metadata, and visual noise
+    from competing inside one undifferentiated reading-order sequence.
+    """
+
+    node_type = _layout_raw_type(node)
+    text = _layout_text(node)
+    if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
+        return LAYOUT_LAYER_MAIN_TEXT
+    if node_type in NOISE_LAYOUT_TYPES:
+        return LAYOUT_LAYER_NOISE
+    if node_type in FLOAT_LAYOUT_TYPES:
+        return LAYOUT_LAYER_FLOAT
+    if node_type in MATH_LAYOUT_TYPES:
+        return LAYOUT_LAYER_MATH
+    if node_type in {"reference", "references", "bibliography", "list", "paragraph", "text", "code"}:
+        return LAYOUT_LAYER_MAIN_TEXT
+    if node_type in METADATA_LAYOUT_TYPES:
+        return LAYOUT_LAYER_METADATA if _looks_like_front_matter(node, text) else LAYOUT_LAYER_MAIN_TEXT
+    if text:
+        return LAYOUT_LAYER_MAIN_TEXT
+    return LAYOUT_LAYER_OTHER
+
+
+def infer_layout_role(node: dict[str, Any], *, layer: str | None = None) -> str:
+    node_type = _layout_raw_type(node)
+    layer = layer or infer_layout_layer(node)
+    if layer == LAYOUT_LAYER_NOISE:
+        return "noise"
+    if layer == LAYOUT_LAYER_FLOAT:
+        return node_type or "float"
+    if layer == LAYOUT_LAYER_MATH:
+        return "inline_math" if node_type in MICRO_INLINE_MATH_TYPES else "display_math"
+    if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
+        return "reference_list"
+    if detect_list_marker(_layout_text(node)):
+        return "list_item"
+    if node_type in {"title", "section", "subsection", "subsubsection", "heading"}:
+        return "heading"
+    return "body_text" if layer == LAYOUT_LAYER_MAIN_TEXT else layer
+
+
+def is_layout_band_boundary_node(node: dict[str, Any], *, span_label: str, layer: str | None = None) -> bool:
+    layer = layer or infer_layout_layer(node)
+    if layer in {LAYOUT_LAYER_FLOAT, LAYOUT_LAYER_MATH, LAYOUT_LAYER_METADATA}:
+        return True
+    return span_label == "FULL_SPAN" and infer_layout_role(node, layer=layer) in {"heading", "reference_list"}
+
+
+def _layout_raw_type(node: dict[str, Any]) -> str:
+    block = node.get("block")
+    block_type = block.get("type") if isinstance(block, dict) else None
+    return str(node.get("type") or node.get("raw_type") or block_type or "").strip().lower()
+
+
+def _layout_text(node: dict[str, Any]) -> str:
+    for key in ("text_for_embedding", "text", "content", "latex"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    span_text = style_spans_text(node.get("style_spans"))
+    if span_text:
+        return span_text
+    block = node.get("block")
+    if isinstance(block, dict):
+        text = extract_text(block)
+        if text:
+            return text
+    return ""
+
+
+def hydrate_empty_text_fields(node: dict[str, Any]) -> None:
+    """Fill empty v7 text fields from PyMuPDF spans without overriding OCR text."""
+
+    if str(node.get("text_for_embedding") or node.get("text") or "").strip():
+        return
+    fallback = style_spans_text(node.get("style_spans"))
+    if not fallback:
+        block = node.get("block")
+        fallback = extract_text(block) if isinstance(block, dict) else ""
+    if not fallback.strip():
+        return
+    node.setdefault("text", fallback)
+    node.setdefault("text_for_embedding", fallback)
+    if not str(node.get("text") or "").strip():
+        node["text"] = fallback
+    if not str(node.get("text_for_embedding") or "").strip():
+        node["text_for_embedding"] = fallback
+    node["text_fallback_source"] = "style_spans"
+
+
+def style_spans_text(spans: Any) -> str:
+    if not isinstance(spans, list):
+        return ""
+    parts: list[str] = []
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        text = str(span.get("text") or span.get("content") or "").strip()
+        if text:
+            parts.append(text)
+    return join_text_fragments(parts)
+
+
+def join_text_fragments(parts: list[str]) -> str:
+    text = ""
+    no_space_before = set(",.;:!?%)]}”’")
+    no_space_after = set("([{“‘")
+    for raw in parts:
+        part = raw.strip()
+        if not part:
+            continue
+        if not text:
+            text = part
+            continue
+        if text[-1] in no_space_after or part[0] in no_space_before or text[-1] in {"-", "/", "\u2010", "\u2011"}:
+            text += part
+        else:
+            text += " " + part
+    return text
+
+
+def _looks_like_front_matter(node: dict[str, Any], text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return (
+        normalized in {"abstract", "author", "authors"}
+        or normalized.startswith("abstract")
+        or FRONT_MATTER_EMAIL_RE.search(text) is not None
+        or FRONT_MATTER_AFFILIATION_RE.search(text) is not None
+    )
+
+
+def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
+    """Mark title/author/abstract material before the first body heading.
+
+    MinerU uses the same raw ``title`` type for the paper title and section
+    headings. After v7 has produced a global order, this pass separates the
+    front matter so it can stay out of main paragraph merge/flow decisions.
+    """
+
+    first_body_heading_order: int | None = None
+    first_body_heading_y0: float | None = None
+    for index, item in enumerate(items):
+        if item.get("page_idx") not in {0, None}:
+            continue
+        if not _is_body_heading_candidate(item):
+            continue
+        first_body_heading_order = index
+        bbox = _parse_bbox(item.get("bbox"))
+        first_body_heading_y0 = bbox[1] if bbox is not None else None
+        break
+    if first_body_heading_order is None:
+        return
+    for index, item in enumerate(items[:first_body_heading_order]):
+        raw = _layout_raw_type(item)
+        text = _layout_text(item)
+        if raw in NOISE_LAYOUT_TYPES or not text:
+            continue
+        if raw in {"title", "paragraph", "text", "author", "affiliation"} or _front_matter_text_marker(text):
+            item["layout_layer"] = LAYOUT_LAYER_METADATA
+            item["layout_role"] = "abstract" if _front_matter_text_marker(text) else "front_matter"
+            item["is_main_flow_candidate"] = False
+    for item in items:
+        if _looks_like_top_page_author_block(item, first_body_heading_y0=first_body_heading_y0):
+            item["layout_layer"] = LAYOUT_LAYER_METADATA
+            item["layout_role"] = _front_matter_role(item)
+            item["is_main_flow_candidate"] = False
+
+
+def _is_body_heading_candidate(item: dict[str, Any]) -> bool:
+    raw = _layout_raw_type(item)
+    if raw not in {"title", "section", "subsection", "subsubsection", "heading"}:
+        return False
+    normalized = " ".join(_layout_text(item).lower().split())
+    if not normalized:
+        return False
+    if _front_matter_text_marker(normalized):
+        return False
+    if normalized.startswith("introduction") or normalized.startswith("1 introduction"):
+        return True
+    if normalized.startswith(("references", "bibliography", "appendix")):
+        return True
+    return bool(re.match(r"^(?:\d+(?:\.\d+)*|[ivxlcdm]+)\.?\s+\S+", normalized))
+
+
+def _front_matter_text_marker(text: str) -> bool:
+    normalized = " ".join(str(text).lower().split())
+    return normalized.startswith(("abstract", "keywords", "author", "authors", "affiliation"))
+
+
+def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_heading_y0: float | None) -> bool:
+    """Catch two-column author/affiliation blocks that sort after the first heading."""
+
+    if item.get("page_idx") not in {0, None}:
+        return False
+    text = _layout_text(item).strip()
+    if not text:
+        return False
+    raw = _layout_raw_type(item)
+    if raw in NOISE_LAYOUT_TYPES or raw in FLOAT_LAYOUT_TYPES or raw in MATH_LAYOUT_TYPES:
+        return False
+    bbox = _parse_bbox(item.get("bbox"))
+    if bbox is None:
+        return False
+    y0 = bbox[1]
+    if first_body_heading_y0 is not None and y0 >= first_body_heading_y0:
+        return False
+    normalized = " ".join(text.lower().split())
+    if _front_matter_text_marker(text):
+        return True
+    if FRONT_MATTER_EMAIL_RE.search(text) or FRONT_MATTER_AFFILIATION_RE.search(text):
+        return True
+    # Author names in two-column IEEE-like papers are short top-page lines.
+    if y0 <= 280 and _looks_like_author_name(text) and not normalized.startswith(("fig", "table", "algorithm")):
+        return True
+    return False
+
+
+def _front_matter_role(item: dict[str, Any]) -> str:
+    text = _layout_text(item)
+    if _front_matter_text_marker(text):
+        return "abstract" if text.strip().lower().startswith("abstract") else "front_matter"
+    if FRONT_MATTER_EMAIL_RE.search(text) or FRONT_MATTER_AFFILIATION_RE.search(text):
+        return "affiliation"
+    if _looks_like_author_name(text):
+        return "author"
+    return "front_matter"
+
+
+def _looks_like_author_name(text: str) -> bool:
+    stripped = " ".join(text.replace(",", " ").split())
+    if not stripped or len(stripped) > 80:
+        return False
+    if any(char.isdigit() for char in stripped):
+        return False
+    if re.search(r"[.!?;:]", stripped):
+        return False
+    words = [word for word in re.split(r"\s+", stripped) if word]
+    if not 2 <= len(words) <= 6:
+        return False
+    long_words = [word for word in words if len(word.strip("-'")) >= 2]
+    if len(long_words) < 2:
+        return False
+    capitalized = sum(1 for word in long_words if word[0].isupper())
+    return capitalized >= max(2, int(len(long_words) * 0.6))
 
 
 def detect_list_marker(text: str) -> dict[str, str] | None:
@@ -872,16 +1237,7 @@ def _micro_node_type(node: dict[str, Any]) -> str:
 
 
 def _micro_node_text(node: dict[str, Any]) -> str:
-    for key in ("text_for_embedding", "text", "content", "latex"):
-        value = node.get(key)
-        if isinstance(value, str) and value:
-            return value
-    block = node.get("block")
-    if isinstance(block, dict):
-        text = extract_text(block)
-        if text:
-            return text
-    return ""
+    return _layout_text(node)
 
 
 def _micro_single_bbox(node: dict[str, Any]) -> tuple[float, float, float, float] | None:

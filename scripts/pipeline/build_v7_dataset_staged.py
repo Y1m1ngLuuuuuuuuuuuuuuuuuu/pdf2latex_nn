@@ -125,6 +125,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=REPO_ROOT / "models/huggingface/allenai/scibert_scivocab_uncased",
     )
+    parser.add_argument(
+        "--embedding-device",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="Device for SciBERT feature extraction. CPU avoids CUDA init errors in multiprocessing workers.",
+    )
     parser.add_argument("--run-name", default=lambda_run_name())
     parser.add_argument("--stage-root", type=Path, default=REPO_ROOT / "data/_tmp_v7_staged_builder")
     parser.add_argument("--target", type=int, default=1000)
@@ -213,6 +219,7 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         manifest_output=args.manifest_output.resolve(),
         error_log=args.error_log.resolve(),
         model_path=args.model_path.resolve(),
+        embedding_device=str(args.embedding_device),
         target=target,
         max_candidates=int(args.max_candidates) if args.max_candidates is not None else None,
         main_tex_names=main_tex_names,
@@ -506,6 +513,9 @@ def process_candidate_worker(candidate: CandidateSample, config: MiniDatasetConf
 
 
 def load_existing_processed_samples(candidates: list[CandidateSample], config: StagedConfig) -> list[ProcessedSample]:
+    if not config.mini.reuse_existing or config.mini.force_graph or config.mini.force_label:
+        return []
+
     samples: list[ProcessedSample] = []
     for candidate in candidates:
         if len(samples) >= config.mini.target:

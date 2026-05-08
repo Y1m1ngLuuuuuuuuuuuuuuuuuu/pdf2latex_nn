@@ -74,10 +74,35 @@ def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> Edge
                 config,
                 node_projector=replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim),
             )
-    head_weight = state_dict.get("edge_head.3.weight")
-    if head_weight is not None and int(head_weight.shape[0]) != config.num_classes:
-        config = replace(config, num_classes=int(head_weight.shape[0]))
+    checkpoint_edge_dim = infer_checkpoint_edge_dim(state_dict, config=config)
+    if checkpoint_edge_dim is not None and checkpoint_edge_dim != config.edge_dim:
+        config = replace(config, edge_dim=checkpoint_edge_dim)
+    legacy_head_weight = state_dict.get("edge_head.3.weight")
+    if legacy_head_weight is not None and "edge_head.4.weight" not in state_dict and "edge_head.12.weight" not in state_dict:
+        first_head_weight = state_dict.get("edge_head.0.weight")
+        if first_head_weight is not None:
+            config = replace(
+                config,
+                predictor_hidden_dims=(int(first_head_weight.shape[0]),),
+                predictor_layer_norm=False,
+            )
+        if int(legacy_head_weight.shape[0]) != config.num_classes:
+            config = replace(config, num_classes=int(legacy_head_weight.shape[0]))
     return config
+
+
+def infer_checkpoint_edge_dim(state_dict: Any, *, config: EdgeGATConfig) -> int | None:
+    for key in ("convs.0.lin_edge.weight", "convs.0.lin_edge.lin.weight"):
+        weight = state_dict.get(key)
+        if weight is not None and getattr(weight, "ndim", 0) == 2:
+            return int(weight.shape[1])
+    first_head_weight = state_dict.get("edge_head.0.weight")
+    if first_head_weight is not None and getattr(first_head_weight, "ndim", 0) == 2:
+        node_relation_dim = int(config.hidden_dim) * int(config.heads) * 4
+        inferred = int(first_head_weight.shape[1]) - node_relation_dim
+        if inferred > 0:
+            return inferred
+    return None
 
 
 if __name__ == "__main__":

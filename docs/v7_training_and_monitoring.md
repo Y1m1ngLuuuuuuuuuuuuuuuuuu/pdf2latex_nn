@@ -81,19 +81,40 @@ outputs.
 
 ## Full GNN Training
 
-After the batch manifest is written, start full training from the generated
-labeled graph `.pt` files:
+After the batch manifest is written, first freeze a strict document-level
+training manifest. For the current v7 run we keep only documents whose orphan
+ratio is at most `0.30`, whose candidate edge recall is complete, and whose
+graph contains at least one non-NONE relation:
+
+```bash
+python scripts/pipeline/filter_split_manifest.py \
+  --input data/00_manifests/v7_reprocess_1776_scibert_cpu_YYYYMMDD_HHMMSS.json \
+  --output data/00_manifests/v7_reprocess_1776_scibert_cpu_orphan030.json \
+  --max-orphan-ratio 0.30 \
+  --min-candidate-recall 1.0 \
+  --min-non-none-edges 1 \
+  --split-dir data/00_manifests/v7_reprocess_1776_scibert_cpu_orphan030_splits \
+  --seed 7
+```
+
+The emitted train/val/test files are document-level splits. Do not split edges
+or pages independently, because that leaks a paper's layout style across train
+and validation.
+
+Then start full training from the generated labeled graph `.pt` files:
 
 ```bash
 python scripts/pipeline/train_edge_gnn_full.py \
   --root data/06_graph_features_v7/full_train_dataset \
-  --manifest data/00_manifests/v7_build1000_YYYYMMDD_HHMMSS.json \
+  --manifest data/00_manifests/v7_reprocess_1776_scibert_cpu_orphan030.json \
   --output-dir data/09_eval_reports/full_train_v7_YYYYMMDD_HHMMSS \
   --epochs 30 \
   --batch-size 8 \
   --lr 5e-4 \
-  --loss cross_entropy \
-  --class-weights none
+  --loss focal \
+  --class-weights inverse \
+  --positive-weight-multiplier 2.0 \
+  --train-negative-dropout 0.80
 ```
 
 Outputs:
@@ -107,3 +128,24 @@ Outputs:
 The default checkpoint selection metric is `val_positive_macro_f1`, the mean F1
 of MERGE and PARENT_CHILD. This keeps the focus on structural relations instead
 of the dominant NONE class.
+
+`--train-negative-dropout` is applied only inside the training loader. Validation
+and test metrics are always computed on the original edge distribution.
+
+## MERGE Label Contract
+
+MERGE is a physical stitch relation, not a broad "same TeX object" relation.
+The labeler now applies these gates before assigning `MERGE=0`:
+
+- Both PDF nodes must map to the same TeX node.
+- They must be adjacent fragments within that TeX node's aligned PDF span.
+- Titles, page noise, document-root metadata, figures, tables, algorithms, and
+  mixed-type text/equation pairs are never MERGE.
+- List markers block backward merge into a previous item.
+- References are not globally merged just because they live under the
+  References section; reference structure is rendered from `reference_items`
+  and section scope.
+
+The residual global fallback is intentionally orphan-only. It recovers high
+confidence text fragments displaced by floats/tables, then lets the same
+adjacent-fragment MERGE gate decide stitch edges.

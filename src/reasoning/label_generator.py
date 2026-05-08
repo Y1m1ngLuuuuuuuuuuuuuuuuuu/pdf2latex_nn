@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from src.perception.reading_order import fuse_micro_nodes
+from src.perception.reading_order import fuse_micro_nodes, style_spans_text
 from src.perception.title_features import title_numbering_level
 from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_file
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
@@ -98,7 +98,7 @@ class AlignmentLabelerConfig:
     max_window_nodes: int = 8
     max_window_chars_ratio: float = 1.8
     score_drop_tolerance: float = 8.0
-    tex_lookahead_nodes: int = 4
+    tex_lookahead_nodes: int = 24
     tail_absorption_nodes: int = 3
     equation_blind_alignment_window: int = 2
     relation_strategy: str = "visual_first"
@@ -115,6 +115,8 @@ class AlignmentLabelerConfig:
     page_bottom_y_threshold: float = 955.0
     max_expected_orphan_clean_chars: int = 24
     caption_fallback_threshold: float = 80.0
+    global_text_fallback_threshold: float = 92.0
+    global_text_fallback_min_chars: int = 18
 
 
 SECTION_LEVELS = {
@@ -371,7 +373,7 @@ class AlignmentLabeler:
             tex_node = tex_sequence[tex_cursor]
             window = self.find_alignment_window(pdf_cursor, tex_node)
             if window is None:
-                next_tex_cursor = self.find_better_tex_candidate(pdf_node.clean, tex_sequence, tex_cursor)
+                next_tex_cursor = self.find_better_tex_candidate(pdf_node, tex_sequence, tex_cursor)
                 if next_tex_cursor is not None:
                     tex_cursor = next_tex_cursor
                     continue
@@ -403,6 +405,8 @@ class AlignmentLabeler:
             tex_cursor += 1
 
         self.apply_global_caption_fallback(matches)
+        self.apply_global_text_fallback(matches)
+        self.apply_neighbor_fragment_fallback(matches)
         return matches
 
     def apply_global_caption_fallback(self, matches: list[AlignmentMatch]) -> None:
@@ -456,6 +460,84 @@ class AlignmentLabeler:
             if not available_captions:
                 return
 
+    def apply_global_text_fallback(self, matches: list[AlignmentMatch]) -> None:
+        """Recover high-confidence residual text matches after monotonic pass.
+
+        This is intentionally a narrow orphan-only fallback. It does not replace
+        the ordered sliding window, but it rescues body paragraphs displaced by
+        floats/tables when a PDF block is a near-literal fragment of a TeX node.
+        """
+
+        if self.config.global_text_fallback_threshold <= 0:
+            return
+        candidates = [
+            node
+            for node in self.tex_nodes.values()
+            if node.node_type in {STANDARD_PARAGRAPH_NODE, STANDARD_LIST_ITEM_NODE}
+            and len(node.clean) >= self.config.global_text_fallback_min_chars
+        ]
+        if not candidates:
+            return
+        for pdf_node in self.pdf_nodes:
+            index = pdf_node.node_index
+            if matches[index].tex_id is not None:
+                continue
+            if self.is_expected_visual_orphan(pdf_node):
+                continue
+            if canonical_pdf_merge_type(pdf_node.item) not in {"text", "reference"}:
+                continue
+            if len(pdf_node.clean) < self.config.global_text_fallback_min_chars:
+                continue
+            best_node: TexAlignmentNode | None = None
+            best_score = 0.0
+            for tex_node in candidates:
+                score = max(
+                    fragment_ratio_score(pdf_node.clean, tex_node.clean),
+                    levenshtein_ratio_score(pdf_node.clean, tex_node.clean),
+                )
+                if score > best_score:
+                    best_node = tex_node
+                    best_score = score
+            if best_node is None or best_score < self.config.global_text_fallback_threshold:
+                continue
+            matches[index] = AlignmentMatch(pdf_node_index=index, tex_id=best_node.tex_id, score=best_score)
+            self.tex_to_pdf_indices.setdefault(best_node.tex_id, []).append(index)
+            self.tex_to_pdf_indices[best_node.tex_id] = sorted(set(self.tex_to_pdf_indices[best_node.tex_id]))
+
+    def apply_neighbor_fragment_fallback(self, matches: list[AlignmentMatch]) -> None:
+        """Recover short orphan fragments that are continuations of neighbors.
+
+        A common MinerU split is a long paragraph block followed by a short
+        final line in the next column. If the main sliding pass aligns the long
+        block but leaves the short line orphaned, this local fallback can safely
+        attach the short line to the same TeX node when it is a literal fragment
+        of that TeX text.
+        """
+
+        for index, pdf_node in enumerate(self.pdf_nodes):
+            if matches[index].tex_id is not None:
+                continue
+            if self.is_expected_visual_orphan(pdf_node):
+                continue
+            if len(pdf_node.clean) < self.config.min_clean_chars:
+                continue
+            for neighbor_index in (index - 1, index + 1):
+                if not 0 <= neighbor_index < len(matches):
+                    continue
+                neighbor_tex_id = matches[neighbor_index].tex_id
+                if not neighbor_tex_id:
+                    continue
+                tex_node = self.tex_nodes.get(neighbor_tex_id)
+                if tex_node is None or tex_node.node_type not in {STANDARD_PARAGRAPH_NODE, STANDARD_LIST_ITEM_NODE}:
+                    continue
+                if not self.is_tex_fragment(pdf_node.clean, tex_node.clean):
+                    continue
+                score = fragment_ratio_score(pdf_node.clean, tex_node.clean)
+                matches[index] = AlignmentMatch(pdf_node_index=index, tex_id=neighbor_tex_id, score=score)
+                self.tex_to_pdf_indices.setdefault(neighbor_tex_id, []).append(index)
+                self.tex_to_pdf_indices[neighbor_tex_id] = sorted(set(self.tex_to_pdf_indices[neighbor_tex_id]))
+                break
+
     def is_alignable_tex_node(self, node: TexAlignmentNode) -> bool:
         if node.node_type == STANDARD_EQUATION_NODE:
             return bool(node.clean)
@@ -470,6 +552,8 @@ class AlignmentLabeler:
             blind = self.find_blind_equation_window(start_index)
             if blind is not None:
                 return blind
+        if tex_node.node_type == STANDARD_SECTION_NODE and not self.pdf_node_can_match_section(self.pdf_nodes[start_index], tex_node):
+            return None
         buffer_parts: list[str] = []
         best_score = 0.0
         best_end = start_index
@@ -490,9 +574,24 @@ class AlignmentLabeler:
                 break
             if best_end < end_index and best_score - score > self.config.score_drop_tolerance:
                 break
-        if self.is_tex_fragment(self.pdf_nodes[start_index].clean, tex_node.clean):
+        if tex_node.node_type != STANDARD_SECTION_NODE and self.is_tex_fragment(self.pdf_nodes[start_index].clean, tex_node.clean):
             return start_index, start_index, fragment_ratio_score(self.pdf_nodes[start_index].clean, tex_node.clean)
         return None
+
+    def pdf_node_can_match_section(self, pdf_node: PdfAlignmentNode, tex_node: TexAlignmentNode) -> bool:
+        """Avoid matching short TeX headings to arbitrary long body paragraphs."""
+
+        raw_type = canonical_pdf_type(pdf_node.item)
+        if raw_type in HEADING_TYPES:
+            return True
+        if len(pdf_node.clean) < self.config.min_clean_chars or len(tex_node.clean) < self.config.min_clean_chars:
+            return False
+        text = pdf_node.text.strip()
+        if LIST_MARKER_RE.match(text):
+            return False
+        if len(pdf_node.clean) <= max(len(tex_node.clean) * 2 + 8, 32) and fragment_ratio_score(pdf_node.clean, tex_node.clean) >= 92.0:
+            return True
+        return False
 
     def find_blind_equation_window(self, start_index: int) -> tuple[int, int, float] | None:
         upper = min(len(self.pdf_nodes), start_index + max(1, self.config.equation_blind_alignment_window + 1))
@@ -503,17 +602,22 @@ class AlignmentLabeler:
 
     def find_better_tex_candidate(
         self,
-        pdf_clean: str,
+        pdf_node: PdfAlignmentNode,
         tex_sequence: list[TexAlignmentNode],
         tex_cursor: int,
     ) -> int | None:
+        pdf_clean = pdf_node.clean
         current = tex_sequence[tex_cursor]
         current_score = fragment_ratio_score(pdf_clean, current.clean)
+        if current.node_type == STANDARD_SECTION_NODE and not self.pdf_node_can_match_section(pdf_node, current):
+            current_score = 0.0
         best_cursor: int | None = None
         best_score = current_score
         upper = min(len(tex_sequence), tex_cursor + 1 + max(0, self.config.tex_lookahead_nodes))
         for candidate_cursor in range(tex_cursor + 1, upper):
             candidate = tex_sequence[candidate_cursor]
+            if candidate.node_type == STANDARD_SECTION_NODE and not self.pdf_node_can_match_section(pdf_node, candidate):
+                continue
             score = fragment_ratio_score(pdf_clean, candidate.clean)
             if score > best_score:
                 best_score = score
@@ -549,8 +653,12 @@ class AlignmentLabeler:
         return torch.tensor(labels, dtype=torch.long)
 
     def infer_relation(self, source_index: int, target_index: int) -> int:
-        if self.same_reference_scope(source_index, target_index):
-            return int(TexRelationLabel.MERGE)
+        if self.node_is_unlabelable_visual_orphan(source_index) or self.node_is_unlabelable_visual_orphan(target_index):
+            return int(TexRelationLabel.NONE)
+        source_item = self.pdf_nodes[source_index].item if 0 <= source_index < len(self.pdf_nodes) else {}
+        target_item = self.pdf_nodes[target_index].item if 0 <= target_index < len(self.pdf_nodes) else {}
+        if relation_layers_are_incompatible(source_item, target_item):
+            return int(TexRelationLabel.NONE)
         source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
         target_match = self.matches[target_index] if 0 <= target_index < len(self.matches) else None
         if source_match is None or target_match is None or not source_match.tex_id or not target_match.tex_id:
@@ -558,6 +666,10 @@ class AlignmentLabeler:
         path_u = self.tex_nodes[source_match.tex_id].path_ids
         path_v = self.tex_nodes[target_match.tex_id].path_ids
         if path_u == path_v:
+            if self.is_document_root_scoped_match(source_match) or self.is_document_root_scoped_match(target_match):
+                return int(TexRelationLabel.NONE)
+            if not self.same_tex_node_are_adjacent_fragments(source_index, target_index, source_match.tex_id):
+                return int(TexRelationLabel.NONE)
             if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
                 return int(TexRelationLabel.NONE)
             if same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
@@ -602,6 +714,21 @@ class AlignmentLabeler:
         indices = self.tex_to_pdf_indices.get(tex_id, [])
         return bool(indices) and pdf_index == min(indices)
 
+    def same_tex_node_are_adjacent_fragments(self, source_index: int, target_index: int, tex_id: str | None) -> bool:
+        """Only direct neighboring PDF fragments of one TeX node become MERGE.
+
+        Fuzzy alignment maps one TeX paragraph/list item to a span of PDF
+        boxes. MERGE supervision should mark the stitch points inside that
+        span, not every candidate edge between arbitrary boxes in the span.
+        """
+
+        if not tex_id:
+            return False
+        indices = sorted(set(self.tex_to_pdf_indices.get(tex_id, [])))
+        if source_index not in indices or target_index not in indices:
+            return False
+        return abs(indices.index(source_index) - indices.index(target_index)) == 1
+
     def same_tex_node_merge_crosses_list_marker(self, source_index: int, target_index: int) -> bool:
         lower, upper = sorted((source_index, target_index))
         if upper - lower <= 1:
@@ -612,13 +739,12 @@ class AlignmentLabeler:
         return False
 
     def same_reference_scope(self, source_index: int, target_index: int) -> bool:
-        if not (0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(self.pdf_nodes)):
-            return False
-        source = self.pdf_nodes[source_index]
-        target = self.pdf_nodes[target_index]
-        if canonical_pdf_merge_type(source.item) != "reference" or canonical_pdf_merge_type(target.item) != "reference":
-            return False
-        return source_index != target_index
+        return False
+
+    def node_is_unlabelable_visual_orphan(self, node_index: int) -> bool:
+        if not 0 <= node_index < len(self.pdf_nodes):
+            return True
+        return self.is_expected_visual_orphan(self.pdf_nodes[node_index])
 
     def assert_alignment_quality(self, *, graph: Any | None = None, labels: Any | None = None) -> None:
         exempt_visual_orphans = {
@@ -719,6 +845,10 @@ class AlignmentLabeler:
             return True
         if raw_type in HEADING_TYPES:
             return False
+        text = " ".join(node.text.split())
+        text_lower = text.casefold()
+        if "copyright" in text_lower and "all rights reserved" in text_lower:
+            return True
         bbox = first_bbox(node.item.get("bbox"))
         if bbox is None:
             return False
@@ -727,7 +857,6 @@ class AlignmentLabeler:
         if not near_page_edge:
             return False
         clean = node.clean
-        text = " ".join(node.text.split())
         if not clean:
             return True
         if len(clean) <= self.config.max_expected_orphan_clean_chars and len(text) <= 80:
@@ -786,6 +915,11 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
 
     for node in nodes:
         node_id = node.node_index
+        layer = layout_layer_name(node.item)
+        if layer in {"metadata_layer", "noise_layer"}:
+            parent_by_node[node_id] = None
+            children_by_parent.setdefault(None, []).append(node_id)
+            continue
         if node_id in document_title_ids:
             parent_by_node[node_id] = None
             children_by_parent.setdefault(None, []).append(node_id)
@@ -845,6 +979,8 @@ def is_visual_heading_candidate(
 ) -> bool:
     text = node.text.strip()
     if not text:
+        return False
+    if layout_layer_name(node.item) in {"metadata_layer", "noise_layer"}:
         return False
     raw_type = canonical_pdf_type(node.item)
     if raw_type in HEADING_TYPES:
@@ -959,6 +1095,8 @@ def canonical_pdf_merge_type(item: dict[str, Any]) -> str:
     raw = canonical_pdf_type(item)
     if raw in {"paragraph", "text", "paragraph_text", "body", "list", "item"}:
         return "text"
+    if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
+        return "title"
     if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
         return "equation"
     if raw in {"inline_math", "inline_formula", "math_inline"}:
@@ -982,7 +1120,53 @@ def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> 
     right_type = canonical_pdf_merge_type(right.item)
     if LIST_MARKER_RE.match(right.text):
         return False
+    if not same_layout_scope_can_merge(left.item, right.item):
+        return False
     return left_type == right_type and left_type in MERGE_COMPATIBLE_PDF_TYPES
+
+
+def same_layout_scope_can_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Keep MERGE labels inside the same page-object layer and local band."""
+
+    left_layer = layout_layer_name(left)
+    right_layer = layout_layer_name(right)
+    if left_layer == "noise_layer" or right_layer == "noise_layer":
+        return False
+    if left_layer != right_layer:
+        return False
+    if left_layer not in {"main_text_flow", "math_layer"} and canonical_pdf_merge_type(left) != "reference":
+        return False
+    left_band = layout_band_id(left)
+    right_band = layout_band_id(right)
+    if left_band is not None and right_band is not None and left_band != right_band:
+        return False
+    return True
+
+
+def relation_layers_are_incompatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Block semantic labels across metadata/noise and main document flow."""
+
+    left_layer = layout_layer_name(left)
+    right_layer = layout_layer_name(right)
+    if "noise_layer" in {left_layer, right_layer}:
+        return True
+    if "metadata_layer" in {left_layer, right_layer} and left_layer != right_layer:
+        return True
+    return False
+
+
+def layout_layer_name(item: dict[str, Any]) -> str:
+    return str(item.get("layout_layer") or "main_text_flow")
+
+
+def layout_band_id(item: dict[str, Any]) -> int | None:
+    value = item.get("layout_band_global_id")
+    if value is None:
+        value = item.get("layout_band_id")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def pdf_font_size(item: dict[str, Any]) -> float:
@@ -1357,6 +1541,9 @@ def pdf_item_text(item: dict[str, Any]) -> str:
             text = stringify_text_payload(item[key])
             if text.strip():
                 return text
+    span_text = style_spans_text(item.get("style_spans"))
+    if span_text.strip():
+        return span_text
     item_type = str(item.get("type") or item.get("raw_type") or "").lower()
     if "equation" in item_type or "formula" in item_type:
         return "[MATH]"

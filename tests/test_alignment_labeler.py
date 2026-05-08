@@ -642,7 +642,7 @@ def test_alignment_labeler_global_caption_fallback_recovers_missed_float_caption
     assert graph.pdf_to_tex_scores[2] >= 80.0
 
 
-def test_alignment_labeler_merges_reference_list_blocks_even_when_fuzzy_alignment_misses(tmp_path):
+def test_alignment_labeler_does_not_merge_independent_reference_list_blocks_when_alignment_misses(tmp_path):
     if not has_alignment_deps():
         return
     import torch
@@ -683,7 +683,57 @@ def test_alignment_labeler_merges_reference_list_blocks_even_when_fuzzy_alignmen
 
     graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
 
-    assert graph.y.tolist() == [int(TexRelationLabel.MERGE), int(TexRelationLabel.MERGE)]
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE), int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_refuses_same_tex_merge_for_titles_and_non_adjacent_fragments(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Paper Title", "bbox": [100, 100, 500, 130]},
+                    {"type": "paragraph", "text_for_embedding": "Author Name", "bbox": [150, 150, 450, 170]},
+                    {"type": "paragraph", "text_for_embedding": "Affiliation", "bbox": [150, 175, 450, 195]},
+                    {"type": "title", "text_for_embedding": "Abstract", "bbox": [100, 230, 200, 250]},
+                    {"type": "paragraph", "text_for_embedding": "Abstract body.", "bbox": [100, 260, 500, 300]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        "Paper Title Author Name Affiliation Abstract Abstract body.",
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((5, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1, 0, 1], [1, 2, 2, 4]], dtype=torch.long),
+        edge_attr=torch.zeros((4, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(max_window_nodes=5, similarity_threshold=60.0),
+    ).run()
+
+    assert graph.y.tolist() == [
+        int(TexRelationLabel.NONE),
+        int(TexRelationLabel.NONE),
+        int(TexRelationLabel.NONE),
+        int(TexRelationLabel.NONE),
+    ]
 
 
 def test_alignment_labeler_uses_visual_heading_stack_when_tex_paths_are_flat(tmp_path):

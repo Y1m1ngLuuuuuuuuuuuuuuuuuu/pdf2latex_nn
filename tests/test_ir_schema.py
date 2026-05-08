@@ -50,8 +50,25 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
     ]
     assert schema.column_feature_fields == ["column_left", "column_right", "column_full_or_single"]
     assert schema.title_structure_fields == ["relative_font_size", "is_h1_pattern", "is_h2_pattern"]
-    assert schema.node_feature_dim == 818
-    assert schema.edge_attr_dim == 15
+    assert schema.layout_layer_fields == [
+        "layout_layer_main_text_flow",
+        "layout_layer_math_layer",
+        "layout_layer_float_layer",
+        "layout_layer_metadata_layer",
+        "layout_layer_noise_layer",
+        "layout_layer_other_layer",
+    ]
+    assert schema.flow_context_fields == [
+        "band_position",
+        "band_local_order",
+        "band_column_left",
+        "band_column_right",
+        "band_column_full",
+        "is_band_boundary",
+        "is_main_flow_candidate",
+    ]
+    assert schema.node_feature_dim == 831
+    assert schema.edge_attr_dim == 22
     assert schema.edge_attr_fields == [
         "semantic_cosine",
         "delta_y_gap",
@@ -68,6 +85,13 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "index_delta_bin_near",
         "index_delta_bin_far",
         "index_delta_bin_reverse",
+        "source_ends_with_terminal_punctuation",
+        "source_ends_with_hyphen",
+        "same_layout_layer",
+        "same_layout_band",
+        "same_band_column",
+        "band_order_delta",
+        "crosses_band_boundary",
     ]
 
 

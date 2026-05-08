@@ -7,8 +7,8 @@
 ```text
 schema_version: feature_schema_v0
 coordinate_space: page_normalized_1000
-node_feature_dim: 818
-edge_attr_dim: 15
+node_feature_dim: 831
+edge_attr_dim: 22
 graph_schema_version: graph_v7
 pipeline_version: v7
 ```
@@ -210,7 +210,9 @@ reference_item_of
 16 sequence position
 3 column-aware features
 3 title structure features
-= 818
+6 layout layer features
+7 flow context features
+= 831
 ```
 
 切片固定为：
@@ -226,6 +228,8 @@ reference_item_of
 | `sequence_position` | `[796, 812)` | 16 | 基于单双栏状态机扫描线阅读序的正弦位置编码 |
 | `column_features` | `[812, 815)` | 3 | 左栏、右栏、单栏/跨栏 one-hot |
 | `title_structure` | `[815, 818)` | 3 | 相对字号、一级标题编号探针、二级及以下标题编号探针 |
+| `layout_layer` | `[818, 824)` | 6 | 主正文、数学、浮动体、元数据、页眉页脚噪声、其它对象层 |
+| `flow_context` | `[824, 831)` | 7 | band 位置、band 内局部顺序、band 内栏位、band 边界、主正文候选标记 |
 
 ### Geometry Fields
 
@@ -337,7 +341,7 @@ python tools/profile_candidate_edge_recall.py \
 固定维度：
 
 ```text
-edge_attr_dim = 15
+edge_attr_dim = 22
 ```
 
 | index | 字段 | 说明 |
@@ -357,8 +361,15 @@ edge_attr_dim = 15
 | 12 | `index_delta_bin_near` | `target_index - source_index in [3, 5]` |
 | 13 | `index_delta_bin_far` | `target_index - source_index > 5` |
 | 14 | `index_delta_bin_reverse` | `target_index - source_index <= 0` |
+| 15 | `source_ends_with_terminal_punctuation` | 源节点是否以句号、问号、感叹号等终止标点结束 |
+| 16 | `source_ends_with_hyphen` | 源节点是否以连字符结束，用于跨栏/跨页断词续接 |
+| 17 | `same_layout_layer` | 源/目标是否属于同一个对象层 |
+| 18 | `same_layout_band` | 源/目标是否属于同一个 v7 局部 band |
+| 19 | `same_band_column` | 源/目标是否属于同一个 band 内栏位 |
+| 20 | `band_order_delta` | `(target_band_order - source_band_order) / 10`，裁剪到 `[-1, 1]` |
+| 21 | `crosses_band_boundary` | 源/目标是否跨越 v7 band 边界 |
 
-这 15 维严格只表达语义连续性、空间相对性、排版阶跃性和序列跨度。独立公式、图表、算法等类别信息保留在节点 type one-hot 中，不再额外塞入边特征，避免边张量过度膨胀。
+这 22 维严格只表达语义连续性、空间相对性、排版阶跃性、序列跨度、标点断裂探针以及 v7 的对象层/band 关系。独立公式、图表、算法等类别信息保留在节点 type one-hot 和 layout layer 中，不再让候选边隐式承担类型识别任务。
 
 ## Model-Side Projection
 
@@ -366,11 +377,11 @@ edge_attr_dim = 15
 
 ```text
 semantic_768 -> L2 normalize -> Linear -> ReLU -> Dropout(0.2) -> semantic_64 -> L2 normalize
-layout/type/stats/sequence/column/title_50 -> Linear -> layout_32 -> LayerNorm
+layout/type/stats/sequence/column/title/layer/band_63 -> Linear -> layout_32 -> LayerNorm
 concat -> model_input_96
 ```
 
-当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。原始 `.pt` 中的 768 维 SciBERT 仍保留，用于复用缓存和计算 `semantic_cosine`；真正进入 GNN 前，语义分支必须经过上述脱水流程，避免主题词汇压制 bbox、scroll-y、样式和类型特征。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=15)`、`TransformerConv(edge_dim=15)` 或 `GINEConv`。
+当前 `src/reasoning/gnn_model.py` 提供 `FeatureProjector` 作为这个瓶颈层的最小实现。原始 `.pt` 中的 768 维 SciBERT 仍保留，用于复用缓存和计算 `semantic_cosine`；真正进入 GNN 前，语义分支必须经过上述脱水流程，避免主题词汇压制 bbox、scroll-y、样式和类型特征。后续 GNN 层应优先选择支持 `edge_attr` 的 PyG 层，例如 `GATv2Conv(edge_dim=22)`、`TransformerConv(edge_dim=22)` 或 `GINEConv`。模型和 dataset sanitizer 会对旧图/旧权重做 padding 或截断，以便历史实验可回放。
 
 ## Validator 最低要求
 

@@ -697,6 +697,8 @@ class TreeDecoder:
                 if rendered
             )
 
+        if layout_layer_name(node.record) == "noise_layer":
+            return ""
         block_type = canonical_render_type(node.record)
         text = node.text
         children = sorted_render_children(node.children)
@@ -1411,6 +1413,8 @@ def can_contract_merge_records(
     right_type = canonical_render_type(right)
     if record_starts_with_list_marker(right):
         return False
+    if not same_layout_scope_can_contract_merge(left, right):
+        return False
     if left_type != right_type or left_type not in MERGE_COMPATIBLE_TYPES:
         return False
     return not crosses_column_gutter_barrier(
@@ -1420,6 +1424,36 @@ def can_contract_merge_records(
         gutter_threshold=gutter_threshold,
         gutter_page_width_ratio=gutter_page_width_ratio,
     )
+
+
+def same_layout_scope_can_contract_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_layer = layout_layer_name(left)
+    right_layer = layout_layer_name(right)
+    if left_layer == "noise_layer" or right_layer == "noise_layer":
+        return False
+    if left_layer != right_layer:
+        return False
+    if left_layer not in {"main_text_flow", "math_layer"} and canonical_render_type(left) != "reference":
+        return False
+    left_band = layout_band_id(left)
+    right_band = layout_band_id(right)
+    if left_band is not None and right_band is not None and left_band != right_band:
+        return False
+    return True
+
+
+def layout_layer_name(record: dict[str, Any]) -> str:
+    return str(record.get("layout_layer") or "main_text_flow")
+
+
+def layout_band_id(record: dict[str, Any]) -> int | None:
+    value = record.get("layout_band_global_id")
+    if value is None:
+        value = record.get("layout_band_id")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def record_starts_with_list_marker(record: dict[str, Any]) -> bool:

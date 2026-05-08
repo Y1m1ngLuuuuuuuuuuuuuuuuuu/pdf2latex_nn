@@ -93,6 +93,7 @@ class MiniDatasetConfig:
     manifest_output: Path
     error_log: Path
     model_path: Path
+    embedding_device: str
     target: int
     max_candidates: int | None
     main_tex_names: tuple[str, ...]
@@ -139,6 +140,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=REPO_ROOT / "models/huggingface/allenai/scibert_scivocab_uncased",
         help="Local SciBERT model directory used by graph_builder.",
+    )
+    parser.add_argument(
+        "--embedding-device",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="Device for SciBERT feature extraction. CPU is the robust default for multiprocessing batch builds.",
     )
     parser.add_argument("--target", type=int, default=10)
     parser.add_argument("--max-candidates", type=int, help="Stop scanning after this many candidates")
@@ -235,6 +242,7 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         manifest_output=args.manifest_output.resolve(),
         error_log=args.error_log.resolve(),
         model_path=args.model_path.resolve(),
+        embedding_device=str(args.embedding_device),
         target=target,
         max_candidates=max_candidates,
         main_tex_names=main_tex_names,
@@ -587,7 +595,7 @@ def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig
         assert_v7_graph_data(graph, graph_path)
         return graph_path
     assert_v7_content_json(content_json, require_styles=True)
-    graph_config = GraphBuildConfig(model_path=config.model_path)
+    graph_config = GraphBuildConfig(model_path=config.model_path, embedding_device=config.embedding_device)
     build_graph_from_content_v7(content_json, graph_path, graph_config)
     return graph_path
 

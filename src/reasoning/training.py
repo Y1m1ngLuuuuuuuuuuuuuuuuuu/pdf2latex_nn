@@ -46,9 +46,12 @@ class FocalLoss(_LOSS_BASE):
     def forward(self, logits: Any, target: Any) -> Any:
         if int(logits.shape[-1]) == 3:
             target = torch.where(target.long() >= 2, torch.full_like(target.long(), 2), target.long())
-        ce = F.cross_entropy(logits, target, weight=self.weight, reduction="none")
+        ce = F.cross_entropy(logits, target, reduction="none")
         pt = torch.exp(-ce)
         loss = ((1.0 - pt) ** self.gamma) * ce
+        if self.weight is not None:
+            alpha = self.weight.to(device=logits.device, dtype=logits.dtype)
+            loss = loss * alpha[target.long()]
         if self.reduction == "sum":
             return loss.sum()
         if self.reduction == "none":

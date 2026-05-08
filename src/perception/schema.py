@@ -76,6 +76,24 @@ SEQUENCE_POSITION_FIELDS = [
 ]
 COLUMN_FEATURE_FIELDS = ["column_left", "column_right", "column_full_or_single"]
 TITLE_STRUCTURE_FIELDS = ["relative_font_size", "is_h1_pattern", "is_h2_pattern"]
+LAYOUT_LAYER_VOCAB = [
+    "main_text_flow",
+    "math_layer",
+    "float_layer",
+    "metadata_layer",
+    "noise_layer",
+    "other_layer",
+]
+LAYOUT_LAYER_FIELDS = [f"layout_layer_{name}" for name in LAYOUT_LAYER_VOCAB]
+FLOW_CONTEXT_FIELDS = [
+    "band_position",
+    "band_local_order",
+    "band_column_left",
+    "band_column_right",
+    "band_column_full",
+    "is_band_boundary",
+    "is_main_flow_candidate",
+]
 EDGE_ATTR_FIELDS = [
     "semantic_cosine",
     "delta_y_gap",
@@ -92,6 +110,13 @@ EDGE_ATTR_FIELDS = [
     "index_delta_bin_near",
     "index_delta_bin_far",
     "index_delta_bin_reverse",
+    "source_ends_with_terminal_punctuation",
+    "source_ends_with_hyphen",
+    "same_layout_layer",
+    "same_layout_band",
+    "same_band_column",
+    "band_order_delta",
+    "crosses_band_boundary",
 ]
 NON_TEXT_DENSITY_TYPES = {
     BlockType.EQUATION.value,
@@ -217,6 +242,8 @@ class FeatureTensorSchema:
     sequence_position_fields: list[str] = field(default_factory=lambda: list(SEQUENCE_POSITION_FIELDS))
     column_feature_fields: list[str] = field(default_factory=lambda: list(COLUMN_FEATURE_FIELDS))
     title_structure_fields: list[str] = field(default_factory=lambda: list(TITLE_STRUCTURE_FIELDS))
+    layout_layer_fields: list[str] = field(default_factory=lambda: list(LAYOUT_LAYER_FIELDS))
+    flow_context_fields: list[str] = field(default_factory=lambda: list(FLOW_CONTEXT_FIELDS))
 
     @property
     def type_dim(self) -> int:
@@ -234,6 +261,8 @@ class FeatureTensorSchema:
             + len(self.sequence_position_fields)
             + len(self.column_feature_fields)
             + len(self.title_structure_fields)
+            + len(self.layout_layer_fields)
+            + len(self.flow_context_fields)
         )
 
     @property

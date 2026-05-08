@@ -84,6 +84,12 @@ def test_fix_columnar_reading_order_sorts_half_span_block_left_then_right():
     ]
     assert fixed[0]["column_fix_span"] == "FULL_SPAN"
     assert [item["column_fix_column"] for item in fixed[1:]] == ["LEFT_COL", "LEFT_COL", "RIGHT_COL", "RIGHT_COL"]
+    assert fixed[0]["layout_band_type"] == "full_span"
+    assert fixed[0]["layout_role"] == "heading"
+    assert fixed[1]["layout_layer"] == "main_text_flow"
+    assert fixed[1]["layout_band_column"] == "left"
+    assert fixed[3]["layout_band_column"] == "right"
+    assert fixed[1]["layout_band_id"] == fixed[3]["layout_band_id"]
 
 
 def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_span_separator():
@@ -130,6 +136,8 @@ def test_content_v7_reorders_each_page_without_merging_or_rewriting_bbox():
         "right bottom",
     ]
     assert items[1]["bbox"] == [80, 100, 450, 160]
+    assert items[1]["layout_band_global_id"] == items[1]["layout_band_id"]
+    assert items[1]["layout_flow_order"] == 1
     assert all("merge_count" not in item for item in items)
 
 

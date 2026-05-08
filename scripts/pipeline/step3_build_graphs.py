@@ -27,6 +27,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=384)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--embedding-device",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="Device for SciBERT feature extraction. CPU is the robust default for batch processing.",
+    )
     parser.add_argument("--sequential-window", type=int, default=15, help="Reading-order neighbors on each side")
     parser.add_argument("--spatial-k", type=int, default=3, help="Line-of-sight neighbors per down/right direction")
     parser.add_argument("--long-sight-window", type=int, default=40, help="Forward window for same-column long sight-line edges")
@@ -49,6 +55,7 @@ def main() -> int:
         max_length=args.max_length,
         stride=args.stride,
         batch_size=args.batch_size,
+        embedding_device=args.embedding_device,
         bidirectional_edges=not args.directed,
         sequential_window=args.sequential_window,
         spatial_k=args.spatial_k,

@@ -15,6 +15,9 @@ from src.perception.schema import (
     EDGE_ATTR_FIELDS,
     FEATURE_TYPE_VOCAB,
     GEOMETRY_FIELDS,
+    FLOW_CONTEXT_FIELDS,
+    LAYOUT_LAYER_FIELDS,
+    LAYOUT_LAYER_VOCAB,
     NON_TEXT_DENSITY_TYPES,
     PLACEHOLDER_TEXT,
     SCIBERT_DIM,
@@ -23,7 +26,7 @@ from src.perception.schema import (
     STYLE_STAT_FIELDS,
     TITLE_STRUCTURE_FIELDS,
 )
-from src.perception.reading_order import fuse_micro_nodes
+from src.perception.reading_order import LAYOUT_LAYER_MAIN_TEXT, fuse_micro_nodes, style_spans_text
 from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
 from src.perception.xy_cut import sort_node_indices_by_reading_order
 from src.perception.title_features import title_numbering_level, title_pattern_flags
@@ -43,6 +46,8 @@ EDGE_SOURCE_TYPES = [
     "list_run_scope",
 ]
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
+HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
 TEXT_FLOW_TYPES = {"text", "list", "reference"}
 AUXILIARY_TYPES = {"page_header", "header", "page_footer", "footer", "page_number"}
@@ -143,6 +148,7 @@ class GraphBuildConfig:
     max_length: int = 512
     stride: int = 384
     batch_size: int = 16
+    embedding_device: str = "cpu"
     bidirectional_edges: bool = True
     sequential_window: int = 15
     spatial_k: int = 3
@@ -177,7 +183,7 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     raw_items = load_content_v7(input_path)
     items = fuse_micro_nodes(raw_items) if config.fuse_micro_nodes else raw_items
     texts = [text_for_embedding(item) for item in items]
-    regime_order = sort_node_indices_by_reading_order(items)
+    regime_order = v7_reading_order_indices(items)
     regime_ranks = _ranks_from_order(regime_order, len(items))
     column_ids = infer_column_ids(items)
     scroll_layout = build_scroll_layout(items, reading_order_indices=regime_order, column_ids=column_ids)
@@ -190,6 +196,8 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     sequence_position = build_sequence_position_matrix(items, reading_order_ranks=regime_ranks)
     column_features = build_column_onehot_matrix(items, column_ids=column_ids)
     title_structure = build_title_structure_matrix(items)
+    layout_layer = build_layout_layer_matrix(items)
+    flow_context = build_flow_context_matrix(items)
     x = torch.cat(
         [
             semantic,
@@ -201,6 +209,8 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
             sequence_position,
             column_features,
             title_structure,
+            layout_layer,
+            flow_context,
         ],
         dim=1,
     )
@@ -262,12 +272,9 @@ def embed_texts_scibert_cls(texts: list[str], config: GraphBuildConfig) -> Any:
     """Return an N x 768 tensor using mean pooled window CLS vectors."""
 
     import torch
-    from transformers import AutoModel, AutoTokenizer
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(str(config.model_path), local_files_only=True)
-    model = AutoModel.from_pretrained(str(config.model_path), local_files_only=True).to(device)
-    model.eval()
+    device = resolve_embedding_device(config.embedding_device)
+    tokenizer, model = get_scibert_components(config.model_path, device)
 
     vectors = []
     body_len = config.max_length - 2
@@ -299,6 +306,43 @@ def embed_texts_scibert_cls(texts: list[str], config: GraphBuildConfig) -> Any:
             vectors.append(torch.cat(cls_vectors, dim=0).mean(dim=0))
 
     return torch.stack(vectors, dim=0)
+
+
+_SCIBERT_COMPONENT_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
+
+
+def resolve_embedding_device(requested: str) -> Any:
+    import torch
+
+    normalized = (requested or "cpu").strip().lower()
+    if normalized == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if normalized.startswith("cuda") and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return torch.device(normalized)
+
+
+def get_scibert_components(model_path: Path, device: Any) -> tuple[Any, Any]:
+    """Load SciBERT once per worker process and device.
+
+    The staged dataset builder uses multiprocessing. Initializing CUDA inside
+    many short-lived workers is brittle after MinerU has used the GPU, so the
+    batch pipeline defaults to CPU. Caching still keeps CPU embedding from
+    paying the model load cost on every document.
+    """
+
+    from transformers import AutoModel, AutoTokenizer
+
+    cache_key = (str(model_path.resolve()), str(device))
+    cached = _SCIBERT_COMPONENT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
+    model = AutoModel.from_pretrained(str(model_path), local_files_only=True).to(device)
+    model.eval()
+    _SCIBERT_COMPONENT_CACHE[cache_key] = (tokenizer, model)
+    return tokenizer, model
 
 
 def build_type_onehot_matrix(items: list[dict[str, Any]]) -> Any:
@@ -480,6 +524,59 @@ def build_title_structure_matrix(items: list[dict[str, Any]]) -> Any:
     return torch.tensor(rows, dtype=torch.float32)
 
 
+def build_layout_layer_matrix(items: list[dict[str, Any]]) -> Any:
+    """Return one-hot coarse page-object layer features."""
+
+    import torch
+
+    rows = []
+    for item in items:
+        layer = layout_layer_name(item)
+        row = [0.0] * len(LAYOUT_LAYER_VOCAB)
+        index = LAYOUT_LAYER_VOCAB.index(layer) if layer in LAYOUT_LAYER_VOCAB else LAYOUT_LAYER_VOCAB.index("other_layer")
+        row[index] = 1.0
+        rows.append(row)
+    if not rows:
+        return torch.empty((0, len(LAYOUT_LAYER_FIELDS)), dtype=torch.float32)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def build_flow_context_matrix(items: list[dict[str, Any]]) -> Any:
+    """Return band-local flow features generated by v7 reading-order repair."""
+
+    import torch
+
+    total_bands = max(1, 1 + max((int_value(item.get("layout_band_global_order"), default=0) for item in items), default=0))
+    max_local_by_band: dict[int, int] = {}
+    for item in items:
+        band = int_value(item.get("layout_band_global_id"), default=-1)
+        local = int_value(item.get("layout_band_local_order"), default=0)
+        if band >= 0:
+            max_local_by_band[band] = max(max_local_by_band.get(band, 0), local)
+
+    rows = []
+    for item in items:
+        band = int_value(item.get("layout_band_global_order"), default=0)
+        local = int_value(item.get("layout_band_local_order"), default=0)
+        band_id = int_value(item.get("layout_band_global_id"), default=-1)
+        max_local = max(1, max_local_by_band.get(band_id, 0))
+        column_id = int_value(item.get("layout_band_column_id"), default=2)
+        rows.append(
+            [
+                clamp01(band / max(1, total_bands - 1)),
+                clamp01(local / max_local),
+                float(column_id == 0),
+                float(column_id == 1),
+                float(column_id not in {0, 1}),
+                float(bool(item.get("layout_is_band_boundary"))),
+                float(layout_layer_name(item) == LAYOUT_LAYER_MAIN_TEXT and bool(item.get("is_main_flow_candidate", True))),
+            ]
+        )
+    if not rows:
+        return torch.empty((0, len(FLOW_CONTEXT_FIELDS)), dtype=torch.float32)
+    return torch.tensor(rows, dtype=torch.float32)
+
+
 def infer_document_body_font_size(items: list[dict[str, Any]]) -> float:
     weighted: dict[float, int] = {}
     for item in items:
@@ -626,6 +723,20 @@ def _ranks_from_order(order: list[int], node_count: int) -> list[int]:
     return ranks
 
 
+def v7_reading_order_indices(items: list[dict[str, Any]]) -> list[int]:
+    """Prefer explicit v7 flow order over fallback geometric sorting."""
+
+    if items and all(isinstance(item.get("layout_flow_order"), int) for item in items):
+        return [idx for idx, _ in sorted(enumerate(items), key=lambda pair: (pair[1]["layout_flow_order"], idx_fallback(pair)))]
+    if items and all(isinstance(item.get("global_order"), int) for item in items):
+        return [idx for idx, _ in sorted(enumerate(items), key=lambda pair: (pair[1]["global_order"], idx_fallback(pair)))]
+    return sort_node_indices_by_reading_order(items)
+
+
+def idx_fallback(pair: tuple[int, dict[str, Any]]) -> int:
+    return pair[0]
+
+
 def _valid_reading_order_indices(order: list[int] | None, node_count: int) -> list[int]:
     if order is None or len(order) != node_count or sorted(order) != list(range(node_count)):
         return list(range(node_count))
@@ -672,6 +783,8 @@ def build_node_feature_schema() -> dict[str, dict[str, Any]]:
     add("sequence_position", len(SEQUENCE_POSITION_FIELDS), fields=SEQUENCE_POSITION_FIELDS, source="single/double-column regime reading index")
     add("column_features", len(COLUMN_FEATURE_FIELDS), fields=COLUMN_FEATURE_FIELDS, source="page x-center column clustering")
     add("title_structure", len(TITLE_STRUCTURE_FIELDS), fields=TITLE_STRUCTURE_FIELDS, source="font-size ratio and heading regex probes")
+    add("layout_layer", len(LAYOUT_LAYER_FIELDS), fields=LAYOUT_LAYER_FIELDS, vocab=LAYOUT_LAYER_VOCAB, source="v7 page-object layer assignment")
+    add("flow_context", len(FLOW_CONTEXT_FIELDS), fields=FLOW_CONTEXT_FIELDS, source="band-level local flow context")
     return schema
 
 
@@ -975,7 +1088,7 @@ def build_edge_attr_matrix(
     reading_order_ranks: list[int] | None = None,
     scroll_layout: ScrollLayout | None = None,
 ) -> Any:
-    """Return 15-dimensional edge features aligned with candidate edge_index."""
+    """Return edge features aligned with candidate edge_index."""
 
     import torch
     import torch.nn.functional as F
@@ -1019,6 +1132,14 @@ def build_edge_attr_matrix(
         target_rank = reading_order_ranks[target_idx] if target_idx < len(reading_order_ranks) else target_idx
         index_delta = float(target_rank - source_rank)
         index_bins = index_delta_bins(index_delta)
+        source_terminal = source_ends_with_terminal_punctuation(source)
+        source_hyphen = source_ends_with_hyphen(source)
+        same_layer = layout_layer_name(source) == layout_layer_name(target)
+        source_band = layout_band_id(source)
+        target_band = layout_band_id(target)
+        source_band_column = layout_band_column_id(source)
+        target_band_column = layout_band_column_id(target)
+        band_delta = layout_band_order(target) - layout_band_order(source)
         rows.append(
             [
                 semantic_cosine,
@@ -1032,6 +1153,13 @@ def build_edge_attr_matrix(
                 y_overlap_ratio,
                 has_x_gutter,
                 *index_bins,
+                source_terminal,
+                source_hyphen,
+                float(same_layer),
+                float(source_band is not None and target_band is not None and source_band == target_band),
+                float(source_band_column is not None and target_band_column is not None and source_band_column == target_band_column),
+                max(-1.0, min(1.0, band_delta / 10.0)),
+                float(source_band is not None and target_band is not None and source_band != target_band),
             ]
         )
     if not rows:
@@ -1063,6 +1191,17 @@ def make_node_records(
                 "list_type": item.get("list_type"),
                 "canonical_type": canonical_type(item),
                 "column_id_inferred": column_ids[idx] if idx < len(column_ids) else 2,
+                "layout_layer": layout_layer_name(item),
+                "layout_role": item.get("layout_role"),
+                "layout_band_id": item.get("layout_band_id"),
+                "layout_band_global_id": item.get("layout_band_global_id"),
+                "layout_band_global_order": item.get("layout_band_global_order"),
+                "layout_band_type": item.get("layout_band_type"),
+                "layout_band_column_id": item.get("layout_band_column_id"),
+                "layout_band_column": item.get("layout_band_column"),
+                "layout_band_local_order": item.get("layout_band_local_order"),
+                "layout_is_band_boundary": item.get("layout_is_band_boundary"),
+                "is_main_flow_candidate": item.get("is_main_flow_candidate"),
                 "regime_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "dag_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
                 "xycut_reading_order": reading_order_ranks[idx] if idx < len(reading_order_ranks) else idx,
@@ -1491,6 +1630,53 @@ def clamp01(value: float) -> float:
     return min(1.0, max(0.0, value))
 
 
+def int_value(value: Any, *, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def layout_layer_name(item: dict[str, Any]) -> str:
+    layer = str(item.get("layout_layer") or "").strip()
+    return layer if layer in LAYOUT_LAYER_VOCAB else "other_layer"
+
+
+def layout_band_id(item: dict[str, Any]) -> int | None:
+    value = item.get("layout_band_global_id")
+    if value is None:
+        value = item.get("layout_band_id")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def layout_band_order(item: dict[str, Any]) -> int:
+    value = item.get("layout_band_global_order")
+    if value is None:
+        value = item.get("layout_band_id")
+    return int_value(value, default=0)
+
+
+def layout_band_column_id(item: dict[str, Any]) -> int | None:
+    value = item.get("layout_band_column_id")
+    if value is None:
+        label = item.get("column_fix_column")
+        if label == "LEFT_COL":
+            return 0
+        if label == "RIGHT_COL":
+            return 1
+        if item.get("column_fix_span") == "FULL_SPAN":
+            return 2
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def iter_bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:
     if not isinstance(value, list) or len(value) < 4:
         return []
@@ -1654,7 +1840,24 @@ def _is_list_item_like(item: dict[str, Any]) -> bool:
 
 
 def _item_text(item: dict[str, Any]) -> str:
-    return str(item.get("text_for_embedding") or item.get("text") or item.get("content") or "")
+    for key in ("text_for_embedding", "text", "content", "latex"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    span_text = style_spans_text(item.get("style_spans"))
+    if span_text:
+        return span_text
+    return ""
+
+
+def source_ends_with_terminal_punctuation(item: dict[str, Any]) -> float:
+    text = _item_text(item).strip()
+    return float(bool(text and TERMINAL_PUNCTUATION_RE.search(text)))
+
+
+def source_ends_with_hyphen(item: dict[str, Any]) -> float:
+    text = _item_text(item).strip()
+    return float(bool(text and HYPHEN_END_RE.search(text)))
 
 
 def _style_char_ratio(item: dict[str, Any], flag: str) -> float:
@@ -1707,7 +1910,7 @@ def text_for_embedding(item: dict[str, Any]) -> str:
     type_name = canonical_type(item)
     if type_name == "reference":
         return PLACEHOLDER_TEXT[type_name]
-    text = str(item.get("text_for_embedding") or "").strip()
+    text = _item_text(item).strip()
     if text:
         return text
     return PLACEHOLDER_TEXT[type_name]

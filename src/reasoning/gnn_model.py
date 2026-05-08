@@ -8,7 +8,9 @@ from src.perception.schema import (
     COLUMN_FEATURE_FIELDS,
     DERIVED_STAT_FIELDS,
     EDGE_ATTR_FIELDS,
+    FLOW_CONTEXT_FIELDS,
     GEOMETRY_FIELDS,
+    LAYOUT_LAYER_FIELDS,
     SCIBERT_DIM,
     SCROLL_GEOMETRY_FIELDS,
     SEQUENCE_POSITION_FIELDS,
@@ -55,6 +57,8 @@ class FeatureProjectorConfig:
             + len(SEQUENCE_POSITION_FIELDS)
             + len(COLUMN_FEATURE_FIELDS)
             + len(TITLE_STRUCTURE_FIELDS)
+            + len(LAYOUT_LAYER_FIELDS)
+            + len(FLOW_CONTEXT_FIELDS)
         )
 
     @property
@@ -113,6 +117,8 @@ class EdgeGATConfig:
     num_layers: int = 2
     num_classes: int = 3
     dropout: float = 0.1
+    predictor_hidden_dims: tuple[int, ...] = (1024, 512, 128)
+    predictor_layer_norm: bool = True
 
     @property
     def projected_node_dim(self) -> int:
@@ -144,11 +150,13 @@ class EdgeRelationGAT(_MODULE_BASE):
             )
             in_dim = self.config.hidden_dim * self.config.heads
         self.convs = nn.ModuleList(convs)
-        self.edge_head = nn.Sequential(
-            nn.Linear(in_dim * 4 + self.config.edge_dim, self.config.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.config.dropout),
-            nn.Linear(self.config.hidden_dim, self.config.num_classes),
+        self.edge_feature_dim = in_dim * 4 + self.config.edge_dim
+        self.edge_head = build_edge_predictor_head(
+            input_dim=self.edge_feature_dim,
+            hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
+            num_classes=self.config.num_classes,
+            dropout=self.config.dropout,
+            layer_norm=getattr(self.config, "predictor_layer_norm", True),
         )
 
     def forward(self, data=None, *, x=None, edge_index=None, edge_attr=None):  # type: ignore[no-untyped-def]
@@ -159,6 +167,7 @@ class EdgeRelationGAT(_MODULE_BASE):
         if x is None or edge_index is None or edge_attr is None:
             raise ValueError("EdgeRelationGAT.forward requires data or x/edge_index/edge_attr")
 
+        edge_attr = self._align_edge_attr(edge_attr)
         h = self.projector(x)
         for conv in self.convs:
             h = conv(h, edge_index, edge_attr=edge_attr)
@@ -179,9 +188,52 @@ class EdgeRelationGAT(_MODULE_BASE):
             [
                 h_source,
                 h_target,
-                h_target - h_source,
+                h_source - h_target,
                 h_source * h_target,
                 edge_attr,
             ],
             dim=-1,
         )
+
+    def _align_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
+        """Pad or truncate runtime edge attributes to the checkpoint config."""
+
+        expected_dim = int(self.config.edge_dim)
+        if edge_attr.shape[1] > expected_dim:
+            return edge_attr[:, :expected_dim]
+        if edge_attr.shape[1] < expected_dim:
+            return F.pad(edge_attr, (0, expected_dim - edge_attr.shape[1]))
+        return edge_attr
+
+
+def build_edge_predictor_head(
+    *,
+    input_dim: int,
+    hidden_dims: tuple[int, ...],
+    num_classes: int,
+    dropout: float,
+    layer_norm: bool = True,
+):
+    """Build the edge-classification MLP.
+
+    The first Linear layer intentionally consumes the full directional relation
+    vector: concat([Hu, Hv, Hu-Hv, Hu*Hv, Euv]).  Hidden dimensions default to
+    1024 -> 512 -> 128 so the predictor has enough capacity to model rare
+    MERGE edges without changing the graph encoder itself.
+    """
+
+    if nn is None:
+        raise ModuleNotFoundError("build_edge_predictor_head requires torch")
+    layers = []
+    current_dim = int(input_dim)
+    for hidden_dim in tuple(int(dim) for dim in hidden_dims):
+        if hidden_dim <= 0:
+            continue
+        layers.append(nn.Linear(current_dim, hidden_dim))
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.ReLU())
+        layers.append(nn.Dropout(dropout))
+        current_dim = hidden_dim
+    layers.append(nn.Linear(current_dim, num_classes))
+    return nn.Sequential(*layers)

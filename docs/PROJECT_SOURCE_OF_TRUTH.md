@@ -188,7 +188,9 @@ The current PDF-side production JSON format is:
 *_content_list_v7_styles.json
 ```
 
-v7 keeps MinerU block granularity and raw bbox coordinates. It only adds list-marker metadata, column-reading-order repair, reference item preservation, and PyMuPDF style spans. Cross-paragraph and cross-page text merging should happen in decoder/generator logic, not in the v7 preprocessing JSON.
+v7 keeps MinerU block granularity and raw bbox coordinates. It only adds list-marker metadata, column-reading-order repair, page-object layer metadata, local band/column metadata, reference item preservation, and PyMuPDF style spans. Cross-paragraph and cross-page text merging should happen in decoder/generator logic, not in the v7 preprocessing JSON.
+
+Layer/band metadata is now part of the v7 contract. Main text flow, display/inline math, floats, front-matter metadata, and header/footer noise must be explicitly marked before graph building. Candidate MERGE labels and decoder contraction are only allowed inside compatible layers and local bands; floats and math are attached structurally rather than merged as ordinary paragraph text.
 
 All graph-producing and graph-consuming scripts must use the v7 contract:
 

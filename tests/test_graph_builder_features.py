@@ -4,7 +4,9 @@ from src.reasoning.graph_builder import (
     build_column_onehot_matrix,
     build_derived_stats_matrix,
     build_edge_attr_matrix,
+    build_flow_context_matrix,
     build_geometry_matrix,
+    build_layout_layer_matrix,
     build_logical_center_pairs,
     build_scroll_geometry_matrix,
     build_scroll_layout,
@@ -20,6 +22,7 @@ from src.reasoning.graph_builder import (
     iter_bbox_chunks,
     text_for_embedding,
 )
+from src.perception.schema import EDGE_ATTR_FIELDS, FLOW_CONTEXT_FIELDS, LAYOUT_LAYER_FIELDS
 
 
 def has_torch():
@@ -273,7 +276,7 @@ def test_candidate_edges_treat_unnumbered_and_appendix_headings_as_scope_childre
     assert (3, 5, "scope_anchor") in typed
 
 
-def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
+def test_edge_attr_matrix_uses_punctuation_probe_relation_features():
     if not has_torch():
         return
     import torch
@@ -295,7 +298,7 @@ def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
 
     edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=edge_pairs)
 
-    assert tuple(edge_attr.shape) == (2, 15)
+    assert tuple(edge_attr.shape) == (2, len(EDGE_ATTR_FIELDS))
     forward = edge_attr[0].tolist()
     reverse = edge_attr[1].tolist()
     assert round(float(forward[0]), 4) == 1.0
@@ -311,6 +314,9 @@ def test_edge_attr_matrix_uses_strict_fifteen_dimensional_relation_features():
     assert float(forward[10]) == 1.0
     assert forward[10:15] == [1.0, 0.0, 0.0, 0.0, 0.0]
     assert reverse[10:15] == [0.0, 0.0, 0.0, 0.0, 1.0]
+    assert forward[15:17] == [0.0, 1.0]
+    assert reverse[15:17] == [1.0, 0.0]
+    assert forward[17:22] == [1.0, 0.0, 1.0, 0.0, 0.0]
 
 
 def test_edge_attr_marks_y_overlap_and_cross_column_gutter():
@@ -328,6 +334,44 @@ def test_edge_attr_marks_y_overlap_and_cross_column_gutter():
 
     assert round(float(edge_attr[0][8]), 4) == 0.8889
     assert float(edge_attr[0][9]) == 1.0
+
+
+def test_layout_layer_and_flow_context_features_use_v7_band_metadata():
+    if not has_torch():
+        return
+
+    items = [
+        {
+            **item("body", [80, 100, 480, 200], page=0, column=0),
+            "layout_layer": "main_text_flow",
+            "layout_band_global_id": 3,
+            "layout_band_global_order": 2,
+            "layout_band_local_order": 1,
+            "layout_band_column_id": 0,
+            "layout_is_band_boundary": False,
+            "is_main_flow_candidate": True,
+        },
+        {
+            **item("equation", [100, 230, 900, 260], page=0, column=2),
+            "layout_layer": "math_layer",
+            "layout_band_global_id": 4,
+            "layout_band_global_order": 3,
+            "layout_band_local_order": 0,
+            "layout_band_column_id": 2,
+            "layout_is_band_boundary": True,
+            "is_main_flow_candidate": False,
+        },
+    ]
+
+    layers = build_layout_layer_matrix(items)
+    flow = build_flow_context_matrix(items)
+
+    assert tuple(layers.shape) == (2, len(LAYOUT_LAYER_FIELDS))
+    assert layers[0].tolist()[:2] == [1.0, 0.0]
+    assert layers[1].tolist()[:2] == [0.0, 1.0]
+    assert tuple(flow.shape) == (2, len(FLOW_CONTEXT_FIELDS))
+    assert flow[0].tolist()[2:7] == [1.0, 0.0, 0.0, 0.0, 1.0]
+    assert flow[1].tolist()[2:7] == [0.0, 0.0, 1.0, 1.0, 0.0]
 
 
 def test_logical_center_distance_unrolls_double_column_reading_flow():

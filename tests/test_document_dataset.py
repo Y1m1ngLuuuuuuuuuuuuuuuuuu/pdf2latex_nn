@@ -1,5 +1,9 @@
 import json
 
+from src.perception.schema import FeatureTensorSchema
+
+NODE_DIM = FeatureTensorSchema().node_feature_dim
+
 
 def has_torch_and_pyg():
     try:
@@ -15,7 +19,7 @@ def make_graph(torch, Data, *, edge_index=None, x=None, edge_attr=None):
         edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     edge_count = int(edge_index.shape[1])
     data = Data(
-        x=torch.zeros((2, 818), dtype=torch.float64) if x is None else x,
+        x=torch.zeros((2, NODE_DIM), dtype=torch.float64) if x is None else x,
         edge_index=edge_index,
         edge_attr=torch.zeros((edge_count, 15), dtype=torch.float64) if edge_attr is None else edge_attr,
     )
@@ -37,7 +41,7 @@ def test_sanitize_graph_data_casts_float32_and_clamps_non_finite_values():
     data = make_graph(
         torch,
         Data,
-        x=torch.full((2, 818), float("nan"), dtype=torch.float64),
+        x=torch.full((2, NODE_DIM), float("nan"), dtype=torch.float64),
         edge_attr=torch.full((2, 15), float("inf"), dtype=torch.float64),
     )
 
@@ -145,7 +149,7 @@ def test_document_dataset_skips_graph_when_alignment_quality_is_too_low(tmp_path
 
     bad_graph = tmp_path / "bad.pt"
     edge_index = torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long)
-    data = Data(x=torch.zeros((3, 818)), edge_index=edge_index, edge_attr=torch.zeros((3, 15)))
+    data = Data(x=torch.zeros((3, NODE_DIM)), edge_index=edge_index, edge_attr=torch.zeros((3, 15)))
     data.node_records = [{"block_id": "P0"}, {"block_id": "P1"}, {"block_id": "P2"}]
     data.pipeline_version = "v7"
     data.graph_schema_version = "graph_v7"
