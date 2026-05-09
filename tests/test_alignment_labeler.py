@@ -57,6 +57,82 @@ def test_tex_parser_standardizes_basic_nodes_and_unwraps_unknown_macros(tmp_path
     assert any("Wrapped paragraph text" in node.text for node in nodes)
 
 
+def test_tex_parser_silences_visual_macros_and_layout_arguments(tmp_path):
+    if not has_alignment_deps():
+        return
+    content_path = tmp_path / "content.json"
+    graph_path = tmp_path / "graph.pt"
+    tex_path = tmp_path / "main.tex"
+    content_path.write_text('{"items":[]}', encoding="utf-8")
+    tex_path.write_text(
+        r"""
+        \begin{document}
+        \section{Method}
+        Text before.
+        \includegraphics[width=.75\textwidth]{figures/vit.png}
+        \resizebox{\textwidth}{!}{\includegraphics{plots/demo.pdf}}
+        Text after.
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    labeler = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path)
+    nodes = labeler.parse_tex_nodes()
+    combined_clean = " ".join(node.clean_text for node in nodes)
+    combined_text = " ".join(node.text for node in nodes)
+
+    assert "width" not in combined_clean
+    assert "textwidth" not in combined_clean
+    assert "figures" not in combined_clean
+    assert "png" not in combined_clean
+    assert "demo" not in combined_clean
+    assert "Text before" in combined_text
+    assert "Text after" in combined_text
+
+
+def test_tex_parser_rejects_layout_only_float_residue(tmp_path):
+    if not has_alignment_deps():
+        return
+    content_path = tmp_path / "content.json"
+    graph_path = tmp_path / "graph.pt"
+    tex_path = tmp_path / "main.tex"
+    content_path.write_text('{"items":[]}', encoding="utf-8")
+    tex_path.write_text(
+        r"""
+        \begin{document}
+        \maketitle
+        \section{Introduction}
+        Body paragraph before the visual material.
+        \begin{figure}[htbp]
+        \centering
+        \color{purple}
+        \begin{subfigure}[t]{0.7\textwidth}
+        \includegraphics[width=\linewidth]{figs/demo.png}
+        \end{subfigure}
+        \caption{Useful visual caption.}
+        \end{figure}
+        Body paragraph after the visual material.
+        \end{document}
+        """,
+        encoding="utf-8",
+    )
+
+    labeler = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path)
+    nodes = labeler.parse_tex_nodes()
+    combined_clean = " ".join(node.clean_text for node in nodes)
+    combined_text = " ".join(node.text for node in nodes)
+
+    assert "htbp" not in combined_clean
+    assert "t07" not in combined_clean
+    assert "purple" not in combined_clean
+    assert "maketitle" not in combined_clean
+    assert "Introduction" in combined_text
+    assert "Useful visual caption" in combined_text
+    assert "Body paragraph before" in combined_text
+    assert "Body paragraph after" in combined_text
+
+
 def test_tex_parser_rejects_poison_drawing_environment(tmp_path):
     if not has_alignment_deps():
         return
@@ -640,6 +716,214 @@ def test_alignment_labeler_global_caption_fallback_recovers_missed_float_caption
     caption_tex_id = graph.pdf_to_tex[2]
     assert caption_tex_id is not None
     assert graph.pdf_to_tex_scores[2] >= 80.0
+
+
+def test_alignment_quality_exempts_metadata_orphans_from_main_orphan_gate(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "layout_layer": "metadata_layer",
+                        "text_for_embedding": "Template Assembled Paper Title",
+                    },
+                    {
+                        "type": "paragraph",
+                        "layout_layer": "main_text_flow",
+                        "text_for_embedding": "Body paragraph.",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text("Body paragraph.", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.zeros((0, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=True,
+            max_orphan_ratio=0.0,
+            max_unmapped_tex_ratio=1.0,
+            max_isolated_node_ratio=1.0,
+        ),
+    ).run()
+
+    assert graph.alignment_quality["orphan_ratio"] == 0.0
+    assert graph.alignment_quality["metadata_orphan_count"] == 1
+    assert graph.alignment_quality["metadata_orphan_ratio"] == 1.0
+
+
+def test_alignment_quality_excludes_float_captions_from_main_unmapped_gate(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {"type": "paragraph", "text_for_embedding": "Body paragraph."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        Body paragraph.
+        \begin{figure}
+        \caption{An intentionally absent float caption.}
+        \end{figure}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=True,
+            max_orphan_ratio=1.0,
+            max_unmapped_tex_ratio=0.0,
+            max_isolated_node_ratio=1.0,
+            caption_fallback_threshold=101.0,
+        ),
+    ).run()
+
+    assert graph.alignment_quality["unmapped_tex_ratio"] == 0.0
+    assert graph.alignment_quality["raw_unmapped_tex_ratio"] > 0.0
+    assert graph.alignment_quality["unmapped_float_tex_count"] == 1
+
+
+def test_alignment_quality_excludes_bibliography_from_main_unmapped_gate(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    content_path.write_text(
+        json.dumps({"items": [{"type": "paragraph", "text_for_embedding": "Body paragraph."}]}),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        Body paragraph.
+        \begin{thebibliography}{10}
+        \bibitem{a} Author. Missing rendered reference.
+        \end{thebibliography}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((1, 4), dtype=torch.float32),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.zeros((0, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=True,
+            max_orphan_ratio=1.0,
+            max_unmapped_tex_ratio=0.0,
+            max_isolated_node_ratio=1.0,
+        ),
+    ).run(overwrite=False)
+
+    assert graph.alignment_quality["unmapped_tex_ratio"] == 0.0
+    assert graph.alignment_quality["weak_tex_count"] >= 1
+    assert graph.alignment_quality["raw_unmapped_tex_ratio"] > 0.0
+
+
+def test_alignment_keeps_pending_section_anchor_across_unmatched_keywords(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "Abstract. This paper studies playlists."},
+                    {"type": "paragraph", "text_for_embedding": "Keywords: music retrieval deployment"},
+                    {"type": "title", "text_for_embedding": "1 Introduction"},
+                    {"type": "paragraph", "text_for_embedding": "Search engines explore large catalogs."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        Abstract. This paper studies playlists.
+        \section{Introduction}
+        Search engines explore large catalogs.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.zeros((0, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            abort_on_bad_alignment=False,
+            max_orphan_ratio=1.0,
+            max_unmapped_tex_ratio=1.0,
+            max_isolated_node_ratio=1.0,
+        ),
+    ).run(overwrite=False)
+
+    assert graph.pdf_to_tex[1] is None
+    assert graph.pdf_to_tex[2] is not None
+    assert graph.pdf_to_tex[3] is not None
 
 
 def test_alignment_labeler_does_not_merge_independent_reference_list_blocks_when_alignment_misses(tmp_path):

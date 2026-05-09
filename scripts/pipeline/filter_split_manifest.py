@@ -146,9 +146,11 @@ def normalized_label_counts(value: Any) -> dict[int, int]:
     labels = {0: 0, 1: 0, 2: 0}
     if not isinstance(value, dict):
         return labels
+    name_to_id = {"merge": 0, "parent_child": 1, "none": 2}
     for raw_key, raw_count in value.items():
         try:
-            key = int(raw_key)
+            raw_key_text = str(raw_key)
+            key = name_to_id[raw_key_text] if raw_key_text in name_to_id else int(raw_key)
             count = int(raw_count)
         except (TypeError, ValueError):
             continue

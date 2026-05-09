@@ -139,6 +139,13 @@ def test_filter_split_manifest_filters_by_orphan_and_positive_edges():
         {"document_id": "a", "graph_path": "/tmp/a.pt", "orphan_ratio": 0.2, "candidate_edge_recall": 1.0, "label_counts": {"0": 1, "1": 0, "2": 10}},
         {"document_id": "b", "graph_path": "/tmp/b.pt", "orphan_ratio": 0.5, "candidate_edge_recall": 1.0, "label_counts": {"0": 1, "1": 0, "2": 10}},
         {"document_id": "c", "graph_path": "/tmp/c.pt", "orphan_ratio": 0.1, "candidate_edge_recall": 1.0, "label_counts": {"0": 0, "1": 0, "2": 10}},
+        {
+            "document_id": "d",
+            "graph_path": "/tmp/d.pt",
+            "orphan_ratio": 0.1,
+            "candidate_edge_recall": 1.0,
+            "label_counts": {"merge": 0, "parent_child": 2, "none": 10},
+        },
     ]
 
     kept = [
@@ -152,7 +159,7 @@ def test_filter_split_manifest_filters_by_orphan_and_positive_edges():
         )
     ]
 
-    assert kept == ["a"]
+    assert kept == ["a", "d"]
 
 
 def test_v7_batch_watcher_parses_progress_and_eta(tmp_path):

@@ -157,6 +157,7 @@ STANDARD_PARAGRAPH_NODE = "paragraph"
 STANDARD_EQUATION_NODE = "equation_display"
 STANDARD_FIGURE_CAPTION_NODE = "figure_caption"
 STANDARD_TABLE_CAPTION_NODE = "table_caption"
+STANDARD_REFERENCE_NODE = "reference"
 ALIGNABLE_TEX_NODE_TYPES = {
     STANDARD_SECTION_NODE,
     STANDARD_PARAGRAPH_NODE,
@@ -164,7 +165,13 @@ ALIGNABLE_TEX_NODE_TYPES = {
     STANDARD_LIST_ITEM_NODE,
     STANDARD_FIGURE_CAPTION_NODE,
     STANDARD_TABLE_CAPTION_NODE,
+    STANDARD_REFERENCE_NODE,
 }
+FLOAT_TEX_NODE_TYPES = {
+    STANDARD_FIGURE_CAPTION_NODE,
+    STANDARD_TABLE_CAPTION_NODE,
+}
+WEAK_TEX_NODE_TYPES = FLOAT_TEX_NODE_TYPES | {STANDARD_REFERENCE_NODE}
 POISON_TEX_ENV_NAMES = {
     "tikzpicture",
     "pgfpicture",
@@ -182,6 +189,7 @@ BLOCK_ENV_NAMES = {
     "figure*",
     "table",
     "table*",
+    "thebibliography",
 }
 CAPTION_PARENT_ENVS = {"figure", "figure*", "table", "table*"}
 CONTAINER_ENV_NAMES = {
@@ -198,13 +206,54 @@ CONTAINER_ENV_NAMES = {
     "Large",
 }
 SKIP_TEX_NODE_NAMES = {
+    "addtocounter",
+    "addtolength",
+    "bigskip",
+    "bibliography",
+    "bibliographystyle",
+    "centering",
+    "clearpage",
+    "color",
+    "definecolor",
     "documentclass",
+    "hfill",
+    "hphantom",
+    "hrule",
+    "hskip",
+    "hspace",
+    "includegraphics",
+    "indent",
     "usepackage",
     "label",
+    "linebreak",
+    "maketitle",
+    "medskip",
+    "newcommand",
+    "newpage",
+    "noindent",
+    "pagebreak",
+    "pagestyle",
+    "par",
+    "phantom",
+    "protect",
+    "raggedleft",
+    "raggedright",
     "ref",
+    "renewcommand",
+    "resizebox",
+    "rule",
+    "scalebox",
+    "setcounter",
+    "setlength",
+    "settowidth",
+    "smallskip",
+    "thispagestyle",
+    "vfill",
+    "vphantom",
+    "vrule",
+    "vskip",
+    "vspace",
     "cite",
-    "bibliographystyle",
-    "bibliography",
 }
 HEADING_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
 SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
@@ -212,6 +261,52 @@ LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
 CAPTION_TEX_NODE_TYPES = {STANDARD_FIGURE_CAPTION_NODE, STANDARD_TABLE_CAPTION_NODE}
+VISUAL_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.+~/-]+)\.(?:png|jpe?g|pdf|eps|svg)", re.IGNORECASE)
+VISUAL_OPTION_RE = re.compile(
+    r"\b(?:width|height|scale|angle|trim|clip|keepaspectratio)\s*=?\s*"
+    r"(?:[0-9.]+)?\s*(?:\\?(?:textwidth|linewidth|columnwidth|paperwidth)|[a-z]+)?",
+    re.IGNORECASE,
+)
+VISUAL_LENGTH_RE = re.compile(r"\\(?:textwidth|linewidth|columnwidth|paperwidth|paperheight|hsize|vsize)\b")
+LAYOUT_ONLY_CLEAN_VALUES = {
+    "b",
+    "c",
+    "center",
+    "centering",
+    "empty",
+    "h",
+    "hb",
+    "hbp",
+    "ht",
+    "htb",
+    "htbp",
+    "l",
+    "plain",
+    "r",
+    "t",
+    "tb",
+    "tbp",
+}
+LAYOUT_COLOR_CLEAN_VALUES = {
+    "black",
+    "blue",
+    "brown",
+    "cyan",
+    "gray",
+    "green",
+    "grey",
+    "magenta",
+    "orange",
+    "pink",
+    "purple",
+    "red",
+    "violet",
+    "white",
+    "yellow",
+}
+LAYOUT_DIMENSION_RE = re.compile(
+    r"^(?:[tblrc])?(?:\d+(?:\.\d+)?|\d*\.\d+)(?:pt|em|ex|cm|mm|in|pc|px)?$"
+)
 AUXILIARY_PDF_TYPES = {
     "page_header",
     "page_footer",
@@ -608,9 +703,9 @@ class AlignmentLabeler:
     ) -> int | None:
         pdf_clean = pdf_node.clean
         current = tex_sequence[tex_cursor]
-        current_score = fragment_ratio_score(pdf_clean, current.clean)
         if current.node_type == STANDARD_SECTION_NODE and not self.pdf_node_can_match_section(pdf_node, current):
-            current_score = 0.0
+            return None
+        current_score = fragment_ratio_score(pdf_clean, current.clean)
         best_cursor: int | None = None
         best_score = current_score
         upper = min(len(tex_sequence), tex_cursor + 1 + max(0, self.config.tex_lookahead_nodes))
@@ -763,11 +858,26 @@ class AlignmentLabeler:
         orphan_count = sum(1 for match in effective_matches if not match.tex_id)
         orphan_ratio = orphan_count / max(1, len(effective_matches))
         alignable_tex_nodes = [node for node in self.tex_nodes.values() if self.is_alignable_tex_node(node)]
+        main_alignable_tex_nodes = [node for node in alignable_tex_nodes if node.node_type not in WEAK_TEX_NODE_TYPES]
+        float_tex_nodes = [node for node in alignable_tex_nodes if node.node_type in FLOAT_TEX_NODE_TYPES]
+        weak_tex_nodes = [node for node in alignable_tex_nodes if node.node_type in WEAK_TEX_NODE_TYPES]
         mapped_tex_ids = {match.tex_id for match in self.matches if match.tex_id}
-        unmapped_tex_count = sum(1 for node in alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
-        unmapped_tex_ratio = unmapped_tex_count / max(1, len(alignable_tex_nodes))
+        raw_unmapped_tex_count = sum(1 for node in alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
+        raw_unmapped_tex_ratio = raw_unmapped_tex_count / max(1, len(alignable_tex_nodes))
+        unmapped_tex_count = sum(1 for node in main_alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
+        unmapped_tex_ratio = unmapped_tex_count / max(1, len(main_alignable_tex_nodes))
+        unmapped_float_tex_count = sum(1 for node in float_tex_nodes if node.tex_id not in mapped_tex_ids)
         section_count = sum(1 for node in self.tex_nodes.values() if node.node_type == STANDARD_SECTION_NODE)
         paragraph_pdf_count = sum(1 for node in self.pdf_nodes if canonical_pdf_merge_type(node.item) == "text" and len(node.clean) >= self.config.min_clean_chars)
+        metadata_node_indices = {
+            node.node_index
+            for node in self.pdf_nodes
+            if layout_layer_name(node.item) == "metadata_layer"
+        }
+        metadata_orphan_count = sum(
+            1 for match in self.matches if match.pdf_node_index in metadata_node_indices and not match.tex_id
+        )
+        metadata_orphan_ratio = metadata_orphan_count / max(1, len(metadata_node_indices))
         isolated_count = 0
         isolated_ratio = 0.0
         if graph is not None and labels is not None and hasattr(graph, "edge_index"):
@@ -791,9 +901,18 @@ class AlignmentLabeler:
             "expected_visual_orphan_exempt_count": len(exempt_visual_orphans),
             "document_root_scoped_count": len(document_root_scoped),
             "alignable_tex_count": len(alignable_tex_nodes),
+            "main_alignable_tex_count": len(main_alignable_tex_nodes),
+            "weak_tex_count": len(weak_tex_nodes),
+            "float_tex_count": len(float_tex_nodes),
+            "raw_unmapped_tex_count": raw_unmapped_tex_count,
+            "raw_unmapped_tex_ratio": raw_unmapped_tex_ratio,
             "unmapped_tex_count": unmapped_tex_count,
             "unmapped_tex_ratio": unmapped_tex_ratio,
+            "unmapped_float_tex_count": unmapped_float_tex_count,
             "max_unmapped_tex_ratio": self.config.max_unmapped_tex_ratio,
+            "metadata_pdf_node_count": len(metadata_node_indices),
+            "metadata_orphan_count": metadata_orphan_count,
+            "metadata_orphan_ratio": metadata_orphan_ratio,
             "section_count": section_count,
             "min_section_nodes": self.config.min_section_nodes,
             "isolated_node_count": isolated_count,
@@ -840,6 +959,8 @@ class AlignmentLabeler:
     def is_expected_visual_orphan(self, node: PdfAlignmentNode) -> bool:
         if not self.config.exclude_expected_visual_orphans:
             return False
+        if layout_layer_name(node.item) == "metadata_layer":
+            return True
         raw_type = canonical_pdf_type(node.item)
         if raw_type in AUXILIARY_PDF_TYPES:
             return True
@@ -1351,6 +1472,17 @@ class _TexSoupPathBuilder:
                 if env_id is not None:
                     self.walk_children(getattr(child, "contents", []) or [], parent_id=env_id, parent_env=name)
                 continue
+            if name == "thebibliography":
+                self.flush_paragraphs(paragraph_buffer, parent_id)
+                self.walk_children(
+                    getattr(child, "contents", []) or [],
+                    parent_id=self.current_parent(parent_id),
+                    parent_env=name,
+                )
+                continue
+            if name == "bibitem":
+                self.flush_paragraphs(paragraph_buffer, parent_id, node_type=STANDARD_REFERENCE_NODE)
+                continue
             if name == "item":
                 self.flush_paragraphs(paragraph_buffer, parent_id)
                 self.walk_item_contents(child, parent_id=parent_id)
@@ -1366,6 +1498,14 @@ class _TexSoupPathBuilder:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
                 caption_type = STANDARD_TABLE_CAPTION_NODE if parent_env in {"table", "table*"} else STANDARD_FIGURE_CAPTION_NODE
                 self.add_node(caption_type, tex_node_text(child), self.current_parent(parent_id), source_name=name)
+                continue
+            if parent_env in CAPTION_PARENT_ENVS:
+                if hasattr(child, "contents"):
+                    self.walk_children(
+                        getattr(child, "contents", []) or [],
+                        parent_id=self.current_parent(parent_id),
+                        parent_env=parent_env,
+                    )
                 continue
             if name in {"figure", "figure*", "table", "table*"}:
                 self.flush_paragraphs(paragraph_buffer, parent_id)
@@ -1391,7 +1531,8 @@ class _TexSoupPathBuilder:
                     paragraph_buffer.append(f" {text} ")
                 else:
                     self.walk_children(getattr(child, "contents", []) or [], parent_id=self.current_parent(parent_id), parent_env=name)
-        self.flush_paragraphs(paragraph_buffer, parent_id)
+        final_node_type = STANDARD_REFERENCE_NODE if parent_env == "thebibliography" else STANDARD_PARAGRAPH_NODE
+        self.flush_paragraphs(paragraph_buffer, parent_id, node_type=final_node_type)
 
     def walk_item_contents(self, item_node: Any, *, parent_id: str) -> None:
         item_buffer: list[str] = []
@@ -1436,6 +1577,8 @@ class _TexSoupPathBuilder:
 
     def add_node(self, node_type: str, text: str, parent_id: str, *, source_name: str | None = None) -> str | None:
         clean = clean_equation_text(text) if node_type == STANDARD_EQUATION_NODE else clean_text(text)
+        if is_layout_artifact_node(text, clean, source_name=source_name):
+            return None
         if len(clean) < self.config.min_clean_chars and not (
             clean == "math" or (node_type == STANDARD_EQUATION_NODE and bool(clean))
         ):
@@ -1459,14 +1602,20 @@ class _TexSoupPathBuilder:
         )
         return tex_id
 
-    def flush_paragraphs(self, paragraph_buffer: list[str], parent_id: str) -> None:
+    def flush_paragraphs(
+        self,
+        paragraph_buffer: list[str],
+        parent_id: str,
+        *,
+        node_type: str = STANDARD_PARAGRAPH_NODE,
+    ) -> None:
         if not paragraph_buffer:
             return
         raw_text = "".join(paragraph_buffer)
         paragraph_buffer.clear()
         for paragraph in re.split(r"(?:\r?\n\s*){2,}", raw_text):
             if paragraph.strip():
-                self.add_node(STANDARD_PARAGRAPH_NODE, paragraph, self.current_parent(parent_id), source_name="text")
+                self.add_node(node_type, paragraph, self.current_parent(parent_id), source_name="text")
 
     def section_parent(self, name: str) -> str:
         level = SECTION_LEVELS[name]
@@ -1486,7 +1635,7 @@ class _TexSoupPathBuilder:
 def clean_text(text: Any) -> str:
     """Aggressively normalize PDF/TeX text for fuzzy alignment."""
 
-    value = str(text or "")
+    value = strip_visual_artifacts(str(text or ""))
     value = expose_math_payload(value)
     value = value.lower()
     value = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?", " ", value)
@@ -1498,12 +1647,49 @@ def clean_text(text: Any) -> str:
 def clean_equation_text(text: Any) -> str:
     """Normalize display equations while keeping command-only formulas alignable."""
 
-    value = expose_math_payload(str(text or ""))
+    value = expose_math_payload(strip_visual_artifacts(str(text or "")))
     value = re.sub(r"\\([a-zA-Z]+)\*?", r" \1 ", value)
     value = re.sub(r"\\.", " ", value)
     value = value.lower()
     value = re.sub(rf"[^0-9a-z\u4e00-\u9fff]+", "", value)
     return value
+
+
+def strip_visual_artifacts(value: str) -> str:
+    """Remove image paths and layout option fragments before text matching."""
+
+    value = VISUAL_FILE_RE.sub(" ", value)
+    value = VISUAL_OPTION_RE.sub(" ", value)
+    value = VISUAL_LENGTH_RE.sub(" ", value)
+    return value
+
+
+def is_layout_artifact_node(text: Any, clean: str, *, source_name: str | None = None) -> bool:
+    """Reject TeX nodes that are only layout parameters, colors, or placement hints."""
+
+    if source_name in SKIP_TEX_NODE_NAMES:
+        return True
+    raw = str(text or "").strip()
+    compact_raw = re.sub(r"\s+", "", raw).lower()
+    compact_clean = str(clean or "").lower()
+    if not compact_clean:
+        return False
+    if compact_clean in LAYOUT_ONLY_CLEAN_VALUES or compact_clean in LAYOUT_COLOR_CLEAN_VALUES:
+        return True
+    if LAYOUT_DIMENSION_RE.fullmatch(compact_clean):
+        return True
+    if re.fullmatch(r"[tblrc]?\d+(?:pt|em|ex|cm|mm|in|pc|px)?", compact_clean):
+        return True
+    if re.fullmatch(r"[tblrc]?\d+", compact_clean) and any(
+        marker in compact_raw
+        for marker in ("textwidth", "linewidth", "columnwidth", "paperwidth", "pt", "em", "cm", "mm", "in")
+    ):
+        return True
+    if re.fullmatch(r"[htbp]+", compact_clean):
+        return True
+    if compact_raw in {"\\maketitle", "\\centering", "\\noindent", "\\clearpage", "\\newpage"}:
+        return True
+    return False
 
 
 def expose_math_payload(value: str) -> str:

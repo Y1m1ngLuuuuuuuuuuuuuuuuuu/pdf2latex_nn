@@ -27,6 +27,49 @@ MATH_ENV_RE = re.compile(
 )
 DISPLAY_MATH_RE = re.compile(r"\$\$.*?\$\$|\\\[.*?\\\]", re.DOTALL)
 INLINE_MATH_RE = re.compile(r"\$.*?\$|\\\(.*?\\\)", re.DOTALL)
+SILENT_COMMAND_NAMES = {
+    "addtocounter",
+    "addtolength",
+    "bigskip",
+    "centering",
+    "clearpage",
+    "color",
+    "definecolor",
+    "hfill",
+    "hphantom",
+    "hrule",
+    "hskip",
+    "hspace",
+    "includegraphics",
+    "indent",
+    "label",
+    "linebreak",
+    "maketitle",
+    "medskip",
+    "newpage",
+    "noindent",
+    "pagebreak",
+    "pagestyle",
+    "par",
+    "phantom",
+    "protect",
+    "raggedleft",
+    "raggedright",
+    "resizebox",
+    "rule",
+    "scalebox",
+    "setcounter",
+    "setlength",
+    "settowidth",
+    "smallskip",
+    "thispagestyle",
+    "vfill",
+    "vphantom",
+    "vrule",
+    "vskip",
+    "vspace",
+}
+SILENT_COMMAND_RE = re.compile(r"\\([a-zA-Z@]+)\*?")
 
 
 @dataclass(frozen=True)
@@ -84,7 +127,8 @@ def flatten_latex_file(path: Path, config: LatexFlattenerConfig | None = None) -
         tex_4, macros = expand_simple_macros(tex_3)
     else:
         tex_4, macros = tex_3, {}
-    clean_flat_tex = mask_math_environments(tex_4) if cfg.mask_math else tex_4
+    tex_5 = strip_silent_commands(tex_4)
+    clean_flat_tex = mask_math_environments(tex_5) if cfg.mask_math else tex_5
     return FlattenedLatex(
         content=clean_flat_tex,
         source_path=main_path,
@@ -201,6 +245,60 @@ def expand_simple_macros(tex_string: str) -> tuple[str, dict[str, str]]:
     for alias, value in macros.items():
         tex_without_defs = re.sub(rf"\\{re.escape(alias)}(?![a-zA-Z@])", lambda _match, replacement=value: replacement, tex_without_defs)
     return tex_without_defs, macros
+
+
+def strip_silent_commands(tex_string: str) -> str:
+    """Drop visual/layout commands and all immediate option/brace arguments."""
+
+    output: list[str] = []
+    cursor = 0
+    length = len(tex_string)
+    while cursor < length:
+        if tex_string[cursor] != "\\":
+            output.append(tex_string[cursor])
+            cursor += 1
+            continue
+        match = SILENT_COMMAND_RE.match(tex_string, cursor)
+        if match is None or match.group(1) not in SILENT_COMMAND_NAMES:
+            output.append(tex_string[cursor])
+            cursor += 1
+            continue
+        cursor = consume_command_arguments(tex_string, match.end())
+        output.append(" ")
+    return "".join(output)
+
+
+def consume_command_arguments(tex_string: str, cursor: int) -> int:
+    """Consume whitespace plus consecutive optional/braced TeX arguments."""
+
+    length = len(tex_string)
+    while cursor < length:
+        while cursor < length and tex_string[cursor].isspace():
+            cursor += 1
+        if cursor >= length or tex_string[cursor] not in "[{":
+            return cursor
+        opener = tex_string[cursor]
+        closer = "]" if opener == "[" else "}"
+        cursor = consume_balanced_group(tex_string, cursor, opener=opener, closer=closer)
+    return cursor
+
+
+def consume_balanced_group(tex_string: str, cursor: int, *, opener: str, closer: str) -> int:
+    depth = 0
+    length = len(tex_string)
+    while cursor < length:
+        char = tex_string[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return length
 
 
 def is_safe_macro_value(value: str) -> bool:
