@@ -265,6 +265,7 @@ SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 UPPERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[A-Z]")
+VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
 RUN_IN_HEADING_RE = re.compile(
     r"^\s*(?:"
     r"[A-Z][A-Za-z][A-Za-z0-9/\-\s]{1,48}[.:]"
@@ -1202,9 +1203,10 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
 
     TeX AST paths are fragile in real arXiv sources. This stack uses only the
     already ordered MinerU/PyMuPDF records: block type, heading prefix, font
-    statistics, and short standalone-title cues. It intentionally does not
-    model itemize/enumerate; list-like blocks remain ordinary siblings inside
-    the nearest section scope.
+    statistics, short standalone-title cues, and visible list-introduction
+    anchors.  TeX ``itemize`` / ``enumerate`` containers do not have their own
+    PDF boxes, so a paragraph ending with a colon can become the visible proxy
+    parent for the following bullet/numbered items.
     """
 
     body_font_size = infer_body_font_size(nodes)
@@ -1228,6 +1230,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
     active_list_parent: int | None = None
     active_list_next_number: int | None = None
     active_list_last_pos = -1
+    recent_list_intro_by_scope: dict[int | None, tuple[int, int]] = {}
     effective_pos = 0
 
     for node in nodes:
@@ -1257,6 +1260,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         list_number = ordered_list_marker_number(node.text)
         parent_id = stack[-1][0] if stack else None
+        marker_like = LIST_MARKER_RE.match(node.text)
         if list_number is not None:
             if (
                 active_list_parent is not None
@@ -1265,13 +1269,28 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             ):
                 parent_id = active_list_parent
             else:
+                parent_id = visible_list_proxy_parent(
+                    recent_list_intro_by_scope,
+                    scope_parent=parent_id,
+                    current_effective_pos=effective_pos,
+                ) or parent_id
                 active_list_parent = parent_id
             active_list_next_number = list_number + 1
             active_list_last_pos = effective_pos
-        elif LIST_MARKER_RE.match(node.text):
-            active_list_parent = parent_id
+        elif marker_like:
+            if active_list_parent is not None and 0 <= effective_pos - active_list_last_pos <= 18:
+                parent_id = active_list_parent
+            else:
+                parent_id = visible_list_proxy_parent(
+                    recent_list_intro_by_scope,
+                    scope_parent=parent_id,
+                    current_effective_pos=effective_pos,
+                ) or parent_id
+                active_list_parent = parent_id
             active_list_next_number = None
             active_list_last_pos = effective_pos
+        elif text_can_anchor_visible_list(node.text):
+            recent_list_intro_by_scope[parent_id] = (node_id, effective_pos)
         parent_by_node[node_id] = parent_id
         children_by_parent.setdefault(parent_id, []).append(node_id)
 
@@ -1306,6 +1325,30 @@ def ordered_list_marker_number(text: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def text_can_anchor_visible_list(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped or LIST_MARKER_RE.match(stripped):
+        return False
+    if len(clean_text(stripped)) < 8:
+        return False
+    return bool(VISIBLE_LIST_INTRO_RE.search(stripped))
+
+
+def visible_list_proxy_parent(
+    recent_list_intro_by_scope: dict[int | None, tuple[int, int]],
+    *,
+    scope_parent: int | None,
+    current_effective_pos: int,
+) -> int | None:
+    proxy = recent_list_intro_by_scope.get(scope_parent)
+    if proxy is None:
+        return None
+    proxy_node, proxy_pos = proxy
+    if 0 <= current_effective_pos - proxy_pos <= 4:
+        return proxy_node
+    return None
 
 
 def alpha_or_roman_heading_level(text: str) -> int | None:

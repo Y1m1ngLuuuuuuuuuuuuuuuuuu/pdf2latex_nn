@@ -1,6 +1,13 @@
 import json
 
-from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig, LayoutBreakerException, clean_text
+from src.reasoning.label_generator import (
+    AlignmentLabeler,
+    AlignmentLabelerConfig,
+    LayoutBreakerException,
+    PdfAlignmentNode,
+    build_visual_hierarchy,
+    clean_text,
+)
 from src.reasoning.tex_relation_labeler import TexRelationLabel
 
 
@@ -316,6 +323,53 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
     assert all({"node_type", "clean_text", "parent_id"} <= set(node) for node in mapping["tex_nodes"])
     saved = torch.load(graph_path, map_location="cpu", weights_only=False)
     assert saved.y.tolist() == graph.y.tolist()
+
+
+def test_visual_hierarchy_uses_colon_paragraph_as_list_proxy_parent():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="1 Introduction",
+            clean=clean_text("1 Introduction"),
+            item={"type": "title", "text_for_embedding": "1 Introduction", "bbox": [80, 80, 360, 110]},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="However, ADD faces several shortcomings related to:",
+            clean=clean_text("However, ADD faces several shortcomings related to:"),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "However, ADD faces several shortcomings related to:",
+                "bbox": [80, 130, 800, 160],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="• Data: Creating labeled datasets is costly.",
+            clean=clean_text("• Data: Creating labeled datasets is costly."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "• Data: Creating labeled datasets is costly.",
+                "bbox": [120, 180, 800, 210],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="• Machine Learning: ML methods struggle with rare cases.",
+            clean=clean_text("• Machine Learning: ML methods struggle with rare cases."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "• Machine Learning: ML methods struggle with rare cases.",
+                "bbox": [120, 220, 800, 250],
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] == 1
+    assert hierarchy.parent_by_node[3] == 1
 
 
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
