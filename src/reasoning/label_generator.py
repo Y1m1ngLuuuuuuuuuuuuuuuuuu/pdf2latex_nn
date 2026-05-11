@@ -1573,8 +1573,6 @@ def is_visual_heading_candidate(
         return False
     if is_algorithm_io_label(text):
         return False
-    if is_formula_heavy_scope_heading_text(text):
-        return False
     if node.item.get("run_in_heading"):
         return True
     layer = layout_layer_name(node.item)
@@ -1585,6 +1583,8 @@ def is_visual_heading_candidate(
         return False
     if raw_type in HEADING_TYPES:
         return True
+    if is_formula_heavy_scope_heading_text(text):
+        return False
     if raw_type in NON_HEADING_PDF_TYPES or str(node.item.get("list_type") or "").lower() == "reference_list":
         return False
     if LIST_MARKER_RE.match(text):

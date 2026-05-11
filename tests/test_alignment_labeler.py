@@ -784,6 +784,31 @@ def test_visual_hierarchy_does_not_treat_formula_signatures_as_headings():
     assert hierarchy.parent_by_node[2] == 0
 
 
+def test_visual_hierarchy_keeps_mineru_title_even_with_math_tokens():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text=r"2 Partial type theory { \mathsf { T } } { \mathsf { T } } ^ { * }",
+            clean=clean_text(r"2 Partial type theory { \mathsf { T } } { \mathsf { T } } ^ { * }"),
+            item={
+                "type": "title",
+                "text_for_embedding": r"2 Partial type theory { \mathsf { T } } { \mathsf { T } } ^ { * }",
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="The section body starts here.",
+            clean=clean_text("The section body starts here."),
+            item={"type": "paragraph", "text_for_embedding": "The section body starts here."},
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert 0 in hierarchy.heading_ids
+    assert hierarchy.parent_by_node[1] == 0
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return
