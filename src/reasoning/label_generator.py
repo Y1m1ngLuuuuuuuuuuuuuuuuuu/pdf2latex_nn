@@ -1246,6 +1246,9 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         effective_pos += 1
         if node_id in heading_ids:
+            active_list_parent = None
+            active_list_next_number = None
+            active_list_last_pos = -1
             level = heading_levels[node_id]
             numbering_path = title_numbering_path(node.text)
             while stack and heading_scope_must_close_before_child(
@@ -1296,6 +1299,14 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             active_list_last_pos = effective_pos
         elif text_can_anchor_visible_list(node.text):
             recent_list_intro_by_scope[parent_id] = (node_id, effective_pos)
+            active_list_parent = None
+            active_list_next_number = None
+            active_list_last_pos = -1
+        elif str(node.text or "").strip():
+            recent_list_intro_by_scope.pop(parent_id, None)
+            active_list_parent = None
+            active_list_next_number = None
+            active_list_last_pos = -1
         parent_by_node[node_id] = parent_id
         children_by_parent.setdefault(parent_id, []).append(node_id)
 

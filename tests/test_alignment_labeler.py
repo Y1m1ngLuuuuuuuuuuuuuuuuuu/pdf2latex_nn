@@ -420,6 +420,56 @@ def test_visual_hierarchy_closes_references_before_appendix_headings():
     assert hierarchy.parent_by_node[3] == 2
 
 
+def test_visual_hierarchy_does_not_reuse_stale_list_intro_after_body_text():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="1 Introduction",
+            clean=clean_text("1 Introduction"),
+            item={"type": "title", "text_for_embedding": "1 Introduction", "bbox": [80, 80, 360, 110]},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="Guidelines:",
+            clean=clean_text("Guidelines:"),
+            item={"type": "paragraph", "text_for_embedding": "Guidelines:", "bbox": [80, 130, 220, 150]},
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="• First local item.",
+            clean=clean_text("• First local item."),
+            item={"type": "paragraph", "text_for_embedding": "• First local item.", "bbox": [120, 170, 520, 190]},
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="Question: A later checklist question starts a new block.",
+            clean=clean_text("Question: A later checklist question starts a new block."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "Question: A later checklist question starts a new block.",
+                "bbox": [80, 230, 760, 250],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=4,
+            text="• This item belongs to the current section, not the stale Guidelines line.",
+            clean=clean_text("• This item belongs to the current section, not the stale Guidelines line."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "• This item belongs to the current section, not the stale Guidelines line.",
+                "bbox": [120, 280, 760, 300],
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] == 1
+    assert hierarchy.parent_by_node[3] == 0
+    assert hierarchy.parent_by_node[4] == 0
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return
