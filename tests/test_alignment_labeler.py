@@ -470,6 +470,43 @@ def test_visual_hierarchy_does_not_reuse_stale_list_intro_after_body_text():
     assert hierarchy.parent_by_node[4] == 0
 
 
+def test_visual_hierarchy_closes_references_before_non_reference_float():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="References",
+            clean=clean_text("References"),
+            item={"type": "title", "text_for_embedding": "References", "bbox": [220, 120, 330, 145]},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="[1] A. Author. A paper.",
+            clean=clean_text("[1] A. Author. A paper."),
+            item={
+                "type": "reference",
+                "list_type": "reference_list",
+                "text_for_embedding": "[1] A. Author. A paper.",
+                "bbox": [80, 170, 520, 190],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="Fig. S5. Supplementary segmentation result.",
+            clean=clean_text("Fig. S5. Supplementary segmentation result."),
+            item={
+                "type": "image",
+                "text_for_embedding": "Fig. S5. Supplementary segmentation result.",
+                "bbox": [200, 300, 760, 520],
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] is None
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return

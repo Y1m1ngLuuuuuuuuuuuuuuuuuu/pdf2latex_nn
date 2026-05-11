@@ -1268,6 +1268,12 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         list_number = ordered_list_marker_number(node.text)
         parent_id = stack[-1][0] if stack else None
+        if stack and reference_scope_must_close_before_item(parent_text=nodes[stack[-1][0]].text, item=node.item):
+            stack.pop()
+            parent_id = stack[-1][0] if stack else None
+            active_list_parent = None
+            active_list_next_number = None
+            active_list_last_pos = -1
         marker_like = LIST_MARKER_RE.match(node.text)
         if list_number is not None:
             if (
@@ -1354,6 +1360,13 @@ def heading_scope_must_close_before_child(*, parent_text: str, child_text: str) 
     return child_kind in {"appendix", "acknowledgements", "acknowledgments"} or bool(
         str(child_text or "").strip()
     )
+
+
+def reference_scope_must_close_before_item(*, parent_text: str, item: dict[str, Any]) -> bool:
+    parent_kind = normalized_heading_keyword(parent_text)
+    if parent_kind not in {"references", "bibliography"}:
+        return False
+    return canonical_pdf_merge_type(item) != "reference"
 
 
 def normalized_heading_keyword(text: str) -> str:
