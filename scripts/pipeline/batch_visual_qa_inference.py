@@ -56,7 +56,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--render-table-crops",
         action="store_true",
-        help="Generate table crop images in each QA output assets/ directory. Disabled by default to save disk.",
+        help="Generate table and figure crop images in each QA output assets/ directory. Disabled by default to save disk.",
     )
     return parser
 
@@ -230,7 +230,9 @@ def run_one_document(
             require_parent_argmax=decoder.config.require_parent_argmax,
             source_pdf=str(pdf_path) if render_table_crops else None,
             table_asset_output_dir=str(doc_dir / "assets") if render_table_crops else None,
+            figure_asset_output_dir=str(doc_dir / "assets") if render_table_crops else None,
             table_asset_latex_prefix="assets",
+            figure_asset_latex_prefix="assets",
         )
     )
     root = local_decoder.decode(node_records, data.edge_index.detach().cpu(), logits)

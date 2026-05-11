@@ -67,11 +67,14 @@ class StyleProfileExtractor:
             "bibliography": self._extract_bibliography_style(document, body_font_size),
             "header_footer": self._extract_header_footer_style(document),
             "column_mode": page_layout.get("column_mode"),
+            "mixed_column_strategy": "multicols_by_layout_band" if page_layout.get("column_mode") == "mixed" else None,
             "geometry_options": self._geometry_options_from_layout(page_layout),
             "font_setup": build_latex_font_setup(body_font_family, role_fonts),
             "source": "statistical_document_ir",
         }
         packages = ["amsmath", "amssymb", "graphicx", "float", "booktabs", "hyperref", "geometry", "setspace", "enumitem", "titlesec"]
+        if page_layout.get("column_mode") == "mixed":
+            packages.append("multicol")
         documentclass_options: list[str] = []
         if page_layout.get("column_mode") == "two_column":
             documentclass_options.append("twocolumn")
@@ -104,6 +107,7 @@ class StyleProfileExtractor:
         margins_by_page: list[dict[str, float]] = []
         column_counts: list[int] = []
         column_gaps: list[float] = []
+        mixed_band_pages = 0
         text_widths: list[float] = []
         text_heights: list[float] = []
         for page in document.pages:
@@ -129,6 +133,8 @@ class StyleProfileExtractor:
             column_counts.append(count)
             if gap is not None:
                 column_gaps.append(gap)
+            if count >= 2 and _page_has_full_width_blocker(nodes, page.width, self.config.full_width_threshold):
+                mixed_band_pages += 1
 
         column_count = _dominant_int(column_counts, default=1)
         two_column_ratio = 0.0
@@ -137,7 +143,10 @@ class StyleProfileExtractor:
             if two_column_ratio >= self.config.two_column_min_pages_ratio:
                 column_count = max(column_count, 2)
         column_mode = "single"
-        if two_column_ratio >= self.config.stable_two_column_min_pages_ratio:
+        mixed_band_ratio = (mixed_band_pages / len(column_counts)) if column_counts else 0.0
+        if mixed_band_pages:
+            column_mode = "mixed"
+        elif two_column_ratio >= self.config.stable_two_column_min_pages_ratio:
             column_mode = "two_column"
         elif two_column_ratio >= self.config.two_column_min_pages_ratio:
             column_mode = "mixed"
@@ -157,8 +166,9 @@ class StyleProfileExtractor:
             "column_gap_ratio": (column_gap / page_width) if page_width and column_gap is not None else None,
             "column_mode": column_mode,
             "two_column_page_ratio": two_column_ratio,
+            "mixed_band_page_ratio": mixed_band_ratio,
             "coordinate_space": str(document.coordinate_space.value if hasattr(document.coordinate_space, "value") else document.coordinate_space),
-            "mixed_columns": len(set(column_counts)) > 1 if column_counts else False,
+            "mixed_columns": bool(mixed_band_pages) or (len(set(column_counts)) > 1 if column_counts else False),
         }
 
     def _estimate_body_font_size(self, document: DocumentIR) -> float | None:
@@ -523,7 +533,7 @@ def _nodes_by_page(nodes: Iterable[DocumentNode]) -> dict[int, list[DocumentNode
 
 
 def _is_layout_node(node: DocumentNode) -> bool:
-    return node.node_type not in {BlockType.HEADER_FOOTER, BlockType.TOC, BlockType.OTHER}
+    return node.node_type not in {BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE, BlockType.TOC, BlockType.OTHER}
 
 
 def _estimate_page_columns(
@@ -556,6 +566,22 @@ def _estimate_page_columns(
     return 2, max(right_min - left_max, 0.0)
 
 
+def _page_has_full_width_blocker(nodes: list[DocumentNode], page_width: float, full_width_threshold: float) -> bool:
+    if page_width <= 0:
+        return False
+    center = page_width / 2.0
+    margin = 0.05 * page_width
+    for node in nodes:
+        if not _is_layout_node(node) or not node.bboxes:
+            continue
+        box = node.bboxes[0]
+        width = max(box.x1 - box.x0, 0.0)
+        crosses_center = box.x0 < center - margin and box.x1 > center + margin
+        if width >= full_width_threshold * page_width or crosses_center:
+            return True
+    return False
+
+
 def _iter_span_sizes(node: DocumentNode, min_chars: int) -> Iterable[tuple[float, int]]:
     for span in node.spans:
         if span.font_size is None:
@@ -583,6 +609,10 @@ def _style_flag_ratio(node: DocumentNode, flag_name: str) -> float | None:
 def _role_for_node(node: DocumentNode) -> str:
     if node.node_type == BlockType.HEADER_FOOTER:
         return "header_footer"
+    if node.node_type == BlockType.FOOTNOTE:
+        return "footnote"
+    if node.node_type == BlockType.MARGIN_NOTE:
+        return "margin_note"
     if node.node_type == BlockType.TITLE:
         level = node.features.get("heading_level") or node.metadata.get("heading_level")
         if level in {1, "1", "section"}:

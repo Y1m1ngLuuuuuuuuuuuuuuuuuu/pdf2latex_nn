@@ -6,6 +6,7 @@ from src.generation.citations import (
     CitationResolverConfig,
 )
 from src.generation.ir_renderer import IRLatexRenderConfig, OriginalLikeIRLatexRenderer
+from src.generation.render_surface import render_original_like_document
 from src.generation.style_profile import StyleProfileExtractor, StyleProfileExtractorConfig
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "CitationResolverConfig",
     "IRLatexRenderConfig",
     "OriginalLikeIRLatexRenderer",
+    "render_original_like_document",
     "StyleProfileExtractor",
     "StyleProfileExtractorConfig",
 ]

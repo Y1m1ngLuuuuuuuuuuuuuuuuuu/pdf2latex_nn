@@ -140,6 +140,12 @@ class MinerUV7DocumentIRAdapter:
         )
         text = text_from_v7_item(item)
         metadata = metadata_from_v7_item(item, include_raw_block=self.config.include_raw_block, include_raw_item=self.config.include_raw_item)
+        if source_path is not None:
+            metadata.setdefault("source_json", str(source_path))
+            metadata.setdefault("source_json_dir", str(source_path.parent))
+            metadata.setdefault("asset_base_dir", str(source_path.parent))
+        if pdf_path is not None:
+            metadata.setdefault("source_pdf", str(pdf_path))
         features = features_from_v7_item(item)
         spans = [style_span_from_v7(span) for span in item.get("style_spans", []) if isinstance(span, dict)]
         source_refs = [
@@ -280,6 +286,10 @@ def map_v7_type_to_block_type(item: dict[str, Any]) -> BlockType:
     layer = str(item.get("layout_layer") or "").casefold()
     role = str(item.get("layout_role") or "").casefold()
     raw = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
+    if raw in {"page_footnote", "footnote", "foot_note"} or role in {"footnote", "page_footnote"}:
+        return BlockType.FOOTNOTE
+    if raw in {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"} or role in {"margin_note", "marginnote", "side_note", "sidenote"}:
+        return BlockType.MARGIN_NOTE
     if layer == "noise_layer" or raw in {"page_number", "header", "footer"} or role == "noise":
         return BlockType.HEADER_FOOTER
     if raw in {"toc", "index", "table_of_contents"} or role in {"toc_title", "toc_entry"}:
@@ -419,6 +429,9 @@ def features_from_v7_item(item: dict[str, Any]) -> dict[str, float | int | bool 
         "font_size",
         "page_width",
         "page_height",
+        "footnote_marker",
+        "footnote_label",
+        "margin_note_side",
     )
     features: dict[str, float | int | bool | str | None] = {}
     for key in keys:
@@ -457,6 +470,10 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "table_group_bbox",
         "table_group_caption",
         "table_group_render_strategy",
+        "footnote_marker",
+        "footnote_label",
+        "footnote_anchor",
+        "margin_note_side",
         "style_extract_status",
         "canonical_type",
         "is_main_flow_candidate",

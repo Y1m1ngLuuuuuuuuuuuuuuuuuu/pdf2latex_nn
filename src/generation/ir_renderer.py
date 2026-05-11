@@ -9,7 +9,7 @@ DocumentIR + RenderTreeIR + StyleProfile (+ CitationResolution) -> LaTeX.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.generation.citations import CitationResolution, replace_citation_markers, strip_reference_label
@@ -19,6 +19,7 @@ from src.generation.latex_renderer import (
     escape_latex,
     render_algorithm_block,
     render_equation,
+    render_figure_block,
     render_inline_math,
     render_table_placeholder,
     render_text_with_inline_latex,
@@ -28,7 +29,7 @@ from src.generation.latex_renderer import (
 from src.ir import BBox, BlockType, DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode, StyleProfile, StyleSpan
 
 
-CITE_COMMAND_RE = re.compile(r"\\cite\{[^{}]+\}")
+CITE_COMMAND_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|ref|autoref|cref)\*?(?:\[[^\]]*\])?\{[^{}]+\}")
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
@@ -53,7 +54,9 @@ class IRLatexRenderConfig:
     include_maketitle: bool = True
     front_matter_mode: str = "maketitle"
     table_asset_output_dir: Path | None = None
+    figure_asset_output_dir: Path | None = None
     table_asset_latex_prefix: str = "assets"
+    figure_asset_latex_prefix: str = "assets"
     enable_fontspec: bool = False
     render_header_footer: bool = True
     preserve_span_font_family: bool = True
@@ -70,6 +73,8 @@ class OriginalLikeIRLatexRenderer:
     def __init__(self, config: IRLatexRenderConfig | None = None) -> None:
         self.config = config or IRLatexRenderConfig()
         self._active_style: StyleProfile | None = None
+        self._mixed_column_stack = 0
+        self._active_notes: _NoteContext | None = None
 
     def render(
         self,
@@ -79,11 +84,14 @@ class OriginalLikeIRLatexRenderer:
         citations: CitationResolution | None = None,
     ) -> str:
         previous_style = self._active_style
+        previous_notes = self._active_notes
         self._active_style = style
+        self._active_notes = _NoteContext.from_document(document)
         try:
             return self._render_with_active_style(document, tree, style, citations)
         finally:
             self._active_style = previous_style
+            self._active_notes = previous_notes
 
     def _render_with_active_style(
         self,
@@ -96,7 +104,7 @@ class OriginalLikeIRLatexRenderer:
         render_nodes = {node.render_id: node for node in tree.nodes}
         root = render_nodes[tree.root_id]
 
-        lines = self._render_preamble(style)
+        lines = self._render_preamble(style, citations)
         title = self.config.title or self._infer_title(document)
         use_maketitle = self._use_maketitle()
         if title and use_maketitle:
@@ -112,13 +120,21 @@ class OriginalLikeIRLatexRenderer:
         if rendered_body:
             lines.append(rendered_body)
             lines.append("")
+        orphan_notes = self._render_unanchored_notes()
+        if orphan_notes:
+            lines.append(orphan_notes)
+            lines.append("")
         lines.append(r"\end{document}")
         return "\n".join(lines).rstrip() + "\n"
 
-    def _render_preamble(self, style: StyleProfile) -> list[str]:
+    def _render_preamble(self, style: StyleProfile, citations: CitationResolution | None = None) -> list[str]:
         options = f"[{','.join(style.documentclass_options)}]" if style.documentclass_options else ""
         lines = [rf"\documentclass{options}{{{style.documentclass}}}"]
         packages = [*style.packages, *REQUIRED_RENDER_PACKAGES]
+        if citations is not None and citations.citation_style == "numeric":
+            packages.insert(0, "cite")
+        if _style_column_mode(style) == "mixed":
+            packages.append("multicol")
         if self.config.enable_fontspec:
             packages.append("fontspec")
         if self.config.render_header_footer and _header_footer_profile_enabled(style):
@@ -227,6 +243,14 @@ class OriginalLikeIRLatexRenderer:
             return render_algorithm_block(text)
         if role in {RenderRole.CODE}:
             return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}" if text else ""
+        if role in {RenderRole.FOOTNOTE}:
+            if self._active_notes is not None and source_nodes:
+                return ""
+            return self._render_standalone_note("footnote", text)
+        if role in {RenderRole.MARGIN_NOTE}:
+            if self._active_notes is not None and source_nodes:
+                return ""
+            return self._render_standalone_note("margin_note", text)
         if role in {RenderRole.CAPTION}:
             return render_text_with_citations(text)
         if role in {RenderRole.TOC_PLACEHOLDER}:
@@ -255,8 +279,33 @@ class OriginalLikeIRLatexRenderer:
         *,
         depth: int,
     ) -> str:
-        parts: list[str] = []
         child_ids = _sorted_child_ids(node.children, render_nodes, document_nodes)
+        if self._should_render_mixed_columns(child_ids, render_nodes, document_nodes):
+            return self._render_children_with_mixed_columns(
+                child_ids,
+                render_nodes,
+                document_nodes,
+                citations,
+                depth=depth,
+            )
+        return self._render_children_standard(
+            child_ids,
+            render_nodes,
+            document_nodes,
+            citations,
+            depth=depth,
+        )
+
+    def _render_children_standard(
+        self,
+        child_ids: list[str],
+        render_nodes: dict[str, RenderTreeNode],
+        document_nodes: dict[str, DocumentNode],
+        citations: CitationResolution | None,
+        *,
+        depth: int,
+    ) -> str:
+        parts: list[str] = []
         index = 0
         while index < len(child_ids):
             child = render_nodes[child_ids[index]]
@@ -293,6 +342,74 @@ class OriginalLikeIRLatexRenderer:
             parts.append(self._render_tree_node(child, render_nodes, document_nodes, citations, depth=depth))
             index += 1
         return "\n\n".join(part for part in parts if part)
+
+    def _render_children_with_mixed_columns(
+        self,
+        child_ids: list[str],
+        render_nodes: dict[str, RenderTreeNode],
+        document_nodes: dict[str, DocumentNode],
+        citations: CitationResolution | None,
+        *,
+        depth: int,
+    ) -> str:
+        parts: list[str] = []
+        index = 0
+        while index < len(child_ids):
+            child = render_nodes[child_ids[index]]
+            band = _render_node_layout_band(child, document_nodes)
+            if band.mode != "double":
+                rendered = self._render_children_standard(
+                    [child_ids[index]],
+                    render_nodes,
+                    document_nodes,
+                    citations,
+                    depth=depth,
+                )
+                if rendered:
+                    parts.append(rendered)
+                index += 1
+                continue
+
+            run = [child_ids[index]]
+            index += 1
+            while index < len(child_ids):
+                candidate = render_nodes[child_ids[index]]
+                candidate_band = _render_node_layout_band(candidate, document_nodes)
+                if candidate_band.mode != "double":
+                    break
+                if band.band_id is not None and candidate_band.band_id is not None and candidate_band.band_id != band.band_id:
+                    break
+                run.append(child_ids[index])
+                index += 1
+
+            self._mixed_column_stack += 1
+            try:
+                body = self._render_children_standard(
+                    run,
+                    render_nodes,
+                    document_nodes,
+                    citations,
+                    depth=depth,
+                )
+            finally:
+                self._mixed_column_stack -= 1
+            if body:
+                parts.append("\\begin{multicols}{2}\n" + body + "\n\\end{multicols}")
+        return "\n\n".join(part for part in parts if part)
+
+    def _should_render_mixed_columns(
+        self,
+        child_ids: list[str],
+        render_nodes: dict[str, RenderTreeNode],
+        document_nodes: dict[str, DocumentNode],
+    ) -> bool:
+        if self._mixed_column_stack > 0 or _style_column_mode(self._active_style) != "mixed":
+            return False
+        return any(
+            _render_node_layout_band(render_nodes[child_id], document_nodes).mode == "double"
+            for child_id in child_ids
+            if child_id in render_nodes
+        )
 
     def _render_list(
         self,
@@ -394,10 +511,27 @@ class OriginalLikeIRLatexRenderer:
         strip_leading_list_marker: bool = False,
     ) -> str:
         rendered = [
-            self._render_document_node(node, citations, strip_leading_list_marker=strip_leading_list_marker and index == 0)
+            self._render_document_node_with_notes(
+                node,
+                citations,
+                strip_leading_list_marker=strip_leading_list_marker and index == 0,
+            )
             for index, node in enumerate(nodes)
         ]
         return " ".join(part for part in rendered if part).strip()
+
+    def _render_document_node_with_notes(
+        self,
+        node: DocumentNode,
+        citations: CitationResolution | None,
+        *,
+        strip_leading_list_marker: bool = False,
+    ) -> str:
+        rendered = self._render_document_node(node, citations, strip_leading_list_marker=strip_leading_list_marker)
+        note_commands = self._render_notes_for_source_node(node.node_id)
+        if note_commands:
+            return rendered + note_commands if rendered else note_commands
+        return rendered
 
     def _render_document_node(
         self,
@@ -409,6 +543,8 @@ class OriginalLikeIRLatexRenderer:
         text = citations.text_by_node_id.get(node.node_id, node.text) if citations else node.text
         if strip_leading_list_marker:
             text = strip_list_marker(text)
+        if node.node_type in {BlockType.FOOTNOTE, BlockType.MARGIN_NOTE}:
+            return ""
         if node.node_type == BlockType.EQUATION:
             return render_equation(text)
         if node.node_type == BlockType.INLINE_MATH:
@@ -426,6 +562,35 @@ class OriginalLikeIRLatexRenderer:
         if citations and node.node_id in citations.text_by_node_id:
             return render_text_with_citations(text)
         return render_text_with_inline_latex(text)
+
+    def _render_notes_for_source_node(self, node_id: str) -> str:
+        if self._active_notes is None:
+            return ""
+        return "".join(self._render_note(note) for note in self._active_notes.consume_for_anchor(node_id))
+
+    def _render_unanchored_notes(self) -> str:
+        if self._active_notes is None:
+            return ""
+        rendered = [self._render_note(note, anchored=False) for note in self._active_notes.consume_unanchored()]
+        return "\n".join(part for part in rendered if part)
+
+    def _render_note(self, note: "_ResolvedNote", *, anchored: bool = True) -> str:
+        body = render_text_with_inline_latex(note.text)
+        if not body:
+            return ""
+        if note.kind == "margin_note":
+            return rf"\marginpar{{\footnotesize {body}}}"
+        if anchored:
+            return rf"\footnote{{{body}}}"
+        return rf"\footnotetext{{{body}}}"
+
+    def _render_standalone_note(self, kind: str, text: str) -> str:
+        body = render_text_with_inline_latex(_strip_note_marker(text)[0])
+        if not body:
+            return ""
+        if kind == "margin_note":
+            return rf"\marginpar{{\footnotesize {body}}}"
+        return rf"\footnote{{{body}}}"
 
     def _render_spans(
         self,
@@ -533,20 +698,21 @@ class OriginalLikeIRLatexRenderer:
 
     def _render_figure(self, source_nodes: list[DocumentNode], text: str) -> str:
         caption = text or "Figure"
+        primary = _primary_visual_node(source_nodes, BlockType.FIGURE)
         if source_nodes:
             for node in source_nodes:
                 value = node.metadata.get("figure_caption") or node.metadata.get("caption")
                 if isinstance(value, str) and value.strip():
                     caption = value.strip()
                     break
-        return "\n".join(
-            [
-                r"\begin{figure}[H]",
-                r"\centering",
-                "% [TODO_FIGURE_RECONSTRUCT]",
-                rf"\caption{{{render_text_with_citations(caption)}}}",
-                r"\end{figure}",
-            ]
+        record = document_node_record(primary) if primary is not None else {"type": "figure", "text": caption}
+        return render_figure_block(
+            record,
+            caption,
+            source_pdf=_source_pdf_for_node(primary) if primary is not None else None,
+            asset_output_dir=self.config.figure_asset_output_dir or self.config.table_asset_output_dir,
+            asset_latex_prefix=self.config.figure_asset_latex_prefix,
+            rendered_caption=render_text_with_citations(caption),
         )
 
     def _render_bibliography(
@@ -560,7 +726,8 @@ class OriginalLikeIRLatexRenderer:
         if citations and citations.entries:
             lines = [r"\begin{thebibliography}{99}"]
             for entry in citations.entries:
-                lines.append(rf"\bibitem{{{entry.key}}} {render_text_with_inline_latex(entry.text)}")
+                optional = f"[{render_text_with_inline_latex(entry.display_label)}]" if entry.display_label else ""
+                lines.append(rf"\bibitem{optional}{{{entry.key}}} {render_text_with_inline_latex(entry.text)}")
             lines.append(r"\end{thebibliography}")
             return "\n".join(lines)
         if source_nodes:
@@ -615,10 +782,136 @@ def document_node_record(node: DocumentNode) -> dict[str, object]:
     record.setdefault("id", node.node_id)
     record.setdefault("type", node.node_type.value)
     record.setdefault("page_idx", node.page_idx)
+    for key in ("page_width", "page_height"):
+        if key in node.features:
+            record.setdefault(key, node.features[key])
     if node.bboxes:
         record.setdefault("bbox", node.bboxes[0].to_list())
     record.setdefault("text", node.text)
     return record
+
+
+@dataclass(frozen=True)
+class _ResolvedNote:
+    node: DocumentNode
+    kind: str
+    text: str
+    marker: str | None
+
+
+@dataclass
+class _NoteContext:
+    by_anchor: dict[str, list[_ResolvedNote]]
+    unanchored: list[_ResolvedNote]
+    consumed_node_ids: set[str] = field(default_factory=set)
+
+    @classmethod
+    def from_document(cls, document: DocumentIR) -> "_NoteContext":
+        body_nodes = [
+            node
+            for node in sorted(document.nodes, key=lambda item: item.reading_index)
+            if node.node_type
+            not in {
+                BlockType.FOOTNOTE,
+                BlockType.MARGIN_NOTE,
+                BlockType.HEADER_FOOTER,
+                BlockType.TOC,
+                BlockType.OTHER,
+            }
+        ]
+        by_anchor: dict[str, list[_ResolvedNote]] = {}
+        unanchored: list[_ResolvedNote] = []
+        for note_node in sorted(document.nodes, key=lambda item: item.reading_index):
+            if note_node.node_type not in {BlockType.FOOTNOTE, BlockType.MARGIN_NOTE}:
+                continue
+            text, marker = _strip_note_marker(note_node.text, note_node.metadata)
+            if not text:
+                continue
+            kind = "margin_note" if note_node.node_type == BlockType.MARGIN_NOTE else "footnote"
+            note = _ResolvedNote(node=note_node, kind=kind, text=text, marker=marker)
+            anchor_id = _explicit_note_anchor(note_node) or _nearest_note_anchor(note_node, body_nodes)
+            if anchor_id:
+                by_anchor.setdefault(anchor_id, []).append(note)
+            else:
+                unanchored.append(note)
+        return cls(by_anchor=by_anchor, unanchored=unanchored)
+
+    def consume_for_anchor(self, node_id: str) -> list[_ResolvedNote]:
+        notes = [
+            note
+            for note in self.by_anchor.get(node_id, [])
+            if note.node.node_id not in self.consumed_node_ids
+        ]
+        for note in notes:
+            self.consumed_node_ids.add(note.node.node_id)
+        return notes
+
+    def consume_unanchored(self) -> list[_ResolvedNote]:
+        notes = [
+            note
+            for note in self.unanchored
+            if note.node.node_id not in self.consumed_node_ids
+        ]
+        for anchored_notes in self.by_anchor.values():
+            notes.extend(
+                note
+                for note in anchored_notes
+                if note.node.node_id not in self.consumed_node_ids
+            )
+        for note in notes:
+            self.consumed_node_ids.add(note.node.node_id)
+        return notes
+
+
+NOTE_MARKER_RE = re.compile(
+    r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
+)
+
+
+def _strip_note_marker(text: str, metadata: dict[str, object] | None = None) -> tuple[str, str | None]:
+    metadata = metadata or {}
+    marker_value = metadata.get("footnote_marker") or metadata.get("footnote_label")
+    marker = str(marker_value).strip() if marker_value is not None and str(marker_value).strip() else None
+    value = str(text or "").strip()
+    match = NOTE_MARKER_RE.match(value)
+    if match:
+        marker = marker or next((group for group in match.groups() if group), None)
+        value = value[match.end() :].strip()
+    return value, marker
+
+
+def _explicit_note_anchor(note_node: DocumentNode) -> str | None:
+    value = note_node.metadata.get("footnote_anchor") or note_node.metadata.get("anchor_node_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _nearest_note_anchor(note_node: DocumentNode, body_nodes: list[DocumentNode]) -> str | None:
+    previous_same_page = [
+        candidate
+        for candidate in body_nodes
+        if candidate.page_idx == note_node.page_idx and candidate.reading_index < note_node.reading_index
+    ]
+    if previous_same_page:
+        return max(previous_same_page, key=lambda item: item.reading_index).node_id
+    previous_any_page = [candidate for candidate in body_nodes if candidate.reading_index < note_node.reading_index]
+    if previous_any_page:
+        return max(previous_any_page, key=lambda item: item.reading_index).node_id
+    same_page = [candidate for candidate in body_nodes if candidate.page_idx == note_node.page_idx]
+    if same_page:
+        return min(same_page, key=lambda item: _bbox_vertical_distance(note_node, item)).node_id
+    return None
+
+
+def _bbox_vertical_distance(left: DocumentNode, right: DocumentNode) -> float:
+    if not left.bboxes or not right.bboxes:
+        return abs(left.reading_index - right.reading_index)
+    left_box = left.bboxes[0]
+    right_box = right.bboxes[0]
+    left_center = (left_box.y0 + left_box.y1) / 2.0
+    right_center = (right_box.y0 + right_box.y1) / 2.0
+    return abs(left_center - right_center)
 
 
 def _list_environment_for_text(text: str) -> str | None:
@@ -717,6 +1010,111 @@ def _primary_table_node(nodes: list[DocumentNode]) -> DocumentNode:
         if node.metadata.get("table_group_primary") is True:
             return node
     return min(nodes, key=lambda node: node.reading_index)
+
+
+@dataclass(frozen=True)
+class _LayoutBand:
+    mode: str
+    band_id: int | None = None
+
+
+def _style_column_mode(style: StyleProfile | None) -> str | None:
+    if style is None:
+        return None
+    options = style.renderer_options or {}
+    value = options.get("column_mode") or style.page_layout.get("column_mode")
+    return str(value).casefold() if value is not None else None
+
+
+def _render_node_layout_band(
+    node: RenderTreeNode,
+    document_nodes: dict[str, DocumentNode],
+) -> _LayoutBand:
+    source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
+    if not source_nodes:
+        return _LayoutBand("full", None)
+    if node.role in {RenderRole.FIGURE, RenderRole.TABLE, RenderRole.FOOTNOTE, RenderRole.MARGIN_NOTE, RenderRole.REFERENCES, RenderRole.TOC_PLACEHOLDER}:
+        return _LayoutBand("full", _first_layout_band_id(source_nodes))
+    if any(
+        source.node_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE, BlockType.HEADER_FOOTER, BlockType.TOC}
+        for source in source_nodes
+    ):
+        return _LayoutBand("full", _first_layout_band_id(source_nodes))
+    band_types = {_layout_band_type(source) for source in source_nodes}
+    if "double_column" in band_types and "full_span" not in band_types:
+        return _LayoutBand("double", _first_layout_band_id(source_nodes))
+    if not any(band_types):
+        inferred = _infer_layout_band_mode(source_nodes)
+        if inferred is not None:
+            return _LayoutBand(inferred, _first_layout_band_id(source_nodes))
+    return _LayoutBand("full", _first_layout_band_id(source_nodes))
+
+
+def _layout_band_type(node: DocumentNode) -> str:
+    value = node.metadata.get("layout_band_type")
+    if not value:
+        value = node.features.get("layout_band_type")
+    return str(value or "").casefold()
+
+
+def _first_layout_band_id(nodes: list[DocumentNode]) -> int | None:
+    for node in nodes:
+        for container in (node.features, node.metadata):
+            for key in ("layout_band_global_id", "layout_band_id"):
+                value = _numeric_value(container.get(key))
+                if value is not None:
+                    return int(value)
+    return None
+
+
+def _infer_layout_band_mode(nodes: list[DocumentNode]) -> str | None:
+    """Infer full-span vs local double-column blocks when v7 band metadata is absent."""
+
+    boxes = [box for node in nodes for box in node.bboxes]
+    if not boxes:
+        return None
+    x0 = min(box.x0 for box in boxes)
+    x1 = max(box.x1 for box in boxes)
+    page_width = _page_width_for_nodes(nodes)
+    width = max(x1 - x0, 0.0)
+    center = page_width / 2.0
+    margin = 0.05 * page_width
+    crosses_center = x0 < center - margin and x1 > center + margin
+    if width >= 0.65 * page_width or crosses_center:
+        return "full"
+    if any(node.node_type in {BlockType.TEXT, BlockType.LIST, BlockType.REFERENCE, BlockType.TITLE} for node in nodes):
+        return "double"
+    return None
+
+
+def _page_width_for_nodes(nodes: list[DocumentNode]) -> float:
+    for node in nodes:
+        for container in (node.features, node.metadata):
+            value = _numeric_value(container.get("page_width"))
+            if value and value > 0:
+                return value
+    boxes = [box for node in nodes for box in node.bboxes]
+    if boxes:
+        return max(max(box.x1 for box in boxes), 1000.0)
+    return 1000.0
+
+
+def _primary_visual_node(nodes: list[DocumentNode], node_type: BlockType) -> DocumentNode | None:
+    typed = [node for node in nodes if node.node_type == node_type]
+    if typed:
+        return min(typed, key=lambda node: node.reading_index)
+    return min(nodes, key=lambda node: node.reading_index) if nodes else None
+
+
+def _source_pdf_for_node(node: DocumentNode) -> str | None:
+    value = node.metadata.get("source_pdf")
+    if isinstance(value, str) and value:
+        return value
+    for ref in node.source_refs:
+        value = ref.metadata.get("pdf_path") if ref.metadata else None
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _render_package(package: str) -> str:

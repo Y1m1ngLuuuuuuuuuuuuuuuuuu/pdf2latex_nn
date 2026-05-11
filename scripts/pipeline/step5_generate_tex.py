@@ -38,7 +38,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--render-table-crops",
         action="store_true",
-        help="Generate table crop images from --source-pdf. Disabled by default to save disk.",
+        help="Generate visual crop images for tables and figures from --source-pdf. Disabled by default to save disk.",
     )
     return parser
 
@@ -79,7 +79,13 @@ def main() -> int:
                 if args.render_table_crops and args.source_pdf
                 else None
             ),
+            figure_asset_output_dir=(
+                str(args.asset_dir or (args.output_tex.parent / "assets"))
+                if args.render_table_crops and args.source_pdf
+                else None
+            ),
             table_asset_latex_prefix=args.asset_latex_prefix,
+            figure_asset_latex_prefix=args.asset_latex_prefix,
         )
     )
     root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)

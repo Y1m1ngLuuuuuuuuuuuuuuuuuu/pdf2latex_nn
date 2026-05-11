@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 from src.generation.citations import strip_reference_label
-from src.generation.table_assets import ensure_table_pdf_crop, table_caption_text
+from src.generation.table_assets import ensure_figure_asset, ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
 
@@ -18,6 +19,11 @@ DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref", "f
 SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
 DEFAULT_PREAMBLE_COMMANDS = [r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}"]
+LEGACY_RENDER_SURFACE_WARNING = (
+    "src.generation.latex_renderer.render_latex_document is a legacy tree renderer. "
+    "Use src.generation.render_surface.render_original_like_document with "
+    "DocumentIR + RenderTreeIR + StyleProfile for production generation."
+)
 INLINE_MATH_COMMANDS = {
     "alpha",
     "beta",
@@ -91,6 +97,9 @@ INLINE_MATH_COMMANDS = {
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
+NOTE_MARKER_RE = re.compile(
+    r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
+)
 PSEUDOCODE_START_RE = re.compile(
     r"^\s*(?:Algorithm\s*\d+\b|Input\s*:|Output\s*:|Require\s*:|Ensure\s*:)",
     re.IGNORECASE,
@@ -157,10 +166,13 @@ class RenderConfig:
     title: str | None = None
     source_pdf: str | None = None
     table_asset_output_dir: str | None = None
+    figure_asset_output_dir: str | None = None
     table_asset_latex_prefix: str = "assets"
+    figure_asset_latex_prefix: str = "assets"
 
 
 def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
+    warnings.warn(LEGACY_RENDER_SURFACE_WARNING, DeprecationWarning, stacklevel=2)
     cfg = config or RenderConfig()
     lines = [rf"\documentclass{{{cfg.document_class}}}"]
     for package in cfg.packages:
@@ -173,7 +185,7 @@ def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
     if cfg.title:
         lines.append(r"\maketitle")
         lines.append("")
-    for rendered in render_child_blocks_with_dynamic_lists(getattr(root, "children", []), depth=0):
+    for rendered in render_child_blocks_with_dynamic_lists(getattr(root, "children", []), depth=0, config=cfg):
         if rendered:
             lines.append(rendered)
             lines.append("")
@@ -181,7 +193,8 @@ def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_node(node: Any, *, depth: int = 0) -> str:
+def render_node(node: Any, *, depth: int = 0, config: RenderConfig | None = None) -> str:
+    cfg = config or RenderConfig()
     record = getattr(node, "record", node if isinstance(node, dict) else {})
     block_type = canonical_render_type(record)
     text = node_text(node)
@@ -195,43 +208,53 @@ def render_node(node: Any, *, depth: int = 0) -> str:
         return ""
     if block_type == "title" and is_front_matter_date_text(text):
         body = [render_textual_content(record, text)] if text else []
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
         return "\n\n".join(part for part in body if part)
     if block_type == "title":
         body = [render_title(text, depth=depth)] if text else []
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
         return "\n\n".join(part for part in body if part)
     if block_type == "equation":
         body = [render_equation(text)]
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
         return "\n\n".join(part for part in body if part)
     if block_type == "inline_math":
         body = [render_inline_math(text)]
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
         return "\n\n".join(part for part in body if part)
     if block_type == "table":
         return render_table_placeholder(
             record,
             text,
-            source_pdf=cfg_source_pdf(record),
-            asset_output_dir=None,
+            source_pdf=cfg.source_pdf or cfg_source_pdf(record),
+            asset_output_dir=cfg.table_asset_output_dir,
+            asset_latex_prefix=cfg.table_asset_latex_prefix,
         )
     if block_type == "figure":
-        caption = render_text_with_inline_latex(text) if text else "Figure"
-        return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
+        return render_figure_block(
+            record,
+            text,
+            source_pdf=cfg.source_pdf or cfg_source_pdf(record),
+            asset_output_dir=cfg.figure_asset_output_dir or cfg.table_asset_output_dir,
+            asset_latex_prefix=cfg.figure_asset_latex_prefix,
+        )
     if block_type == "reference":
         return render_references(record, text)
+    if block_type == "footnote":
+        return rf"\footnote{{{render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
+    if block_type == "margin_note":
+        return rf"\marginpar{{\footnotesize {render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
     if block_type == "list":
-        return render_list_node(node, depth=depth)
+        return render_list_node(node, depth=depth, config=cfg)
 
     paragraph = render_textual_content(record, text) if text else ""
-    rendered_children = render_child_blocks_with_dynamic_lists(children, depth=depth + 1)
+    rendered_children = render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg)
     parts = [paragraph] if paragraph else []
     parts.extend(part for part in rendered_children if part)
     return "\n\n".join(parts)
 
 
-def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list[str]:
+def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int, config: RenderConfig | None = None) -> list[str]:
     child_list = sorted_render_children(children)
     rendered: list[str] = []
     index = 0
@@ -250,17 +273,17 @@ def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list
             while index < len(child_list) and list_environment_for_node(child_list[index]) is not None:
                 run.append(child_list[index])
                 index += 1
-            append_nonredundant_rendered(rendered, render_dynamic_list_group(run, environment=list_environment, depth=depth))
+            append_nonredundant_rendered(rendered, render_dynamic_list_group(run, environment=list_environment, depth=depth, config=config))
             continue
-        block = render_child_block(child, depth=depth)
+        block = render_child_block(child, depth=depth, config=config)
         if block:
             append_nonredundant_rendered(rendered, block)
         index += 1
     return rendered
 
 
-def render_child_block(child: Any, *, depth: int) -> str:
-    rendered = render_node(child, depth=depth)
+def render_child_block(child: Any, *, depth: int, config: RenderConfig | None = None) -> str:
+    rendered = render_node(child, depth=depth, config=config)
     return rendered.strip()
 
 
@@ -295,11 +318,17 @@ def list_environment_for_text(text: str) -> str | None:
     return "enumerate" if ORDERED_LIST_MARKER_RE.match(value) else "itemize"
 
 
-def render_dynamic_list_group(items: list[Any], *, environment: str, depth: int) -> str:
+def render_dynamic_list_group(
+    items: list[Any],
+    *,
+    environment: str,
+    depth: int,
+    config: RenderConfig | None = None,
+) -> str:
     lines = [rf"\begin{{{environment}}}"]
     for item in items:
         item_body = render_textual_node_without_list_marker(item) if node_text(item) else ""
-        nested = render_child_blocks_with_dynamic_lists(getattr(item, "children", []), depth=depth + 1)
+        nested = render_child_blocks_with_dynamic_lists(getattr(item, "children", []), depth=depth + 1, config=config)
         if nested:
             item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
         lines.append(rf"\item {item_body}".rstrip())
@@ -307,15 +336,15 @@ def render_dynamic_list_group(items: list[Any], *, environment: str, depth: int)
     return "\n".join(lines)
 
 
-def render_dynamic_itemize(items: list[Any], *, depth: int) -> str:
-    return render_dynamic_list_group(items, environment="itemize", depth=depth)
+def render_dynamic_itemize(items: list[Any], *, depth: int, config: RenderConfig | None = None) -> str:
+    return render_dynamic_list_group(items, environment="itemize", depth=depth, config=config)
 
 
 def strip_list_marker(text: str) -> str:
     return LIST_MARKER_RE.sub("", str(text or ""), count=1).strip()
 
 
-def render_list_node(node: Any, *, depth: int) -> str:
+def render_list_node(node: Any, *, depth: int, config: RenderConfig | None = None) -> str:
     record = getattr(node, "record", node if isinstance(node, dict) else {})
     children = sorted_render_children(getattr(node, "children", record.get("children", [])))
     environment = list_environment_for_record(record, fallback_text=node_text(node))
@@ -328,13 +357,13 @@ def render_list_node(node: Any, *, depth: int) -> str:
         environment = first_child_environment
     lines = [rf"\begin{{{environment}}}"]
     for child in children:
-        item_body = render_list_item(child, depth=depth + 1)
+        item_body = render_list_item(child, depth=depth + 1, config=config)
         lines.append(rf"\item {item_body}".rstrip())
     lines.append(rf"\end{{{environment}}}")
     return "\n".join(lines)
 
 
-def render_list_item(node: Any, *, depth: int) -> str:
+def render_list_item(node: Any, *, depth: int, config: RenderConfig | None = None) -> str:
     record = getattr(node, "record", node if isinstance(node, dict) else {})
     block_type = canonical_render_type(record)
     text = node_text(node)
@@ -346,7 +375,7 @@ def render_list_item(node: Any, *, depth: int) -> str:
         item_body = render_inline_math(text)
     else:
         item_body = render_textual_node_without_list_marker(node) if text else ""
-    nested = [render_node(grandchild, depth=depth + 1) for grandchild in sorted_render_children(getattr(node, "children", []))]
+    nested = [render_node(grandchild, depth=depth + 1, config=config) for grandchild in sorted_render_children(getattr(node, "children", []))]
     if nested:
         item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
     return item_body
@@ -580,6 +609,71 @@ def render_table_placeholder(
     )
 
 
+def figure_placeholder(record: dict[str, Any]) -> str:
+    figure_id = figure_node_identifier(record)
+    bbox = format_table_bbox(record.get("figure_group_bbox") or record.get("image_group_bbox") or record.get("bbox"))
+    return f"% [TODO_FIGURE_RECONSTRUCT: BBOX={bbox}, ID={figure_id}]"
+
+
+def render_figure_block(
+    record: dict[str, Any],
+    text: str = "",
+    *,
+    source_pdf: str | Path | None = None,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+    rendered_caption: str | None = None,
+) -> str:
+    caption = rendered_caption
+    if caption is None:
+        caption_text = str(record.get("figure_caption") or record.get("caption") or text or "Figure")
+        caption = render_text_with_inline_latex(caption_text)
+    asset_path = ensure_figure_asset(
+        record,
+        source_pdf=source_pdf or cfg_source_pdf(record),
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+    )
+    graphic_line = (
+        rf"\includegraphics[width={figure_include_width(record)}\linewidth]{{{asset_path}}}"
+        if asset_path
+        else figure_placeholder(record)
+    )
+    return "\n".join(
+        [
+            r"\begin{figure}[H]",
+            r"\centering",
+            graphic_line,
+            rf"\caption{{{caption}}}",
+            r"\end{figure}",
+        ]
+    )
+
+
+def figure_include_width(record: dict[str, Any]) -> str:
+    bbox = record.get("figure_group_bbox") or record.get("image_group_bbox") or record.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) < 4:
+        return "0.95"
+    try:
+        width = float(bbox[2]) - float(bbox[0])
+    except (TypeError, ValueError):
+        return "0.95"
+    page_width = _number_or_none(record.get("page_width")) or 1000.0
+    ratio = max(min(width / max(page_width, 1.0), 0.98), 0.25)
+    return f"{ratio:.3f}"
+
+
+def figure_node_identifier(record: dict[str, Any]) -> str:
+    for key in ("figure_group_id", "image_group_id", "id", "block_id", "figure_id", "image_id"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    value = record.get("global_order")
+    if value is not None:
+        return f"figure_{value}"
+    return "figure_unknown"
+
+
 def cfg_source_pdf(record: dict[str, Any]) -> str | None:
     for key in ("source_pdf", "pdf_path", "style_source_pdf"):
         value = record.get(key)
@@ -618,6 +712,19 @@ def format_table_bbox(value: Any) -> str:
 
 def format_bbox_number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def extract_table_caption(text: str) -> str | None:
@@ -662,6 +769,15 @@ def render_toc() -> str:
     return r"\tableofcontents"
 
 
+def strip_note_marker(text: str) -> tuple[str, str | None]:
+    value = str(text or "").strip()
+    match = NOTE_MARKER_RE.match(value)
+    if not match:
+        return value, None
+    marker = next((group for group in match.groups() if group), None)
+    return value[match.end() :].strip(), marker
+
+
 def normalize_structural_heading_text(text: str) -> str:
     lowered = str(text or "").casefold().strip()
     without_punctuation = "".join(
@@ -689,10 +805,18 @@ def render_equation(text: str) -> str:
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
     if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
         return stripped
+    body, tag = split_trailing_equation_number(stripped)
+    if tag is not None:
+        return "\\begin{equation}\n" + body + rf" \tag{{{tag}}}" + "\n\\end{equation}"
+    if TAG_RE.search(stripped):
+        return "\\begin{equation}\n" + stripped + "\n\\end{equation}"
+    if should_render_as_align(stripped):
+        return "\\begin{align}\n" + stripped + "\n\\end{align}"
     return "\\[\n" + stripped + "\n\\]"
 
 
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
+TRAILING_EQUATION_NUMBER_RE = re.compile(r"^(?P<body>.+?)\s*(?:\((?P<tag>[A-Za-z]?\d+(?:\.\d+)*)\))\s*$", re.DOTALL)
 
 
 def render_multi_tag_equation(text: str) -> str | None:
@@ -731,6 +855,28 @@ def render_multi_tag_equation(text: str) -> str | None:
     return "\\begin{align}\n" + "\\\\\n".join(rendered_rows) + "\n\\end{align}"
 
 
+def split_trailing_equation_number(text: str) -> tuple[str, str | None]:
+    stripped = text.strip()
+    if TAG_RE.search(stripped):
+        return stripped, None
+    match = TRAILING_EQUATION_NUMBER_RE.match(stripped)
+    if not match:
+        return stripped, None
+    body = match.group("body").strip()
+    tag = match.group("tag").strip()
+    if not body or not tag:
+        return stripped, None
+    return body, tag
+
+
+def should_render_as_align(text: str) -> bool:
+    stripped = text.strip()
+    if "\\\\" in stripped and ("&" in stripped or "\n" in stripped):
+        return True
+    rows = [row.strip() for row in stripped.splitlines() if row.strip()]
+    return len(rows) > 1 and any("&" in row for row in rows)
+
+
 def render_inline_math(text: str) -> str:
     stripped = str(text or "").strip()
     if not stripped:
@@ -745,7 +891,12 @@ def render_inline_math(text: str) -> str:
 
 
 def normalize_inline_math_unicode(text: str) -> str:
-    return "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    return normalize_duplicate_math_command_slashes(normalized)
+
+
+def normalize_duplicate_math_command_slashes(text: str) -> str:
+    return re.sub(r"\\\\([A-Za-z]+)", r"\\\1", str(text or ""))
 
 
 def is_plausible_inline_math_payload(text: str) -> bool:
@@ -1054,6 +1205,10 @@ def canonical_render_type(record: dict[str, Any]) -> str:
         return "list"
     if raw in {"code"}:
         return "code"
+    if raw in {"page_footnote", "footnote", "foot_note"}:
+        return "footnote"
+    if raw in {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"}:
+        return "margin_note"
     if raw in {"reference", "references", "bibliography"}:
         return "reference"
     return "text"
@@ -1075,7 +1230,10 @@ def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
             rendered.append(escape_latex(value[cursor:start]))
         raw_math = value[start:end].strip()
         if raw_math:
+            raw_math, trailing_punctuation = split_trailing_inline_math_punctuation(raw_math)
             rendered.append(render_inline_math(raw_math))
+            if trailing_punctuation:
+                rendered.append(escape_latex(trailing_punctuation))
         cursor = end
     output = re.sub(r"\n{3,}", "\n\n", "".join(rendered))
     return output.strip() if strip else output
@@ -1104,6 +1262,17 @@ def find_next_inline_latex_span(text: str, start_index: int) -> tuple[int, int] 
     return min(candidates, key=lambda item: item[0])
 
 
+def split_trailing_inline_math_punctuation(text: str) -> tuple[str, str]:
+    value = str(text or "").strip()
+    if len(value) < 2 or value.startswith("$") or value.startswith(r"\("):
+        return value, ""
+    if value[-1] not in ".,;:":
+        return value, ""
+    if len(value) >= 2 and value[-2].isdigit() and value[-1] == ".":
+        return value, ""
+    return value[:-1].rstrip(), value[-1]
+
+
 def find_unescaped(text: str, needle: str, start_index: int) -> int | None:
     index = text.find(needle, start_index)
     while index >= 0:
@@ -1122,7 +1291,10 @@ def find_next_math_command(text: str, start_index: int) -> tuple[int, str] | Non
     for match in MATH_COMMAND_RE.finditer(text, start_index):
         command_name = match.group(1)
         if command_name in INLINE_MATH_COMMANDS:
-            return match.start(), command_name
+            command_start = match.start()
+            if command_start > start_index and text[command_start - 1] == "\\":
+                command_start -= 1
+            return command_start, command_name
     return None
 
 
@@ -1133,6 +1305,12 @@ def consume_bare_latex_math(text: str, start_index: int) -> int:
     while index < len(text):
         char = text[index]
         if char == "\\":
+            if index + 2 < len(text) and text[index + 1] == "\\" and text[index + 2].isalpha():
+                command = MATH_COMMAND_RE.match(text, index + 1)
+                if command:
+                    saw_command = True
+                    index = command.end()
+                    continue
             command = MATH_COMMAND_RE.match(text, index)
             if command:
                 saw_command = True

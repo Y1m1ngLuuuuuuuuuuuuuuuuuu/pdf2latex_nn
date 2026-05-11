@@ -94,7 +94,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--render-table-crops",
         action="store_true",
-        help="Generate table crop images in generated assets/ directories. Disabled by default to save disk.",
+        help="Generate table and figure crop images in generated assets/ directories. Disabled by default to save disk.",
     )
     return parser
 

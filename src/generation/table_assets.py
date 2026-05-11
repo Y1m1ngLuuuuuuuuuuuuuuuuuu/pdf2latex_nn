@@ -1,4 +1,4 @@
-"""Table fragment grouping and PDF crop helpers.
+"""Table/figure fragment grouping and PDF crop helpers.
 
 MinerU may split one visually wide table into several adjacent ``table`` blocks.
 For original-like reconstruction we treat those fragments as one table group and
@@ -9,6 +9,7 @@ conversion.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -96,17 +97,127 @@ def ensure_table_pdf_crop(
 ) -> str | None:
     """Crop the table union bbox from the source PDF and return a LaTeX path."""
 
+    return ensure_pdf_region_crop(
+        record,
+        source_pdf=source_pdf,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+        padding=padding,
+        kind=None,
+        bbox_keys=("table_group_bbox", "bbox"),
+        id_keys=("table_group_id", "node_id", "id", "block_id", "table_id", "global_order", "original_index", "mineru_block_idx"),
+    )
+
+
+def ensure_figure_pdf_crop(
+    record: dict[str, Any],
+    *,
+    source_pdf: str | Path | None,
+    asset_output_dir: str | Path | None,
+    asset_latex_prefix: str = "assets",
+    padding: float = 3.0,
+) -> str | None:
+    """Crop a figure/image bbox from the source PDF and return a LaTeX path."""
+
+    return ensure_pdf_region_crop(
+        record,
+        source_pdf=source_pdf,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+        padding=padding,
+        kind="figure",
+        bbox_keys=("figure_group_bbox", "image_group_bbox", "bbox"),
+        id_keys=("figure_group_id", "image_group_id", "node_id", "id", "block_id", "figure_id", "image_id", "global_order", "original_index", "mineru_block_idx"),
+    )
+
+
+def ensure_figure_asset(
+    record: dict[str, Any],
+    *,
+    source_pdf: str | Path | None = None,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+    padding: float = 3.0,
+) -> str | None:
+    """Return a usable LaTeX image path for a figure.
+
+    Prefer MinerU-provided image assets when present.  If no image asset can be
+    resolved, fall back to cropping the figure bbox from the source PDF.  Only
+    return ``None`` when neither source is available.
+    """
+
+    existing = ensure_existing_figure_asset(
+        record,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+    )
+    if existing:
+        return existing
+    return ensure_figure_pdf_crop(
+        record,
+        source_pdf=source_pdf,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+        padding=padding,
+    )
+
+
+def ensure_existing_figure_asset(
+    record: dict[str, Any],
+    *,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+) -> str | None:
+    """Resolve and optionally copy an already-extracted MinerU figure asset."""
+
+    asset_path = first_existing_asset_path(record, FIGURE_ASSET_KEYS)
+    if asset_path is None:
+        return None
+    if asset_output_dir:
+        output_dir = Path(asset_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ext = asset_path.suffix or ".png"
+        figure_id = safe_asset_stem(str(record_identifier(record, fallback=0, keys=FIGURE_ID_KEYS)))
+        output_path = output_dir / f"figure_{figure_id}{ext}"
+        if not output_path.exists():
+            try:
+                shutil.copy2(asset_path, output_path)
+            except OSError:
+                return None
+        return latex_asset_path(output_path, asset_output_dir=output_dir, asset_latex_prefix=asset_latex_prefix)
+    return latex_safe_path(asset_path)
+
+
+def ensure_pdf_region_crop(
+    record: dict[str, Any],
+    *,
+    source_pdf: str | Path | None,
+    asset_output_dir: str | Path | None,
+    asset_latex_prefix: str = "assets",
+    padding: float = 3.0,
+    kind: str | None = "region",
+    bbox_keys: tuple[str, ...] = ("bbox",),
+    id_keys: tuple[str, ...] = ("node_id", "id", "block_id", "global_order", "original_index", "mineru_block_idx"),
+) -> str | None:
+    """Crop an arbitrary PDF bbox and return a LaTeX-safe relative asset path.
+
+    The input bbox is expected to live in the same normalized coordinate system
+    used by v7 content JSON.  Page dimensions are read from the record when
+    present and fall back to the normalized 1000 x 1000 contract.
+    """
+
     if not source_pdf or not asset_output_dir:
         return None
     pdf_path = Path(source_pdf)
     output_dir = Path(asset_output_dir)
-    bbox = record_bbox({"bbox": record.get("table_group_bbox") or record.get("bbox")})
+    bbox = first_record_bbox(record, bbox_keys)
     if bbox is None or not pdf_path.exists():
         return None
     page_idx = int_value(record.get("page_idx"), 0)
-    table_id = safe_asset_stem(str(record.get("table_group_id") or record_identifier(record, fallback=page_idx)))
+    region_id = safe_asset_stem(str(record_identifier(record, fallback=page_idx, keys=id_keys)))
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{table_id}.png"
+    output_stem = f"{safe_asset_stem(kind)}_{region_id}" if kind else region_id
+    output_path = output_dir / f"{output_stem}.png"
     if not output_path.exists():
         try:
             import fitz  # type: ignore
@@ -133,10 +244,84 @@ def ensure_table_pdf_crop(
     return latex_asset_path(output_path, asset_output_dir=output_dir, asset_latex_prefix=asset_latex_prefix)
 
 
+FIGURE_ASSET_KEYS = (
+    "figure_asset_path",
+    "image_asset_path",
+    "img_path",
+    "image_path",
+    "figure_path",
+    "asset_path",
+)
+FIGURE_ID_KEYS = (
+    "figure_group_id",
+    "image_group_id",
+    "node_id",
+    "id",
+    "block_id",
+    "figure_id",
+    "image_id",
+    "global_order",
+    "original_index",
+    "mineru_block_idx",
+)
+
+
+def first_existing_asset_path(record: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
+    candidates: list[Path] = []
+    base_dirs = record_base_dirs(record)
+    for key in keys:
+        value = record.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        raw_path = Path(value.strip()).expanduser()
+        candidates.append(raw_path)
+        if not raw_path.is_absolute():
+            candidates.extend(base_dir / raw_path for base_dir in base_dirs)
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def record_base_dirs(record: dict[str, Any]) -> list[Path]:
+    bases: list[Path] = []
+    for key in ("source_json_dir", "json_dir", "asset_base_dir", "mineru_output_dir"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            bases.append(Path(value.strip()).expanduser())
+    for key in ("source_json", "content_json", "json_path", "source_path"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            bases.append(Path(value.strip()).expanduser().parent)
+    source_refs = record.get("source_refs")
+    if isinstance(source_refs, list):
+        for ref in source_refs:
+            if not isinstance(ref, dict):
+                continue
+            value = ref.get("path")
+            if isinstance(value, str) and value.strip():
+                bases.append(Path(value.strip()).expanduser().parent)
+    result: list[Path] = []
+    seen: set[str] = set()
+    for base in bases:
+        key = str(base)
+        if key not in seen:
+            seen.add(key)
+            result.append(base)
+    return result
+
+
 def latex_asset_path(output_path: Path, *, asset_output_dir: Path, asset_latex_prefix: str) -> str:
     name = output_path.name
     prefix = str(asset_latex_prefix or "").strip().strip("/")
     return f"{prefix}/{name}" if prefix else name
+
+
+def latex_safe_path(path: Path) -> str:
+    return path.as_posix()
 
 
 def canonical_record_type(record: dict[str, Any]) -> str:
@@ -162,6 +347,16 @@ def record_bbox(record: dict[str, Any]) -> tuple[float, float, float, float] | N
         return (float(value[0]), float(value[1]), float(value[2]), float(value[3]))
     except (TypeError, ValueError):
         return None
+
+
+def first_record_bbox(record: dict[str, Any], keys: tuple[str, ...]) -> tuple[float, float, float, float] | None:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, list):
+            bbox = record_bbox({"bbox": value})
+            if bbox is not None:
+                return bbox
+    return None
 
 
 def union_bbox(boxes: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
@@ -219,12 +414,17 @@ def table_caption_text(record: dict[str, Any]) -> str:
     return ""
 
 
-def record_identifier(record: dict[str, Any], *, fallback: int) -> str:
-    for key in ("node_id", "id", "block_id", "table_id", "global_order", "original_index", "mineru_block_idx"):
+def record_identifier(
+    record: dict[str, Any],
+    *,
+    fallback: int,
+    keys: tuple[str, ...] = ("node_id", "id", "block_id", "table_id", "global_order", "original_index", "mineru_block_idx"),
+) -> str:
+    for key in keys:
         value = record.get(key)
         if value is not None and value != "":
             return str(value)
-    return f"table_{fallback}"
+    return f"region_{fallback}"
 
 
 def safe_asset_stem(value: str) -> str:

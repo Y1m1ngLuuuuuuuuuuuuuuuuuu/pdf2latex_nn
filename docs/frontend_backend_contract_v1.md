@@ -110,6 +110,13 @@ features
 source_refs
 ```
 
+当前稳定的 `node_type` 至少包括：
+
+```text
+text / title / equation / inline_math / table / figure / algorithm / list / code
+footnote / margin_note / reference / toc / header_footer / other
+```
+
 表格节点的附加约定：
 
 ```text
@@ -126,10 +133,13 @@ table_group_caption
 table_group_render_strategy
 
 同一 group 只允许 primary 节点在 renderer 中输出 table 环境。
-批量渲染默认不生成截图资产，只输出带 union bbox 的 table placeholder，
-避免大规模 QA/训练产物占用过多磁盘。只有显式打开
+批量渲染默认不主动为每个 bbox 生成 PDF crop，避免大规模 QA/训练
+产物占用过多磁盘。figure 会优先复用 MinerU 已经给出的
+`img_path` / `image_path` 等位图资产；如果没有现成资产，只有显式打开
 `--render-table-crops` 或给 IR renderer 配置 `table_asset_output_dir`
-时，才根据 table_group_bbox 从 source_pdf 重新裁一整块图。
+或 `figure_asset_output_dir` 时，才根据 table_group_bbox / figure bbox
+从 source_pdf 重新裁一整块图并用 `\includegraphics` 渲染。
+两者都不存在时才保留 TODO placeholder。
 MinerU table_body/HTML 只作为后续结构化重建的候选证据。
 ```
 
@@ -411,6 +421,8 @@ LaTeX 生成阶段必须把它们转成语义结构：
 ```text
 正文 [1-3]        -> \cite{ref_1,ref_2,ref_3}
 参考文献 [1] ...  -> \bibitem{ref_1} ...
+正文 (Smith, 2020) -> \cite{Smith2020}
+参考文献 Smith...2020 -> \bibitem[Smith, 2020]{Smith2020} ...
 ```
 
 当前代码入口：
@@ -425,6 +437,8 @@ src/generation/citations.py
 entries:
   key
   label
+  display_label
+  authors / year
   text
   source_node_id
 
@@ -432,6 +446,7 @@ occurrences:
   node_id
   raw_marker
   keys
+  citation_style
   start / end
 
 text_by_node_id:
@@ -441,9 +456,16 @@ text_by_node_id:
 如果 TeX / `.bbl` 能提供真实 citation key，后续可以覆盖 `ref_1`
 这类 PDF-only 伪 key。没有真实 key 时，`ref_<number>` 是稳定降级方案。
 当前实现会优先读取 `reference_items` 内的 `citation_key` / `bib_key`
-/ `bibkey` / `tex_key`。如果这些字段存在，正文 `[1]` 会被修复成
+/ `bibkey` / `bibtex_key` / `tex_key`。如果这些字段存在，正文 `[1]` 会被修复成
 真实 key，例如 `\cite{smith2024}`，参考文献条目会输出为
 `\bibitem{smith2024}`。
+
+如果没有真实 key，resolver 会从 author-year reference 文本中推断稳定 key
+和 optional label，例如 `Smith, J. (2020)` -> `Smith2020` 与
+`\bibitem[Smith, 2020]{Smith2020}`。正文里的 `(Smith, 2020)`、
+`Smith et al. (2020)`、`;` 分隔的多 author-year 引用会被映射成同一组
+`\cite{...}`。数字引用仍然展开范围；在 numeric citation style 下，IR
+renderer 会加载 `cite` package，由 LaTeX 负责压缩连续编号显示。
 
 OCR 识别出的参考文献序号 `[1]` / `1.` / `【1】` 不进入最终
 bibliography 正文。
@@ -454,6 +476,7 @@ bibliography 正文。
 
 ```text
 src/generation/ir_renderer.py
+src/generation/render_surface.py
 ```
 
 它只读取稳定接口：
@@ -461,6 +484,12 @@ src/generation/ir_renderer.py
 ```text
 DocumentIR + RenderTreeIR + StyleProfile + CitationResolution -> generated.tex
 ```
+
+推荐脚本入口是 `render_original_like_document(document, tree, ...)`。它会补齐
+缺失的 `StyleProfile` / `CitationResolution`，然后调用
+`OriginalLikeIRLatexRenderer`。`src/generation/latex_renderer.py` 不再作为整
+文档生产入口，只保留 escape、inline math、algorithm、table/figure block 等
+底层 helper；其中 `render_latex_document()` 是 legacy 兼容面。
 
 已支持的 original-like 生成能力：
 
@@ -486,11 +515,21 @@ DocumentIR + RenderTreeIR + StyleProfile + CitationResolution -> generated.tex
 	  reference label stripping
 	  \begin{thebibliography} + \bibitem
 
+	脚注/边注:
+	  footnote / margin_note 节点先从正文流收容
+	  再锚定到最近的前置正文节点
+	  渲染为 \footnote{...} / \marginpar{...}
+
 	表格:
 	  table fragment grouping
 	  默认 table placeholder
 	  显式开启后 union-bbox PDF crop -> \includegraphics
 	  table_body/HTML 作为弱证据保留，不作为默认渲染主路径
+		图片:
+		  优先复用 MinerU img_path / image_path -> \includegraphics
+		  无现成图片且显式开启 crop assets 后 bbox PDF crop -> \includegraphics
+		  最后才 fallback 为 figure placeholder + caption
+	  仍保留 caption 作为结构化文本
 	```
 
 IR renderer 额外保证：
@@ -501,13 +540,19 @@ children 渲染前按 source DocumentNode.reading_index 排序
 列表项中间的公式/表格/图片/算法作为上一条 item 的内部内容渲染
 RenderRole.TABLE / FIGURE / ALGORITHM / CODE / ABSTRACT / TOC_PLACEHOLDER 有独立分发
 算法用 algorithmic 环境，不再默认 verbatim
-表格默认输出 TODO_TABLE_RECONSTRUCT placeholder，不生成截图资产
+	表格默认输出 TODO_TABLE_RECONSTRUCT placeholder，不生成截图资产
+	图片优先使用 MinerU 现成图片资产；缺失资产时才进入 crop/placeholder fallback
+	显式开启 crop assets 后，table / figure 都会从 source_pdf 裁剪 bbox
+并输出 \includegraphics
 重复 REFERENCES / REFERENCE_ITEM sibling 会折叠成一个 bibliography
 孤立 symbol-font 大括号不会被渲染成 inline math
 inline math 中的 unicode 数学符号会转成 LaTeX 命令
+普通 text/span 中裸露的 `\mathrm{...}` / `\frac{...}` 等数学命令会被
+保护成行内公式；display equation 中的单个 `\tag{}` 或尾随 `(1)` 编号
+会升格为 equation 环境，多行 `&` 对齐会升格为 align 环境。
 ```
 
-当前尚未默认启用的能力：
+保守策略与未完备能力：
 
 ```text
 页眉/页脚全局复刻:
@@ -517,17 +562,20 @@ inline math 中的 unicode 数学符号会转成 LaTeX 命令
   如果统计显示存在稳定页眉/页脚/页码，则用 fancyhdr 生成全局
   \fancyhead / \fancyfoot。低置信边缘文本仍然只保留为 metadata。
 
-脚注:
-  如果后续前端把 footnote 标成独立 role，可接入 \footnote{...}。
-  当前没有把普通底部文本强行猜成脚注。
+脚注/边注:
+  前端显式标成 footnote / margin_note 后，Generator 会结构化输出
+  \footnote{...} / \marginpar{...}。
+  当前仍然不会把普通底部文本强行猜成脚注。
 
 表格结构化重建:
   当前只保留 MinerU table_body/HTML 与 union-bbox placeholder。
   未来可接入 CV 表格重建或显式开启 PDF crop。
 ```
 
-旧的 `TreeDecoder.render_document()` 暂时继续保留，便于现有推理脚本
-不被打断。新生成后端应逐步切到 `OriginalLikeIRLatexRenderer`。
+旧的 `TreeDecoder.render_document()` 和
+`latex_renderer.render_latex_document()` 暂时继续保留，便于现有推理脚本和
+历史测试不被打断。新生成后端必须逐步切到
+`render_original_like_document()` / `OriginalLikeIRLatexRenderer`。
 
 ## 推荐目录
 

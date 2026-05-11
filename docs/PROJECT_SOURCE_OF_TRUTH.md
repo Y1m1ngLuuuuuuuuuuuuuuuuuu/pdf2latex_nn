@@ -249,7 +249,13 @@ modules instead of embedding style and citation rules inside TreeDecoder:
 src/generation/style_profile.py  DocumentIR -> StyleProfile
 src/generation/citations.py      DocumentIR -> CitationResolution
 src/generation/ir_renderer.py    DocumentIR + RenderTreeIR + StyleProfile -> .tex
+src/generation/render_surface.py canonical one-call generation entrypoint
 ```
+
+`src/generation/latex_renderer.py` is no longer a production document render
+surface. It is retained as a low-level helper module for escaping, math,
+algorithm, table, and figure block rendering; its legacy `render_latex_document`
+function should not be used by new code.
 
 `StyleProfileExtractor` owns global document appearance such as page size,
 margins, column count/gap, body font, title font clusters, paragraph spacing,
@@ -281,30 +287,45 @@ The original-like backend now covers the first reconstruction layer:
    must be driven by StyleSpan font/bbox/size features, not content keywords
 4. citations/references:
    numeric marker repair, real key passthrough from reference_items, OCR
-   reference-label stripping, and thebibliography rendering
-5. table fallback:
+   reference-label stripping, author-year key/optional-label inference,
+   author-year body-marker repair, numeric range expansion with `cite`
+   package compression, and thebibliography rendering
+5. notes:
+   explicit `footnote` / `margin_note` nodes are removed from ordinary body
+   flow, anchored to the nearest preceding source node, and rendered with
+   `\footnote{...}` / `\marginpar{...}`. Unanchored footnotes fall back to
+   `\footnotetext{...}`; generic bottom-edge text is not guessed as a footnote.
+6. table/figure fallback:
    adjacent MinerU table fragments are grouped; only the primary group node is
    rendered. Batch rendering defaults to a placeholder to avoid large image
-   assets; union-bbox PDF crops require an explicit render flag/config
-6. render-tree safety:
+   assets; union-bbox PDF crops require an explicit render flag/config. Figure
+   nodes use the same bbox PDF crop fallback when crop output is enabled.
+7. render-tree safety:
    IR renderer sorts siblings by source reading_index before rendering, so MST
    insertion order cannot scramble the body flow. Consecutive list-like
    siblings are grouped into itemize/enumerate, and display equations or other
    structural blocks between list items stay inside the active list item.
-7. type dispatch:
+8. type dispatch:
    abstract, table, figure, algorithm, code, toc placeholder, display equation,
-   inline math, references, and raw LaTeX roles have explicit renderer branches
-   instead of falling through to ordinary paragraphs.
-8. OCR/math safety:
-   lone symbol-font braces and unicode math glyphs are guarded so dirty OCR
-   spans do not produce uncompilable inline math. Repeated reference render
-   nodes are collapsed into one bibliography block.
+   inline math, footnote, margin note, references, and raw LaTeX roles have
+   explicit renderer branches instead of falling through to ordinary paragraphs.
+9. OCR/math safety:
+   lone symbol-font braces, unicode math glyphs, bare inline TeX math commands
+   inside text spans, single equation tags, and simple align rows are guarded so
+   dirty OCR spans do not produce uncompilable inline/display math. Repeated
+   reference render nodes are collapsed into one bibliography block.
 ```
 
-Structured table-to-tabular reconstruction, footnotes, margin notes, exact float
-placement, and journal template learning remain later backend phases.
-`table_body`/HTML is retained as weak evidence, but default original-like
-rendering should not create table crop images unless explicitly requested.
+Structured table-to-tabular reconstruction, exact float placement, and journal
+template learning remain later backend phases.
+`table_body`/HTML is retained as weak evidence. Default original-like rendering
+does not create table/figure PDF crop images unless explicitly requested. Figure
+roles first reuse MinerU image assets (`img_path` / `image_path`); when no asset
+exists, both table and figure roles can use bbox PDF crop fallback with
+`\includegraphics` once crop asset output is enabled. Mixed single/double-column
+pages use v7 layout-band metadata, fall back to bbox width/center-crossing
+inference when metadata is absent, and render local double-column runs with
+`multicols`.
 
 The current PDF-side production JSON format is:
 

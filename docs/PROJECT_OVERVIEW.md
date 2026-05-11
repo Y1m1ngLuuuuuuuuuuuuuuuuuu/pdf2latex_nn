@@ -548,10 +548,16 @@ maximum spanning arborescence for parent tree
 ```text
 src/generation/style_profile.py
 src/generation/citations.py
+src/generation/render_surface.py
 src/generation/ir_renderer.py
 src/generation/font_resolver.py
 src/generation/table_assets.py
 ```
+
+推荐调用 `render_original_like_document()`。旧的
+`src/generation/latex_renderer.py` 已降级为底层 helper，只提供 escape、
+inline/display math、algorithm、table/figure block 等共享片段渲染；不再作为
+新代码的整文档入口。
 
 输入：
 
@@ -603,7 +609,14 @@ font size change -> local \fontsize
 super/subscript -> 基于 span bbox + 小字号 + 相对基线偏移
 ```
 
-上标/下标不会凭空猜；旧 JSON 没有 span bbox 时会自动降级。
+上标/下标不会凭空猜；旧 JSON 没有 span bbox 时会自动降级。对于 MinerU
+或 PyMuPDF 没有标成 `inline_math`、但普通 text/span 中裸露出 `\mathrm`、
+`\frac` 等数学命令的情况，renderer 会把这类片段保护为行内公式，避免
+再次被转义成 `\textbackslash{}` 文本。
+
+Display equation 分发会保留已有 `equation/align/multline` 等环境；单个
+`\tag{}` 或尾随 `(1)` 编号会输出为 `equation` 环境，多行带 `&` 的内容会
+输出为 `align` 环境，避免编号/对齐语义被 `\[...\]` 吞掉。
 
 ### 10.3 引用和参考文献
 
@@ -614,6 +627,10 @@ super/subscript -> 基于 span bbox + 小字号 + 相对基线偏移
 reference label stripping
 reference_items 中真实 citation_key 优先
 没有真实 key 时降级为 ref_1 / ref_2
+无 key 时从 author-year reference 文本推断 Smith2020 等稳定 key
+author-year bibliography 输出 \bibitem[Smith, 2020]{Smith2020}
+正文 (Smith, 2020) / Smith et al. (2020) -> \cite{Smith2020}
+numeric style 下加载 cite package，让 LaTeX 压缩连续编号显示
 \begin{thebibliography}
 \bibitem{...}
 ```
@@ -642,7 +659,7 @@ Renderer 生成 fancyhdr
 
 ### 10.5 表格和图片
 
-当前表格默认策略是保守占位：
+当前表格与图片默认策略是保守占位：
 
 ```latex
 \begin{table}[H]
@@ -650,9 +667,15 @@ Renderer 生成 fancyhdr
 % [TODO_TABLE_RECONSTRUCT: BBOX=..., ID=...]
 \caption{...}
 \end{table}
+
+\begin{figure}[H]
+\centering
+% [TODO_FIGURE_RECONSTRUCT: BBOX=..., ID=...]
+\caption{...}
+\end{figure}
 ```
 
-原因是结构化表格重建需要额外表格识别模块。当前不默认截图表格，避免批量生成占用大量空间。后续可以选择：
+原因是结构化表格重建需要额外表格识别模块，图片也需要避免在大规模 QA 中默认复制大量位图资产。当前不默认截图表格/图片，避免批量生成占用大量空间。figure 会先复用 MinerU 的 `img_path` / `image_path` 等现成图片资产；没有现成资产且显式开启 crop assets 后，table 和 figure 才会从原始 PDF 的 bbox 裁剪成图片，并通过 `\includegraphics` 放回 LaTeX。后续可以选择：
 
 ```text
 PDF crop image fallback
@@ -661,20 +684,29 @@ CV table structure model
 专用表格重建器
 ```
 
-图片当前类似，默认保留 figure placeholder 与 caption。
+混合单双栏版式现在优先由 v7 的 `layout_band_type` 驱动；如果旧数据缺少
+band metadata，renderer 会用 bbox 宽度和中轴跨越关系做兜底推断。`mixed`
+profile 会加载 `multicol`，把连续局部双栏内容包入 `\begin{multicols}{2}`，
+full-span 标题、公式、图表、参考文献等保持在外层单栏流中。
 
-### 10.6 脚注
+### 10.6 脚注与边注
 
-当前没有完整脚注重建。已有弱识别/隔离，但还没有：
+脚注/边注已经进入稳定 IR 和生成器主路径：
 
 ```text
 BlockType.FOOTNOTE
+BlockType.MARGIN_NOTE
 RenderRole.FOOTNOTE
-\footnote / \footnotemark / \footnotetext 渲染
-正文上标 marker 与底部 footnote 对齐
+RenderRole.MARGIN_NOTE
+\footnote{...}
+\footnotetext{...} fallback
+\marginpar{...}
 ```
 
-后续建议把脚注作为 deterministic resolver，而不是 GNN 主任务。
+前端如果显式标出 footnote / margin_note，IR renderer 会先把这些节点从正文
+流收容起来，再锚定到同页最近的前置正文节点。找不到锚点的脚注会作为
+`\footnotetext{...}` 兜底输出，边注则用 `\marginpar{...}`。普通底部短文本不会
+被强行猜成脚注，避免把页脚/页码误写回正文。
 
 ## 11. 数据生产与训练
 
@@ -802,6 +834,7 @@ GAT/GATv2 edge relation model
 v7-to-IR adapter
 StyleProfileExtractor
 CitationResolver
+render_original_like_document canonical surface
 OriginalLikeIRLatexRenderer
 列表成组、公式保护、算法渲染、表格 placeholder
 字体/字号/上下标基于 span 特征的局部渲染

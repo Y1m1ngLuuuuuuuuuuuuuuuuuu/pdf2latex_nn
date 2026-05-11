@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from src.generation.citations import strip_reference_label
-from src.generation.table_assets import ensure_table_pdf_crop, table_caption_text
+from src.generation.table_assets import ensure_figure_asset, ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
 from src.reasoning.layout_state_machine import parse_layout_state_machine
@@ -98,6 +98,9 @@ INLINE_MATH_COMMANDS = {
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
+NOTE_MARKER_RE = re.compile(
+    r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
+)
 NUMERIC_PAREN_PREFIX_RE = re.compile(r"^\s*\d+\)\s+")
 NUMERIC_PREFIX_RE = re.compile(r"^\s*\d+[\.\)]\s+")
 ORDERED_NUMERIC_DOT_PREFIX_RE = re.compile(r"^\s*(\d+)\.\s+")
@@ -216,7 +219,9 @@ class TreeDecoderConfig:
     )
     source_pdf: str | None = None
     table_asset_output_dir: str | None = None
+    figure_asset_output_dir: str | None = None
     table_asset_latex_prefix: str = "assets"
+    figure_asset_latex_prefix: str = "assets"
 
 
 @dataclass
@@ -844,9 +849,32 @@ class TreeDecoder:
             )
         if block_type == "figure":
             caption = render_text_with_inline_latex(text) if text else "Figure"
-            return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
+            asset_path = ensure_figure_asset(
+                node.record,
+                source_pdf=self.config.source_pdf,
+                asset_output_dir=self.config.figure_asset_output_dir or self.config.table_asset_output_dir,
+                asset_latex_prefix=self.config.figure_asset_latex_prefix,
+            )
+            graphic_line = (
+                rf"\includegraphics[width={figure_include_width(node.record)}\linewidth]{{{asset_path}}}"
+                if asset_path
+                else figure_placeholder(node.record, node_id=node.node_id)
+            )
+            return "\n".join(
+                [
+                    r"\begin{figure}[H]",
+                    r"\centering",
+                    graphic_line,
+                    rf"\caption{{{caption}}}",
+                    r"\end{figure}",
+                ]
+            )
         if block_type == "reference":
             return render_references(node.record, text)
+        if block_type == "footnote":
+            return rf"\footnote{{{render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
+        if block_type == "margin_note":
+            return rf"\marginpar{{\footnotesize {render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
         if block_type == "list":
             return self.render_list(node, depth=depth)
 
@@ -1913,6 +1941,10 @@ def canonical_render_type(record: dict[str, Any]) -> str:
         return "list"
     if raw == "code":
         return "code"
+    if raw in {"page_footnote", "footnote", "foot_note"}:
+        return "footnote"
+    if raw in {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"}:
+        return "margin_note"
     if raw in {"reference", "references", "bibliography"}:
         return "reference"
     return "text"
@@ -2168,6 +2200,15 @@ def list_environment_for_text(text: str) -> str | None:
 
 def strip_list_marker(text: str) -> str:
     return LIST_MARKER_RE.sub("", str(text or ""), count=1).strip()
+
+
+def strip_note_marker(text: str) -> tuple[str, str | None]:
+    value = str(text or "").strip()
+    match = NOTE_MARKER_RE.match(value)
+    if not match:
+        return value, None
+    marker = next((group for group in match.groups() if group), None)
+    return value[match.end() :].strip(), marker
 
 
 def normalize_title_text_for_dedup(text: str) -> str:
@@ -2459,10 +2500,18 @@ def render_equation(text: str) -> str:
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
     if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
         return stripped
+    body, tag = split_trailing_equation_number(stripped)
+    if tag is not None:
+        return "\\begin{equation}\n" + body + rf" \tag{{{tag}}}" + "\n\\end{equation}"
+    if TAG_RE.search(stripped):
+        return "\\begin{equation}\n" + stripped + "\n\\end{equation}"
+    if should_render_as_align(stripped):
+        return "\\begin{align}\n" + stripped + "\n\\end{align}"
     return "\\[\n" + stripped + "\n\\]"
 
 
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
+TRAILING_EQUATION_NUMBER_RE = re.compile(r"^(?P<body>.+?)\s*(?:\((?P<tag>[A-Za-z]?\d+(?:\.\d+)*)\))\s*$", re.DOTALL)
 
 
 def render_multi_tag_equation(text: str) -> str | None:
@@ -2508,8 +2557,30 @@ def render_multi_tag_equation(text: str) -> str | None:
     return "\\begin{align}\n" + "\\\\\n".join(rendered_rows) + "\n\\end{align}"
 
 
+def split_trailing_equation_number(text: str) -> tuple[str, str | None]:
+    stripped = text.strip()
+    if TAG_RE.search(stripped):
+        return stripped, None
+    match = TRAILING_EQUATION_NUMBER_RE.match(stripped)
+    if not match:
+        return stripped, None
+    body = match.group("body").strip()
+    tag = match.group("tag").strip()
+    if not body or not tag:
+        return stripped, None
+    return body, tag
+
+
+def should_render_as_align(text: str) -> bool:
+    stripped = text.strip()
+    if "\\\\" in stripped and ("&" in stripped or "\n" in stripped):
+        return True
+    rows = [row.strip() for row in stripped.splitlines() if row.strip()]
+    return len(rows) > 1 and any("&" in row for row in rows)
+
+
 def render_inline_math(text: str) -> str:
-    stripped = strip_latex_control_chars(text).strip()
+    stripped = normalize_duplicate_math_command_slashes(strip_latex_control_chars(text).strip())
     if not stripped:
         return "$$"
     if stripped.startswith("$") or stripped.startswith(r"\("):
@@ -2718,6 +2789,10 @@ def normalize_latex_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", str(text)).strip()
 
 
+def normalize_duplicate_math_command_slashes(text: str) -> str:
+    return re.sub(r"\\\\([A-Za-z]+)", r"\\\1", str(text or ""))
+
+
 def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
     """Escape prose while preserving inline TeX math fragments embedded in it.
 
@@ -2742,7 +2817,10 @@ def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
             rendered.append(escape_latex(value[cursor:start]))
         raw_math = value[start:end].strip()
         if raw_math:
+            raw_math, trailing_punctuation = split_trailing_inline_math_punctuation(raw_math)
             rendered.append(render_inline_math(raw_math))
+            if trailing_punctuation:
+                rendered.append(escape_latex(trailing_punctuation))
         cursor = end
     output = re.sub(r"\n{3,}", "\n\n", "".join(rendered))
     return output.strip() if strip else output
@@ -2771,6 +2849,17 @@ def find_next_inline_latex_span(text: str, start_index: int) -> tuple[int, int] 
     return min(candidates, key=lambda item: item[0])
 
 
+def split_trailing_inline_math_punctuation(text: str) -> tuple[str, str]:
+    value = str(text or "").strip()
+    if len(value) < 2 or value.startswith("$") or value.startswith(r"\("):
+        return value, ""
+    if value[-1] not in ".,;:":
+        return value, ""
+    if len(value) >= 2 and value[-2].isdigit() and value[-1] == ".":
+        return value, ""
+    return value[:-1].rstrip(), value[-1]
+
+
 def find_unescaped(text: str, needle: str, start_index: int) -> int | None:
     index = text.find(needle, start_index)
     while index >= 0:
@@ -2789,7 +2878,10 @@ def find_next_math_command(text: str, start_index: int) -> tuple[int, str] | Non
     for match in MATH_COMMAND_RE.finditer(text, start_index):
         command_name = match.group(1)
         if command_name in INLINE_MATH_COMMANDS:
-            return match.start(), command_name
+            command_start = match.start()
+            if command_start > start_index and text[command_start - 1] == "\\":
+                command_start -= 1
+            return command_start, command_name
     return None
 
 
@@ -2800,6 +2892,12 @@ def consume_bare_latex_math(text: str, start_index: int) -> int:
     while index < len(text):
         char = text[index]
         if char == "\\":
+            if index + 2 < len(text) and text[index + 1] == "\\" and text[index + 2].isalpha():
+                command = MATH_COMMAND_RE.match(text, index + 1)
+                if command:
+                    saw_command = True
+                    index = command.end()
+                    continue
             command = MATH_COMMAND_RE.match(text, index)
             if command:
                 saw_command = True
@@ -3068,6 +3166,38 @@ def render_table_placeholder(
             r"\end{table}",
         ]
     )
+
+
+def figure_placeholder(record: dict[str, Any], *, node_id: int | None = None) -> str:
+    figure_id = figure_node_identifier(record, node_id=node_id)
+    bbox = format_table_bbox(record.get("figure_group_bbox") or record.get("image_group_bbox") or record.get("bbox"))
+    return f"% [TODO_FIGURE_RECONSTRUCT: BBOX={bbox}, ID={figure_id}]"
+
+
+def figure_include_width(record: dict[str, Any]) -> str:
+    bbox = record.get("figure_group_bbox") or record.get("image_group_bbox") or record.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) < 4:
+        return "0.95"
+    try:
+        width = float(bbox[2]) - float(bbox[0])
+    except (TypeError, ValueError):
+        return "0.95"
+    page_width = numeric_value(record.get("page_width")) or 1000.0
+    ratio = max(min(width / max(page_width, 1.0), 0.98), 0.25)
+    return f"{ratio:.3f}"
+
+
+def figure_node_identifier(record: dict[str, Any], *, node_id: int | None = None) -> str:
+    for key in ("figure_group_id", "image_group_id", "id", "block_id", "figure_id", "image_id"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    value = record.get("global_order")
+    if value is not None:
+        return f"figure_{value}"
+    if node_id is not None and node_id >= 0:
+        return f"figure_{node_id}"
+    return "figure_unknown"
 
 
 def cfg_source_pdf(record: dict[str, Any]) -> str | None:

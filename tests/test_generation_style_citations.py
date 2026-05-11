@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from src.generation.citations import CitationResolver, expand_citation_labels, strip_reference_label
 from src.generation.ir_renderer import IRLatexRenderConfig, OriginalLikeIRLatexRenderer
-from src.generation.latex_renderer import render_inline_math
+from src.generation.latex_renderer import render_equation, render_inline_math, render_text_with_inline_latex
+from src.generation.render_surface import render_original_like_document
 from src.generation.style_profile import StyleProfileExtractor
 from src.ir import (
     BBox,
@@ -266,11 +271,69 @@ def test_citation_resolver_prefers_reference_item_keys():
     assert resolution.text_by_node_id["l1"] == r"Styled \cite{smith2024} and code."
 
 
+def test_citation_resolver_infers_author_year_keys_and_labels():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Smith et al. (2020) introduced it; later work (Doe, 2021; Roe and Poe, 2022) extended it.",
+            page_idx=0,
+            bboxes=[BBox(100, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="refs",
+            node_type=BlockType.REFERENCE,
+            text="\n".join(
+                [
+                    "Smith, J., Doe, A. (2020). First author-year paper.",
+                    "Doe, B. (2021). Second paper.",
+                    "Roe, C. and Poe, D. (2022). Third paper.",
+                ]
+            ),
+            page_idx=0,
+            bboxes=[BBox(100, 800, 900, 900)],
+            reading_index=1,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="author_year",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["body", "refs"])],
+        nodes=nodes,
+        reading_order=["body", "refs"],
+    )
+
+    resolution = CitationResolver().resolve_document(document)
+
+    assert resolution.citation_style == "author_year"
+    assert [entry.key for entry in resolution.entries] == ["Smith2020", "Doe2021", "Roe2022"]
+    assert resolution.entries[0].display_label == "Smith, 2020"
+    assert resolution.text_by_node_id["body"] == (
+        r"\cite{Smith2020} introduced it; later work \cite{Doe2021,Roe2022} extended it."
+    )
+
+
 def test_inline_math_renderer_rejects_lone_symbol_font_braces():
     assert render_inline_math("{") == r"\{"
     assert render_inline_math("}") == r"\}"
     assert render_inline_math(r"x_i") == r"$x_i$"
     assert render_inline_math("x∈X⊆R") == r"$x\inX\subseteqR$"
+
+
+def test_text_renderer_protects_bare_latex_math_fragments():
+    tex = render_text_with_inline_latex(r'Caption says \\mathrm { p } ^ { \\mathrm { , } } is the number.')
+
+    assert r"$\mathrm { p } ^ { \mathrm { , } }$" in tex
+    assert r"\textbackslash{}" not in tex
+
+
+def test_display_equation_preserves_numbering_and_align_semantics():
+    numbered = render_equation(r"E = mc^2 (1)")
+    aligned = render_equation("a &= b\\\\\nc &= d")
+
+    assert numbered == "\\begin{equation}\n" + r"E = mc^2 \tag{1}" + "\n\\end{equation}"
+    assert aligned.startswith(r"\begin{align}")
+    assert aligned.endswith(r"\end{align}")
 
 
 def test_original_like_ir_renderer_uses_style_and_citation_resolution():
@@ -293,6 +356,70 @@ def test_original_like_ir_renderer_uses_style_and_citation_resolution():
     assert r"\cite{ref_1,ref_2}" in tex
     assert r"\bibitem{ref_1} First paper." in tex
     assert "[1] First paper" not in tex
+
+
+def test_canonical_render_surface_builds_style_and_citations():
+    document = build_document()
+    tree = RenderTreeIR(
+        doc_id="demo",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["r1", "r2"]),
+            RenderTreeNode(render_id="r1", role=RenderRole.PARAGRAPH, source_node_ids=["n1"]),
+            RenderTreeNode(render_id="r2", role=RenderRole.REFERENCES, source_node_ids=["n2"]),
+        ],
+    )
+
+    tex = render_original_like_document(document, tree)
+
+    assert r"\cite{ref_1,ref_2}" in tex
+    assert r"\bibitem{ref_1} First paper." in tex
+
+
+def test_original_like_ir_renderer_emits_author_year_bibitem_optional_labels():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Smith et al. (2020) introduced it.",
+            page_idx=0,
+            bboxes=[BBox(100, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="refs",
+            node_type=BlockType.REFERENCE,
+            text="Smith, J. (2020). First author-year paper.",
+            page_idx=0,
+            bboxes=[BBox(100, 800, 900, 850)],
+            reading_index=1,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="author_year_render",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["body", "refs"])],
+        nodes=nodes,
+        reading_order=["body", "refs"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    citations = CitationResolver().resolve_document(document)
+    tree = RenderTreeIR(
+        doc_id="author_year_render",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p", "refs"]),
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+            RenderTreeNode(render_id="refs", role=RenderRole.REFERENCES, source_node_ids=["refs"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile, citations)
+
+    assert r"\cite{Smith2020}" in tex
+    assert r"\bibitem[Smith, 2020]{Smith2020} Smith, J. (2020). First author-year paper." in tex
+    assert r"\usepackage{cite}" not in tex
 
 
 def test_original_like_ir_renderer_groups_repeated_reference_nodes_once():
@@ -362,6 +489,62 @@ def test_original_like_ir_renderer_can_emit_optional_fontspec_setup():
     assert r"\usepackage{fontspec}" in tex
     assert r"\setmainfont{TeX Gyre Termes}" in tex
     assert r"\setmonofont{TeX Gyre Cursor}" in tex
+
+
+def test_original_like_ir_renderer_anchors_footnotes_and_margin_notes():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Main statement.",
+            page_idx=0,
+            bboxes=[BBox(100, 100, 700, 120)],
+            reading_index=0,
+            spans=[StyleSpan(text="Main statement.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="fn",
+            node_type=BlockType.FOOTNOTE,
+            text=r"[1] Footnote with \\mathrm { p }.",
+            page_idx=0,
+            bboxes=[BBox(100, 900, 700, 925)],
+            reading_index=1,
+            spans=[StyleSpan(text=r"[1] Footnote with \\mathrm { p }.", font_name="Times-Roman", font_size=8)],
+        ),
+        DocumentNode(
+            node_id="mn",
+            node_type=BlockType.MARGIN_NOTE,
+            text="Side observation.",
+            page_idx=0,
+            bboxes=[BBox(760, 120, 940, 170)],
+            reading_index=2,
+            spans=[StyleSpan(text="Side observation.", font_name="Times-Roman", font_size=8)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="notes",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["body", "fn", "mn"])],
+        nodes=nodes,
+        reading_order=["body", "fn", "mn"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="notes",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p", "fn", "mn"]),
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+            RenderTreeNode(render_id="fn", role=RenderRole.PARAGRAPH, source_node_ids=["fn"]),
+            RenderTreeNode(render_id="mn", role=RenderRole.PARAGRAPH, source_node_ids=["mn"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert r"Main statement.\footnote{Footnote with $\mathrm { p }$.}\marginpar{\footnotesize Side observation.}" in tex
+    assert "[1] Footnote" not in tex
+    assert tex.count(r"\footnote{") == 1
 
 
 def test_original_like_ir_renderer_preserves_span_font_family_and_scripts_from_features():
@@ -527,6 +710,263 @@ def test_original_like_renderer_outputs_one_table_for_grouped_fragments():
     assert tex.count(r"\begin{table}[H]") == 1
     assert "TODO_TABLE_RECONSTRUCT: BBOX=(100, 100, 390, 500), ID=table_group_p0000_0000" in tex
     assert r"\caption{Table 1: Wide result table.}" in tex
+
+
+def test_original_like_ir_renderer_renders_figure_bbox_placeholder():
+    node = DocumentNode(
+        node_id="fig0",
+        node_type=BlockType.FIGURE,
+        text="Figure 1: Qualitative examples.",
+        page_idx=0,
+        bboxes=[BBox(100, 120, 900, 520)],
+        reading_index=0,
+        metadata={"figure_caption": "Figure 1: Qualitative examples."},
+    )
+    document = DocumentIR(
+        doc_id="figures",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig0"])],
+        nodes=[node],
+        reading_order=["fig0"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="figures",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["rf0"]),
+            RenderTreeNode(render_id="rf0", role=RenderRole.FIGURE, source_node_ids=["fig0"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert r"\begin{figure}[H]" in tex
+    assert "TODO_FIGURE_RECONSTRUCT: BBOX=(100, 120, 900, 520), ID=fig0" in tex
+    assert r"\caption{Figure 1: Qualitative examples.}" in tex
+
+
+def test_original_like_ir_renderer_can_crop_figure_from_source_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "source.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    page.draw_rect(fitz.Rect(20, 20, 180, 120), color=(1, 0, 0), fill=(1, 0.9, 0.9))
+    doc.save(pdf_path)
+    doc.close()
+
+    node = DocumentNode(
+        node_id="fig1",
+        node_type=BlockType.FIGURE,
+        text="Figure 2: Cropped panel.",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 600)],
+        reading_index=0,
+        metadata={"figure_caption": "Figure 2: Cropped panel.", "source_pdf": str(pdf_path)},
+    )
+    document = DocumentIR(
+        doc_id="figure_crop",
+        source_pdf=str(pdf_path),
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig1"])],
+        nodes=[node],
+        reading_order=["fig1"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="figure_crop",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["rf1"]),
+            RenderTreeNode(render_id="rf1", role=RenderRole.FIGURE, source_node_ids=["fig1"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(
+        IRLatexRenderConfig(figure_asset_output_dir=tmp_path / "assets", figure_asset_latex_prefix="assets")
+    ).render(document, tree, profile)
+
+    assert r"\includegraphics[width=0.800\linewidth]{assets/figure_fig1.png}" in tex
+    assert (tmp_path / "assets" / "figure_fig1.png").exists()
+
+
+def test_original_like_ir_renderer_prefers_existing_mineru_figure_asset(tmp_path):
+    image_path = tmp_path / "mineru_image.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    node = DocumentNode(
+        node_id="fig_asset",
+        node_type=BlockType.FIGURE,
+        text="Figure 3: Extracted image.",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 700, 500)],
+        reading_index=0,
+        metadata={"img_path": str(image_path), "figure_caption": "Figure 3: Extracted image."},
+    )
+    document = DocumentIR(
+        doc_id="figure_asset",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig_asset"])],
+        nodes=[node],
+        reading_order=["fig_asset"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="figure_asset",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["rf"]),
+            RenderTreeNode(render_id="rf", role=RenderRole.FIGURE, source_node_ids=["fig_asset"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(
+        IRLatexRenderConfig(figure_asset_output_dir=tmp_path / "assets", figure_asset_latex_prefix="assets")
+    ).render(document, tree, profile)
+
+    assert r"\includegraphics[width=0.600\linewidth]{assets/figure_fig_asset.png}" in tex
+    assert (tmp_path / "assets" / "figure_fig_asset.png").exists()
+    assert "TODO_FIGURE_RECONSTRUCT" not in tex
+
+
+def test_original_like_ir_renderer_wraps_mixed_double_column_bands_in_multicols():
+    nodes = [
+        DocumentNode(
+            node_id="title",
+            node_type=BlockType.TITLE,
+            text="Paper Title",
+            page_idx=0,
+            bboxes=[BBox(100, 20, 900, 60)],
+            reading_index=0,
+            spans=[StyleSpan(text="Paper Title", font_name="Times-Bold", font_size=16, is_bold=True)],
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 0},
+        ),
+        DocumentNode(
+            node_id="left",
+            node_type=BlockType.TEXT,
+            text="Left column text.",
+            page_idx=0,
+            bboxes=[BBox(70, 120, 450, 145)],
+            reading_index=1,
+            spans=[StyleSpan(text="Left column text.", font_name="Times-Roman", font_size=10)],
+            metadata={"layout_band_type": "double_column", "layout_band_global_id": 1, "layout_band_column": "left"},
+        ),
+        DocumentNode(
+            node_id="right",
+            node_type=BlockType.TEXT,
+            text="Right column text.",
+            page_idx=0,
+            bboxes=[BBox(550, 120, 930, 145)],
+            reading_index=2,
+            spans=[StyleSpan(text="Right column text.", font_name="Times-Roman", font_size=10)],
+            metadata={"layout_band_type": "double_column", "layout_band_global_id": 1, "layout_band_column": "right"},
+        ),
+        DocumentNode(
+            node_id="wideeq",
+            node_type=BlockType.EQUATION,
+            text=r"E = mc^2",
+            page_idx=0,
+            bboxes=[BBox(250, 220, 750, 250)],
+            reading_index=3,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 2},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="mixed",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    profile = replace(
+        profile,
+        page_layout={**profile.page_layout, "column_mode": "mixed"},
+        renderer_options={**profile.renderer_options, "column_mode": "mixed"},
+    )
+    tree = RenderTreeIR(
+        doc_id="mixed",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["title", "left", "right", "eq"]),
+            RenderTreeNode(render_id="title", role=RenderRole.DOCUMENT_TITLE, source_node_ids=["title"]),
+            RenderTreeNode(render_id="left", role=RenderRole.PARAGRAPH, source_node_ids=["left"]),
+            RenderTreeNode(render_id="right", role=RenderRole.PARAGRAPH, source_node_ids=["right"]),
+            RenderTreeNode(render_id="eq", role=RenderRole.DISPLAY_EQUATION, source_node_ids=["wideeq"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\usepackage{multicol}" in tex
+    assert tex.index("Paper Title") < tex.index(r"\begin{multicols}{2}")
+    assert tex.index(r"\begin{multicols}{2}") < tex.index("Left column text.") < tex.index("Right column text.")
+    assert tex.index(r"\end{multicols}") < tex.index(r"\[")
+
+
+def test_original_like_ir_renderer_infers_mixed_columns_from_bbox_when_band_metadata_missing():
+    nodes = [
+        DocumentNode(
+            node_id="title",
+            node_type=BlockType.TITLE,
+            text="Wide Title",
+            page_idx=0,
+            bboxes=[BBox(100, 20, 900, 60)],
+            reading_index=0,
+            spans=[StyleSpan(text="Wide Title", font_name="Times-Bold", font_size=16, is_bold=True)],
+        ),
+        DocumentNode(
+            node_id="left",
+            node_type=BlockType.TEXT,
+            text="Left column text.",
+            page_idx=0,
+            bboxes=[BBox(70, 120, 450, 145)],
+            reading_index=1,
+            spans=[StyleSpan(text="Left column text.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="right",
+            node_type=BlockType.TEXT,
+            text="Right column text.",
+            page_idx=0,
+            bboxes=[BBox(550, 120, 930, 145)],
+            reading_index=2,
+            spans=[StyleSpan(text="Right column text.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="wideeq",
+            node_type=BlockType.EQUATION,
+            text=r"E = mc^2",
+            page_idx=0,
+            bboxes=[BBox(250, 220, 750, 250)],
+            reading_index=3,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="mixed_inferred",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    assert profile.page_layout["column_mode"] == "mixed"
+    tree = RenderTreeIR(
+        doc_id="mixed_inferred",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["title", "left", "right", "eq"]),
+            RenderTreeNode(render_id="title", role=RenderRole.DOCUMENT_TITLE, source_node_ids=["title"]),
+            RenderTreeNode(render_id="left", role=RenderRole.PARAGRAPH, source_node_ids=["left"]),
+            RenderTreeNode(render_id="right", role=RenderRole.PARAGRAPH, source_node_ids=["right"]),
+            RenderTreeNode(render_id="eq", role=RenderRole.DISPLAY_EQUATION, source_node_ids=["wideeq"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\begin{multicols}{2}" in tex
+    assert tex.index("Wide Title") < tex.index(r"\begin{multicols}{2}") < tex.index("Left column text.")
+    assert tex.index(r"\end{multicols}") < tex.index(r"\[")
 
 
 def test_original_like_ir_renderer_groups_list_siblings_and_keeps_equation_inside_item():
