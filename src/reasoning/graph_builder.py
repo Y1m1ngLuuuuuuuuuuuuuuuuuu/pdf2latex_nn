@@ -1833,6 +1833,10 @@ def _heading_level(item: dict[str, Any], *, body_font_size: float = 0.0) -> int 
 
 
 def _heading_explicit_level(item: dict[str, Any]) -> int | None:
+    if item.get("run_in_heading"):
+        value = item.get("run_in_heading_level")
+        if isinstance(value, (int, float)):
+            return min(max(1, int(value)), 3)
     numbered_level = title_numbering_level(_item_text(item))
     if numbered_level is not None:
         return numbered_level

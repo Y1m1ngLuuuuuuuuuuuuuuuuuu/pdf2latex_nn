@@ -995,6 +995,61 @@ def test_tree_decoder_keeps_layout_heading_as_subsection_scope_for_following_bod
     assert r"\item T(y): the sufficient statistic," in tex
 
 
+def test_tree_decoder_renders_run_in_heading_as_scope_with_body():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "3 Transducer Construction", "layout_role": "heading", "global_order": 0},
+        {
+            "type": "paragraph",
+            "text": "3.1. Implementation. We used the miniKanren family.",
+            "layout_role": "heading",
+            "run_in_heading": True,
+            "run_in_heading_number": "3.1",
+            "run_in_heading_text": "Implementation",
+            "run_in_heading_body": "We used the miniKanren family.",
+            "run_in_heading_level": 2,
+            "style_spans": [
+                {"text": "3.1.", "font_size": 10.0, "is_bold": False},
+                {"text": "Implementation.", "font_size": 10.0, "is_bold": True},
+                {"text": "We used the miniKanren family.", "font_size": 10.0, "is_bold": False},
+            ],
+            "global_order": 1,
+        },
+        {"type": "paragraph", "text": "Continuation belongs to implementation.", "global_order": 2},
+        {
+            "type": "paragraph",
+            "text": "3.2. Logic Variable Considerations & Setup. When using a logic search engine.",
+            "layout_role": "heading",
+            "run_in_heading": True,
+            "run_in_heading_number": "3.2",
+            "run_in_heading_text": "Logic Variable Considerations & Setup",
+            "run_in_heading_body": "When using a logic search engine.",
+            "run_in_heading_level": 2,
+            "global_order": 3,
+        },
+        {"type": "paragraph", "text": "The development proceeded from hard-coded states.", "global_order": 4},
+    ]
+
+    root = TreeDecoder().decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+    tex = TreeDecoder().render_document(root)
+
+    assert r"\section{Transducer Construction}" in tex
+    assert r"\subsection{Implementation}" in tex
+    assert r"\subsection{Logic Variable Considerations \& Setup}" in tex
+    assert "We used the miniKanren family." in tex
+    assert "Continuation belongs to implementation." in tex
+    assert tex.index(r"\subsection{Implementation}") < tex.index("Continuation belongs to implementation.")
+    assert tex.index(r"\subsection{Logic Variable Considerations \& Setup}") < tex.index("The development proceeded")
+    assert "3.1. Implementation" not in tex
+
+
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
     records = [
         {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},

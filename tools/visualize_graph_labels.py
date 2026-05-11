@@ -70,6 +70,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pages", type=int, default=0, help="0 means all pages")
     parser.add_argument("--draw-noise", action="store_true", help="Also draw page header/footer/page-number nodes")
     parser.add_argument("--draw-cross-page", action="store_true", help="Mark cross-page labeled edges with endpoint tags")
+    parser.add_argument("--no-parent-labels", action="store_true", help="Do not draw parent id labels beside child boxes")
     parser.add_argument("--bbox-opacity", type=float, default=0.28)
     return parser
 
@@ -97,6 +98,7 @@ def main() -> int:
         max_pages=args.max_pages,
         draw_noise=args.draw_noise,
         draw_cross_page=args.draw_cross_page,
+        draw_parent_labels=not args.no_parent_labels,
         bbox_opacity=args.bbox_opacity,
     )
     print(f"wrote_dir={args.output_dir}")
@@ -163,6 +165,7 @@ def draw_graph_labels(
     max_pages: int,
     draw_noise: bool,
     draw_cross_page: bool,
+    draw_parent_labels: bool,
     bbox_opacity: float,
 ) -> list[Path]:
     import fitz
@@ -172,6 +175,16 @@ def draw_graph_labels(
         page_count = len(doc) if max_pages <= 0 else min(len(doc), max_pages)
         node_boxes = build_node_bbox_index(records)
         draw_bboxes(doc, records, node_boxes, page_count=page_count, draw_noise=draw_noise, bbox_opacity=bbox_opacity)
+        if draw_parent_labels:
+            draw_parent_id_labels(
+                doc,
+                records=records,
+                node_boxes=node_boxes,
+                edge_index=edge_index,
+                labels=labels,
+                page_count=page_count,
+                draw_noise=draw_noise,
+            )
         draw_labeled_edges(
             doc,
             records=records,
@@ -267,6 +280,78 @@ def draw_labeled_edges(
             draw_parent_arrow(page, start, end)
 
 
+def draw_parent_id_labels(
+    doc: Any,
+    *,
+    records: list[dict[str, Any]],
+    node_boxes: dict[int, list[BBoxRef]],
+    edge_index: Any,
+    labels: list[int],
+    page_count: int,
+    draw_noise: bool,
+) -> None:
+    """Annotate every child bbox with its supervised parent id.
+
+    Same-page parent edges already draw red arrows, but page-local screenshots
+    hide valid parents that live on a previous/next page.  These labels make
+    the supervision explicit:
+
+    - ``parent=29`` means at least one parent bbox is visible on this page.
+    - ``P<-29`` means the parent exists, but no parent bbox is visible on this
+      page/rendered slice.
+    """
+
+    parents_by_child = parent_sources_by_child(edge_index, labels)
+    if not parents_by_child:
+        return
+    for child, parents in parents_by_child.items():
+        if is_noise_index(records, child) and not draw_noise:
+            continue
+        child_refs = node_boxes.get(child, [])
+        if not child_refs:
+            continue
+        visible_parents_by_page: dict[int, set[int]] = {}
+        for parent in parents:
+            if is_noise_index(records, parent) and not draw_noise:
+                continue
+            for ref in node_boxes.get(parent, []):
+                if 0 <= ref.page_idx < page_count:
+                    visible_parents_by_page.setdefault(ref.page_idx, set()).add(parent)
+        for ref in child_refs:
+            if ref.page_idx < 0 or ref.page_idx >= page_count:
+                continue
+            same_page = sorted(parent for parent in parents if parent in visible_parents_by_page.get(ref.page_idx, set()))
+            off_page = sorted(parent for parent in parents if parent not in visible_parents_by_page.get(ref.page_idx, set()))
+            if same_page:
+                label = "parent=" + ",".join(str(parent) for parent in same_page[:3])
+                if len(same_page) > 3:
+                    label += "+"
+                color = PARENT_COLOR
+            else:
+                label = "P<-" + ",".join(str(parent) for parent in off_page[:3])
+                if len(off_page) > 3:
+                    label += "+"
+                color = CROSS_PAGE_COLOR
+            if not label:
+                continue
+            page = doc[ref.page_idx]
+            rect = bbox_to_page_rect(page, ref.bbox)
+            draw_parent_label(page, rect, label, color=color)
+
+
+def parent_sources_by_child(edge_index: Any, labels: list[int]) -> dict[int, list[int]]:
+    parents: dict[int, set[int]] = {}
+    for edge_pos, label in enumerate(labels):
+        if label != PARENT_CHILD_LABEL:
+            continue
+        source = int(edge_index[0, edge_pos].item())
+        target = int(edge_index[1, edge_pos].item())
+        if source == target:
+            continue
+        parents.setdefault(target, set()).add(source)
+    return {target: sorted(sources) for target, sources in parents.items()}
+
+
 def node_point(
     doc: Any,
     node_boxes: dict[int, list[BBoxRef]],
@@ -348,6 +433,21 @@ def draw_edge_tag(page: Any, point: tuple[float, float], text: str, color: tuple
 def draw_index_label(page: Any, rect: Any, node_index: int, *, chunk_index: int | None) -> None:
     label = str(node_index) if chunk_index is None else f"{node_index}.{chunk_index}"
     draw_small_label(page, rect, label, color=INDEX_COLOR)
+
+
+def draw_parent_label(page: Any, rect: Any, label: str, *, color: tuple[float, float, float]) -> None:
+    import fitz
+
+    width = max(24.0, 3.5 * len(label) + 5.0)
+    height = 7.4
+    y0 = rect.y0 + 1.0
+    label_rect = fitz.Rect(rect.x0, y0, rect.x0 + width, y0 + height)
+    label_rect = keep_rect_on_page(label_rect, page)
+    try:
+        page.draw_rect(label_rect, color=color, fill=(1, 1, 1), width=0.25, fill_opacity=0.78, overlay=True)
+    except TypeError:
+        page.draw_rect(label_rect, color=color, fill=(1, 1, 1), width=0.25, overlay=True)
+    page.insert_text((label_rect.x0 + 1.1, label_rect.y1 - 1.5), label, fontsize=5.0, color=color, overlay=True)
 
 
 def draw_small_label(page: Any, rect: Any, label: str, *, color: tuple[float, float, float]) -> None:

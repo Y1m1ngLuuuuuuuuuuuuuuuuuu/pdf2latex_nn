@@ -166,6 +166,18 @@ def classify_heading_token(
 ) -> tuple[int, dict[str, Any], str] | None:
     if not token.heading_candidate:
         return None
+    if token.record.get("run_in_heading"):
+        level = int(numeric_value(token.record.get("run_in_heading_level")) or token.prefix_level or 2)
+        level = max(1, min(level, 3))
+        return (
+            level,
+            {
+                "_layout_state_locked": True,
+                "_heading_render_level": level,
+                "_run_in_heading": True,
+            },
+            "run-in-heading",
+        )
     if special_title(token.text):
         return (1, {"_heading_unnumbered": True, "_layout_state_locked": True}, "special-title")
     if token.prefix_kind in {"custom_colon", "numeric_paren"}:
@@ -321,6 +333,8 @@ def is_noise_record(record: dict[str, Any], text: str) -> bool:
 def is_heading_candidate(record: dict[str, Any], text: str, *, block_type: str, role: str) -> bool:
     if not text.strip():
         return False
+    if record.get("run_in_heading"):
+        return True
     if role in {"toc_title", "toc_entry"} or is_toc_title_text(text):
         return False
     if is_front_matter_date_text(text):

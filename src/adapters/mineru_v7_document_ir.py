@@ -425,6 +425,7 @@ def features_from_v7_item(item: dict[str, Any]) -> dict[str, float | int | bool 
         "style_baseline_size",
         "style_span_count",
         "heading_level",
+        "run_in_heading_level",
         "relative_font_size",
         "font_size",
         "page_width",
@@ -477,6 +478,11 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "style_extract_status",
         "canonical_type",
         "is_main_flow_candidate",
+        "run_in_heading",
+        "run_in_heading_number",
+        "run_in_heading_text",
+        "run_in_heading_body",
+        "run_in_heading_level",
     )
     metadata = {key: item.get(key) for key in metadata_keys if key in item}
     if include_raw_block and isinstance(item.get("block"), dict):

@@ -1355,6 +1355,8 @@ def is_visual_heading_candidate(
     text = node.text.strip()
     if not text:
         return False
+    if node.item.get("run_in_heading"):
+        return True
     layer = layout_layer_name(node.item)
     raw_type = canonical_pdf_type(node.item)
     if layer == "noise_layer":
@@ -1446,6 +1448,11 @@ def infer_visual_heading_levels(
         if node_id in document_title_ids:
             levels[node_id] = 0
             continue
+        if node.item.get("run_in_heading"):
+            value = node.item.get("run_in_heading_level")
+            if isinstance(value, (int, float)):
+                levels[node_id] = min(max(1, int(value)), 3)
+                continue
         numbered_level = title_numbering_level(node.text)
         if numbered_level is not None:
             levels[node_id] = min(max(1, numbered_level), 3)

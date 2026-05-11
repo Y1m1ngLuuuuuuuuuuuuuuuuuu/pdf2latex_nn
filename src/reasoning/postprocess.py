@@ -822,6 +822,10 @@ class TreeDecoder:
             return render_toc()
         if block_type == "toc":
             return ""
+        if node.record.get("run_in_heading"):
+            parts = render_run_in_heading_node(node, depth=depth)
+            parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+            return "\n\n".join(part for part in parts if part)
         if block_type == "title" and is_front_matter_date_text(text):
             parts = [render_textual_node(node)] if text else []
             parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
@@ -1504,6 +1508,8 @@ def is_heading_candidate_node(node: ResolvedNode, *, body_font_size: float, orde
     text = " ".join(node.text.split())
     if not text or is_page_noise_node(node):
         return False
+    if record.get("run_in_heading"):
+        return True
     block_type = canonical_render_type(record)
     if block_type == "title":
         return True
@@ -2420,6 +2426,32 @@ def render_title(text: str, *, depth: int, record: dict[str, Any] | None = None)
     title_text = strip_title_numbering(text)
     star = "*" if record.get("_heading_unnumbered") or is_unnumbered_frontmatter_title(text) else ""
     return rf"\{command}{star}{{{escape_latex(title_text)}}}"
+
+
+def render_run_in_heading_node(node: ResolvedNode, *, depth: int) -> list[str]:
+    """Render a paragraph bbox that starts with an inline visual heading."""
+
+    title_text = str(node.record.get("run_in_heading_text") or "").strip()
+    if not title_text:
+        title_text = strip_run_in_heading_from_text(node.text)[0]
+    body_text = str(node.record.get("run_in_heading_body") or "").strip()
+    if not body_text:
+        _title, body_text = strip_run_in_heading_from_text(node.text)
+
+    parts: list[str] = []
+    if title_text:
+        parts.append(render_title(title_text, depth=depth, record=node.record))
+    if body_text:
+        parts.append(render_text_with_inline_latex(body_text))
+    return parts
+
+
+def strip_run_in_heading_from_text(text: str) -> tuple[str, str]:
+    value = " ".join(str(text or "").split())
+    match = re.match(r"^\s*\d+(?:\.\d+)+\.?\s+(.+?\.)\s+(.*)$", value)
+    if not match:
+        return value, ""
+    return (re.sub(r"[\s.]+$", "", match.group(1)).strip(), match.group(2).strip())
 
 
 def is_unnumbered_frontmatter_title(text: str) -> bool:

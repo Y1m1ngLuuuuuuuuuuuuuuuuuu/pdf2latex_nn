@@ -6,6 +6,7 @@ from src.perception.reading_order import (
     filter_graph_content_items,
     fix_columnar_reading_order,
     fuse_micro_nodes,
+    refresh_content_v7_layout_metadata,
     sort_content_list_v2,
 )
 
@@ -125,6 +126,50 @@ def test_content_v7_marks_mineru_index_as_toc_metadata_and_filters_graph_items()
         "1 Introduction",
         "Intro body.",
     ]
+
+
+def test_refresh_content_v7_marks_span_based_run_in_heading():
+    payload = {
+        "items": [
+            {
+                "type": "paragraph",
+                "raw_type": "paragraph",
+                "page_idx": 0,
+                "bbox": [200, 198, 795, 335],
+                "text": "3.1. Implementation. We used the miniKanren family.",
+                "text_for_embedding": "3.1. Implementation. We used the miniKanren family.",
+                "style_spans": [
+                    {"text": "3.1.", "font_size": 10.0, "is_bold": False},
+                    {"text": "Implementation.", "font_size": 10.0, "is_bold": True},
+                    {"text": "We used the miniKanren family.", "font_size": 10.0, "is_bold": False},
+                ],
+            },
+            {
+                "type": "paragraph",
+                "raw_type": "paragraph",
+                "page_idx": 0,
+                "bbox": [200, 354, 795, 521],
+                "text": "i. kNN graph construction using Eqs. (1) and (2).",
+                "text_for_embedding": "i. kNN graph construction using Eqs. (1) and (2).",
+                "style_spans": [
+                    {"text": "i.", "font_size": 10.0, "is_bold": False},
+                    {"text": "kNN graph construction", "font_size": 10.0, "is_bold": True},
+                    {"text": "using Eqs. (1) and (2).", "font_size": 10.0, "is_bold": False},
+                ],
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    items = refreshed["items"]
+
+    assert items[0]["run_in_heading"] is True
+    assert items[0]["run_in_heading_number"] == "3.1"
+    assert items[0]["run_in_heading_text"] == "Implementation"
+    assert items[0]["run_in_heading_body"] == "We used the miniKanren family."
+    assert items[0]["heading_level"] == 2
+    assert items[0]["layout_role"] == "heading"
+    assert "run_in_heading" not in items[1]
 
 
 def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_span_separator():

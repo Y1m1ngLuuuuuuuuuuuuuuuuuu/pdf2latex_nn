@@ -78,6 +78,9 @@ LIST_MARKER_PATTERNS = (
     ("ordinal_cjk", re.compile(r"^\s*第[一二三四五六七八九十]+[，,、.．]\s*")),
 )
 
+RUN_IN_HEADING_PREFIX_RE = re.compile(r"^\s*(?P<number>\d+(?:\.\d+)+)\.?\s*$")
+RUN_IN_HEADING_INLINE_PREFIX_RE = re.compile(r"^\s*(?P<number>\d+(?:\.\d+)+)\.?\s+(?P<tail>.+)$")
+
 FULL_WIDTH_TYPES = {
     "title",
     "table",
@@ -372,6 +375,7 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
             item["layout_band_global_order"] = None
     refine_front_matter_layers(ordered)
     mark_toc_layers(ordered)
+    annotate_run_in_headings(ordered)
 
     return {
         "schema_version": "content_v7_columnfix_listmarkers",
@@ -437,6 +441,7 @@ def refresh_content_v7_layout_metadata(payload: dict[str, Any]) -> dict[str, Any
             item["layout_band_global_order"] = None
     refine_front_matter_layers(ordered)
     mark_toc_layers(ordered)
+    annotate_run_in_headings(ordered)
 
     refreshed = dict(payload)
     refreshed["schema_version"] = str(payload.get("schema_version") or "content_v7_columnfix_listmarkers")
@@ -1278,6 +1283,105 @@ def mark_toc_layers(items: list[dict[str, Any]]) -> None:
         items[index]["layout_role"] = TOC_TITLE_ROLE
         items[index]["canonical_type"] = "toc"
         items[index]["is_main_flow_candidate"] = False
+
+
+def annotate_run_in_headings(items: list[dict[str, Any]]) -> None:
+    """Mark paragraph blocks whose first spans encode a run-in heading.
+
+    Some journals render subsections as ``3.1. Bold Title. body text`` inside a
+    single physical paragraph bbox. MinerU correctly keeps one bbox, but the
+    structure parser still needs to see the heading boundary.  We only trust the
+    signal when PyMuPDF spans show a dotted numeric prefix followed immediately
+    by a bold title span; plain numbered list items remain untouched.
+    """
+
+    for item in items:
+        info = detect_run_in_heading_from_spans(item)
+        if info is None:
+            continue
+        item.update(info)
+        item["layout_role"] = "heading"
+        item["is_heading_candidate"] = True
+        item["heading_level"] = info["run_in_heading_level"]
+
+
+def detect_run_in_heading_from_spans(item: dict[str, Any]) -> dict[str, Any] | None:
+    layer = str(item.get("layout_layer") or "").casefold()
+    role = str(item.get("layout_role") or "").casefold()
+    raw_type = _layout_raw_type(item)
+    if layer in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_METADATA} or role in {TOC_TITLE_ROLE, TOC_ENTRY_ROLE}:
+        return None
+    if raw_type not in {"paragraph", "text", "paragraph_text", "body"}:
+        return None
+    if item.get("has_list_marker") or item.get("list_marker"):
+        return None
+    spans = item.get("style_spans")
+    if not isinstance(spans, list) or len(spans) < 2:
+        return None
+
+    normalized_spans: list[tuple[int, str, bool]] = []
+    for index, span in enumerate(spans):
+        if not isinstance(span, dict):
+            continue
+        text = str(span.get("text") or span.get("content") or "").strip()
+        if not text:
+            continue
+        normalized_spans.append((index, text, bool(span.get("is_bold"))))
+    if len(normalized_spans) < 2:
+        return None
+
+    first_index, first_text, first_bold = normalized_spans[0]
+    prefix_match = RUN_IN_HEADING_PREFIX_RE.match(first_text)
+    inline_match = RUN_IN_HEADING_INLINE_PREFIX_RE.match(first_text)
+    title_parts: list[str] = []
+    body_start_position = 1
+    number = ""
+
+    if prefix_match:
+        number = prefix_match.group("number")
+        for position, (_span_index, text, is_bold) in enumerate(normalized_spans[1:], start=1):
+            if not is_bold:
+                if not title_parts:
+                    return None
+                body_start_position = position
+                break
+            title_parts.append(text)
+            body_start_position = position + 1
+            if text.rstrip().endswith((".", ":")):
+                break
+    elif inline_match and first_bold:
+        number = inline_match.group("number")
+        tail = inline_match.group("tail").strip()
+        if not tail:
+            return None
+        title_parts.append(tail)
+        body_start_position = 1
+    else:
+        return None
+
+    title_raw = join_text_fragments(title_parts).strip()
+    title_text = re.sub(r"[\s.:]+$", "", title_raw).strip()
+    if not title_text or len(title_text) < 3 or len(title_text) > 120:
+        return None
+    if not any(char.isalpha() for char in title_text):
+        return None
+
+    body_parts = [text for _span_index, text, _is_bold in normalized_spans[body_start_position:]]
+    body_text = join_text_fragments(body_parts).strip()
+    full_text = _layout_text(item)
+    if not body_text:
+        stripped_prefix = RUN_IN_HEADING_INLINE_PREFIX_RE.sub("", full_text, count=1).strip()
+        body_text = stripped_prefix[len(title_raw) :].lstrip(" .:") if stripped_prefix.startswith(title_raw) else ""
+
+    level = min(max(2, number.count(".") + 1), 3)
+    return {
+        "run_in_heading": True,
+        "run_in_heading_number": number,
+        "run_in_heading_text": title_text,
+        "run_in_heading_body": body_text,
+        "run_in_heading_level": level,
+        "run_in_heading_prefix_span_index": first_index,
+    }
 
 
 def _looks_like_author_name(text: str) -> bool:
