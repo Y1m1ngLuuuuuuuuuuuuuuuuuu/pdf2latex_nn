@@ -7,6 +7,7 @@ from src.reasoning.label_generator import (
     PdfAlignmentNode,
     build_visual_hierarchy,
     clean_text,
+    visual_parent_pair_is_quality_gate_required,
 )
 from src.reasoning.tex_relation_labeler import TexRelationLabel
 
@@ -505,6 +506,44 @@ def test_visual_hierarchy_closes_references_before_non_reference_float():
 
     assert hierarchy.parent_by_node[1] == 0
     assert hierarchy.parent_by_node[2] is None
+
+
+def test_visual_parent_quality_gate_ignores_float_and_misplaced_reference_children():
+    section = PdfAlignmentNode(
+        node_index=0,
+        text="IV. Conclusions",
+        clean=clean_text("IV. Conclusions"),
+        item={"type": "title", "text_for_embedding": "IV. Conclusions"},
+    )
+    paragraph = PdfAlignmentNode(
+        node_index=1,
+        text="The conclusion text continues.",
+        clean=clean_text("The conclusion text continues."),
+        item={"type": "paragraph", "text_for_embedding": "The conclusion text continues."},
+    )
+    figure = PdfAlignmentNode(
+        node_index=2,
+        text="Fig. S5. Supplementary result.",
+        clean=clean_text("Fig. S5. Supplementary result."),
+        item={"type": "chart", "text_for_embedding": "Fig. S5. Supplementary result."},
+    )
+    reference_item = PdfAlignmentNode(
+        node_index=3,
+        text="[3] A. Author. Paper.",
+        clean=clean_text("[3] A. Author. Paper."),
+        item={"type": "list", "list_type": "reference_list", "text_for_embedding": "[3] A. Author. Paper."},
+    )
+    references = PdfAlignmentNode(
+        node_index=4,
+        text="References",
+        clean=clean_text("References"),
+        item={"type": "title", "text_for_embedding": "References"},
+    )
+
+    assert visual_parent_pair_is_quality_gate_required(section, paragraph)
+    assert not visual_parent_pair_is_quality_gate_required(section, figure)
+    assert not visual_parent_pair_is_quality_gate_required(section, reference_item)
+    assert visual_parent_pair_is_quality_gate_required(references, reference_item)
 
 
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):

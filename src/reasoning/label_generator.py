@@ -1097,6 +1097,11 @@ class AlignmentLabeler:
             child_item = self.pdf_nodes[child_index].item if 0 <= child_index < len(self.pdf_nodes) else {}
             if relation_layers_are_incompatible(parent_item, child_item):
                 continue
+            if not visual_parent_pair_is_quality_gate_required(
+                self.pdf_nodes[parent_index],
+                self.pdf_nodes[child_index],
+            ):
+                continue
             expected_pairs.append((parent_index, child_index))
         if not expected_pairs:
             return {
@@ -1367,6 +1372,26 @@ def reference_scope_must_close_before_item(*, parent_text: str, item: dict[str, 
     if parent_kind not in {"references", "bibliography"}:
         return False
     return canonical_pdf_merge_type(item) != "reference"
+
+
+def visual_parent_pair_is_quality_gate_required(parent: PdfAlignmentNode, child: PdfAlignmentNode) -> bool:
+    """Return whether a visual parent edge is mandatory for data quality.
+
+    The quality gate is meant to catch missing train-critical hierarchy edges:
+    headings/run-in anchors to body text, equations, lists, and local
+    reference-list content.  Floats and complex reference columns can be
+    physically interleaved in two-column layouts, so their anchoring is handled
+    by dedicated float/reference logic and should not fail a whole document
+    just because a section-scope candidate edge was intentionally not sampled.
+    """
+
+    child_kind = canonical_pdf_merge_type(child.item)
+    if child_kind in {"figure", "image", "chart", "table", "algorithm", "code"}:
+        return False
+    if child_kind == "reference":
+        parent_kind = normalized_heading_keyword(parent.text)
+        return parent_kind in {"references", "bibliography"}
+    return True
 
 
 def normalized_heading_keyword(text: str) -> str:
