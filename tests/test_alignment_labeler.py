@@ -587,6 +587,85 @@ def test_visual_hierarchy_keeps_reference_like_paragraphs_under_references():
     assert not visual_parent_pair_is_quality_gate_required(nodes[2], nodes[3])
 
 
+def test_visual_parent_quality_gate_ignores_author_biography_blocks():
+    section = PdfAlignmentNode(
+        node_index=0,
+        text="7. Conclusion",
+        clean=clean_text("7. Conclusion"),
+        item={"type": "title", "text_for_embedding": "7. Conclusion"},
+    )
+    biography = PdfAlignmentNode(
+        node_index=1,
+        text=(
+            "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+            "Dr. Hobbs received her Ph.D. from the University of Michigan and researches autonomy."
+        ),
+        clean=clean_text(
+            "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+            "Dr. Hobbs received her Ph.D. from the University of Michigan and researches autonomy."
+        ),
+        item={
+            "type": "paragraph",
+            "text_for_embedding": (
+                "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                "Dr. Hobbs received her Ph.D. from the University of Michigan and researches autonomy."
+            ),
+        },
+    )
+
+    assert not visual_parent_pair_is_quality_gate_required(section, biography)
+
+
+def test_visual_hierarchy_moves_author_biography_continuations_out_of_section_scope():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="7. Conclusion",
+            clean=clean_text("7. Conclusion"),
+            item={"type": "title", "text_for_embedding": "7. Conclusion"},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="The paper concludes with a summary of the method.",
+            clean=clean_text("The paper concludes with a summary of the method."),
+            item={"type": "paragraph", "text_for_embedding": "The paper concludes with a summary of the method."},
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text=(
+                "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                "Dr. Hobbs received her Ph.D. from the University of Michigan."
+            ),
+            clean=clean_text(
+                "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                "Dr. Hobbs received her Ph.D. from the University of Michigan."
+            ),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": (
+                    "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                    "Dr. Hobbs received her Ph.D. from the University of Michigan."
+                ),
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications.",
+            clean=clean_text("tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications.",
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] is None
+    assert hierarchy.parent_by_node[3] is None
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return

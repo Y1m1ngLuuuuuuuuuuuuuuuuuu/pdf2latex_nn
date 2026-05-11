@@ -1236,6 +1236,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
     active_list_next_number: int | None = None
     active_list_last_pos = -1
     recent_list_intro_by_scope: dict[int | None, tuple[int, int]] = {}
+    in_author_biography_backmatter = False
     effective_pos = 0
 
     for node in nodes:
@@ -1251,6 +1252,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         effective_pos += 1
         if node_id in heading_ids:
+            in_author_biography_backmatter = False
             active_list_parent = None
             active_list_next_number = None
             active_list_last_pos = -1
@@ -1273,6 +1275,14 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         list_number = ordered_list_marker_number(node.text)
         parent_id = stack[-1][0] if stack else None
+        if item_looks_like_author_biography(node.item) or in_author_biography_backmatter:
+            parent_by_node[node_id] = None
+            children_by_parent.setdefault(None, []).append(node_id)
+            in_author_biography_backmatter = True
+            active_list_parent = None
+            active_list_next_number = None
+            active_list_last_pos = -1
+            continue
         if stack and reference_scope_must_close_before_item(parent_text=nodes[stack[-1][0]].text, item=node.item):
             stack.pop()
             parent_id = stack[-1][0] if stack else None
@@ -1393,7 +1403,36 @@ def visual_parent_pair_is_quality_gate_required(parent: PdfAlignmentNode, child:
         return child_kind == "reference"
     if child_kind == "reference":
         return parent_kind in {"references", "bibliography"}
+    if item_looks_like_author_biography(child.item):
+        return False
     return True
+
+
+def item_looks_like_author_biography(item: dict[str, Any]) -> bool:
+    text = stringify_text_payload(
+        item.get("text_for_embedding") or item.get("text") or item.get("merged_text") or item.get("text_preview")
+    )
+    compact = " ".join(str(text or "").split())
+    if len(compact) < 60:
+        return False
+    first_clause = compact[:140]
+    if not re.match(r"^[A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,4}\s+(?:is|was|received|earned)\b", first_clause):
+        return False
+    lower = compact.casefold()
+    return any(
+        signal in lower
+        for signal in (
+            " is a ",
+            " is the ",
+            " received ",
+            " earned ",
+            " ph.d",
+            " m.s.",
+            " b.s.",
+            " university",
+            " research",
+        )
+    )
 
 
 def item_looks_like_reference_entry(item: dict[str, Any]) -> bool:
