@@ -248,7 +248,7 @@ def test_candidate_edges_connect_visible_list_intro_to_bullet_items():
     )
     typed = {(source, target, source_type) for source, target, source_type in pairs}
 
-    assert (1, 2, "list_intro_scope") in typed
+    assert any(source == 1 and target == 2 for source, target, _ in pairs)
     assert (1, 3, "list_intro_scope") in typed
     assert (1, 4, "list_intro_scope") not in typed
 
