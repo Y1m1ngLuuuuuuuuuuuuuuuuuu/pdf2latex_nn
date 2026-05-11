@@ -1,0 +1,156 @@
+{
+  "schema_version": "ablation_matrix_v1",
+  "description": "Document-level ablations for v7 PDF graph relation modeling. All experiments consume the same clean labeled .pt manifest and never mutate source graphs.",
+  "common": {
+    "root": "data/06_graph_features_v7/ablation_dataset",
+    "manifest": "data/00_manifests/v7_tocfilter_2000_labelerfix_20260510_labeled.json",
+    "output_root": "data/09_eval_reports/ablations_v1",
+    "epochs": 30,
+    "batch_size": 8,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "hidden_dim": 128,
+    "heads": 4,
+    "num_layers": 3,
+    "predictor_hidden_dims": "1024,512,128",
+    "semantic_hidden_dim": 96,
+    "layout_hidden_dim": 64,
+    "dropout": 0.1,
+    "device": "auto",
+    "num_workers": 0,
+    "seed": 7,
+    "selection_metric": "val_positive_macro_f1"
+  },
+  "calibration": {
+    "enabled": true,
+    "tau_min": 0.05,
+    "tau_max": 0.95,
+    "tau_step": 0.01,
+    "mode": "threshold_priority"
+  },
+  "experiments": [
+    {
+      "name": "A00_full_ce_ohem",
+      "purpose": "Main model: full v7 features, GATv2, deep directional head, CE with OHEM hard negatives.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "train_negative_dropout": 0.0
+      }
+    },
+    {
+      "name": "A01_no_scibert",
+      "purpose": "Measure how much SciBERT semantics help after layout features and punctuation probes exist.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_node_groups": "semantic"
+      }
+    },
+    {
+      "name": "A02_semantic_only",
+      "purpose": "Opposite control: keep SciBERT, remove all non-semantic node features.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_node_groups": "layout_all"
+      }
+    },
+    {
+      "name": "A03_no_reading_flow",
+      "purpose": "Remove scroll-y, sequence, column, band, and flow cues to quantify v7 reading-flow value.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_node_groups": "scroll,sequence,column,layout_layer,flow_context",
+        "ablate_edge_groups": "index_bins,layout_flow"
+      }
+    },
+    {
+      "name": "A04_no_style_title",
+      "purpose": "Remove PyMuPDF style stats and title probes to test heading hierarchy dependence.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_node_groups": "style,title",
+        "ablate_edge_groups": "typography"
+      }
+    },
+    {
+      "name": "A05_no_punctuation_probes",
+      "purpose": "Remove terminal-punctuation and hyphen probes to test MERGE boundary signal.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_edge_groups": "punctuation"
+      }
+    },
+    {
+      "name": "A06_no_gutter_band_barriers",
+      "purpose": "Remove cross-column gutter and band-flow edge features to quantify physical barrier value.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "ablate_edge_groups": "overlap_gutter,layout_flow"
+      }
+    },
+    {
+      "name": "A07_shallow_predictor",
+      "purpose": "Replace deep directional edge MLP with a shallow head to measure predictor capacity.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "predictor_hidden_dims": "128",
+        "predictor_layer_norm": false
+      }
+    },
+    {
+      "name": "A08_no_ohem",
+      "purpose": "Same full model without OHEM, showing long-tail hard-negative effect.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 0.0,
+        "train_negative_dropout": 0.0
+      }
+    },
+    {
+      "name": "A09_focal_inverse",
+      "purpose": "Focal/inverse-weight comparison against CE+OHEM.",
+      "args": {
+        "loss": "focal",
+        "class_weights": "inverse",
+        "positive_weight_multiplier": 2.0,
+        "gamma": 2.0,
+        "ohem_negative_ratio": 0.0,
+        "train_negative_dropout": 0.0
+      }
+    },
+    {
+      "name": "A10_random_none_dropout",
+      "purpose": "Random NONE dropout comparison; expected to improve recall but often hurts precision.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "train_negative_dropout": 0.8,
+        "ohem_negative_ratio": 0.0
+      }
+    }
+  ]
+}

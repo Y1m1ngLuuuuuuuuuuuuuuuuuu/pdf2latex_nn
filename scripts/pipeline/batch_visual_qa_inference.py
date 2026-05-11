@@ -53,6 +53,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compile-timeout", type=int, default=180)
     parser.add_argument("--skip-compile", action="store_true")
     parser.add_argument("--clean-output-dir", action="store_true")
+    parser.add_argument(
+        "--render-table-crops",
+        action="store_true",
+        help="Generate table crop images in each QA output assets/ directory. Disabled by default to save disk.",
+    )
     return parser
 
 
@@ -94,6 +99,7 @@ def main() -> int:
                 compile_runs=args.compile_runs,
                 compile_timeout=args.compile_timeout,
                 skip_compile=args.skip_compile,
+                render_table_crops=args.render_table_crops,
             )
         except Exception as exc:  # noqa: BLE001 - QA must keep the batch moving.
             doc_dir = args.output_dir / f"{index:02d}_{safe_filename(str(doc.get('document_id', 'unknown')))}"
@@ -193,6 +199,7 @@ def run_one_document(
     compile_runs: int,
     compile_timeout: int,
     skip_compile: bool,
+    render_table_crops: bool,
 ) -> dict[str, Any]:
     document_id = str(doc["document_id"])
     safe_id = safe_filename(document_id)
@@ -215,9 +222,20 @@ def run_one_document(
     torch.save(logits, logits_path)
 
     node_records = load_node_records(content_json, data)
-    root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
+    local_decoder = TreeDecoder(
+        TreeDecoderConfig(
+            merge_threshold=decoder.config.merge_threshold,
+            parent_threshold=decoder.config.parent_threshold,
+            require_merge_argmax=decoder.config.require_merge_argmax,
+            require_parent_argmax=decoder.config.require_parent_argmax,
+            source_pdf=str(pdf_path) if render_table_crops else None,
+            table_asset_output_dir=str(doc_dir / "assets") if render_table_crops else None,
+            table_asset_latex_prefix="assets",
+        )
+    )
+    root = local_decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
     title = infer_document_title(node_records)
-    tex = decoder.render_document(root, title=title)
+    tex = local_decoder.render_document(root, title=title, document_metadata=getattr(data, "document_metadata", None))
     tex_path = doc_dir / "generated.tex"
     tex_path.write_text(tex, encoding="utf-8")
 

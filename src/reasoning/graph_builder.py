@@ -26,10 +26,16 @@ from src.perception.schema import (
     STYLE_STAT_FIELDS,
     TITLE_STRUCTURE_FIELDS,
 )
-from src.perception.reading_order import LAYOUT_LAYER_MAIN_TEXT, fuse_micro_nodes, style_spans_text
+from src.perception.reading_order import (
+    LAYOUT_LAYER_MAIN_TEXT,
+    document_toc_metadata,
+    filter_graph_content_items,
+    fuse_micro_nodes,
+    style_spans_text,
+)
 from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
 from src.perception.xy_cut import sort_node_indices_by_reading_order
-from src.perception.title_features import title_numbering_level, title_pattern_flags
+from src.perception.title_features import title_numbering_level, title_numbering_path, title_pattern_flags
 from src.pipeline.v7_contract import V7_GRAPH_SCHEMA_VERSION, V7_PIPELINE_VERSION
 
 PAGE_SIZE = 1000.0
@@ -46,6 +52,7 @@ EDGE_SOURCE_TYPES = [
     "list_run_scope",
 ]
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+ALPHA_OR_ROMAN_HEADING_RE = re.compile(r"^\s*([A-Za-z]+)[\.\)]\s+(.*)$")
 TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
@@ -181,7 +188,9 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
 
     payload = _load_content_v7_payload(input_path)
     raw_items = load_content_v7(input_path)
-    items = fuse_micro_nodes(raw_items) if config.fuse_micro_nodes else raw_items
+    document_metadata = document_toc_metadata(raw_items)
+    graph_items = filter_graph_content_items(raw_items)
+    items = fuse_micro_nodes(graph_items) if config.fuse_micro_nodes else graph_items
     texts = [text_for_embedding(item) for item in items]
     regime_order = v7_reading_order_indices(items)
     regime_ranks = _ranks_from_order(regime_order, len(items))
@@ -257,6 +266,12 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     }
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
+    data.document_metadata = document_metadata
+    data.content_filter = {
+        "excluded_roles": ["toc_title", "toc_entry"],
+        "node_count_before_filter": len(raw_items),
+        "node_count_after_filter": len(graph_items),
+    }
     data.pipeline_version = V7_PIPELINE_VERSION
     data.graph_schema_version = V7_GRAPH_SCHEMA_VERSION
     data.content_schema_version = str(payload.get("schema_version") or "")
@@ -835,6 +850,7 @@ def build_candidate_edge_pairs(
     ranks = _ranks_from_order(order, node_count)
     if column_ids is None:
         column_ids = infer_column_ids(items)
+    body_font_size = infer_document_body_font_size(items) or infer_document_baseline_font_size(items)
     for pos in range(max(0, node_count - 1)):
         source_idx = order[pos]
         target_idx = order[pos + 1]
@@ -876,6 +892,7 @@ def build_candidate_edge_pairs(
         column_ids=column_ids,
         add_edge=add_edge,
         max_window=long_sight_window,
+        body_font_size=body_font_size,
     )
     add_float_skip_edges(
         items,
@@ -883,6 +900,7 @@ def build_candidate_edge_pairs(
         add_edge=add_edge,
         max_window=float_skip_window,
         bidirectional=bidirectional,
+        body_font_size=body_font_size,
     )
     add_scope_anchor_edges(
         items,
@@ -890,6 +908,7 @@ def build_candidate_edge_pairs(
         ranks=ranks,
         add_edge=add_edge,
         max_window=scope_anchor_window,
+        body_font_size=body_font_size,
     )
 
     return edge_pairs
@@ -902,6 +921,7 @@ def add_same_column_long_sight_edges(
     column_ids: list[int],
     add_edge: Any,
     max_window: int,
+    body_font_size: float = 0.0,
 ) -> None:
     """Add sparse long sight-line edges inside the same logical column."""
 
@@ -918,7 +938,7 @@ def add_same_column_long_sight_edges(
         for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
             target_idx = order[target_pos]
             target = items[target_idx]
-            if _is_heading_item(target):
+            if _is_heading_item(target, body_font_size=body_font_size):
                 break
             target_bbox = _first_bbox(target.get("bbox"))
             target_page = _first_item_page(target)
@@ -942,6 +962,7 @@ def add_float_skip_edges(
     add_edge: Any,
     max_window: int,
     bidirectional: bool,
+    body_font_size: float = 0.0,
 ) -> None:
     """Connect text before and after large non-text barriers."""
 
@@ -956,7 +977,7 @@ def add_float_skip_edges(
         for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
             target_idx = order[target_pos]
             target = items[target_idx]
-            if _is_heading_item(target):
+            if _is_heading_item(target, body_font_size=body_font_size):
                 break
             if _is_structural_skip_item(target):
                 skipped_structural = True
@@ -979,6 +1000,7 @@ def add_scope_anchor_edges(
     ranks: list[int],
     add_edge: Any,
     max_window: int,
+    body_font_size: float = 0.0,
 ) -> None:
     """Add heading/reference/list anchors to their local logical scope."""
 
@@ -986,18 +1008,18 @@ def add_scope_anchor_edges(
         return
     for source_pos, source_idx in enumerate(order):
         source = items[source_idx]
-        if _is_reference_heading(source):
-            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window, reference_only=True):
+        if _is_reference_heading(source, body_font_size=body_font_size):
+            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window, reference_only=True, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "scope_anchor")
             continue
-        if _is_heading_item(source):
-            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window):
+        if _is_heading_item(source, body_font_size=body_font_size):
+            for target_idx in _iter_scope_targets(items, order, source_pos, max_window=max_window, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "scope_anchor")
-            for target_idx in _iter_heading_scope_targets(items, order, source_pos, max_window=max_window):
+            for target_idx in _iter_heading_scope_targets(items, order, source_pos, max_window=max_window, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "scope_anchor")
             continue
         if _is_list_item_like(source):
-            for target_idx in _iter_list_run_targets(items, order, source_pos, max_window=max_window):
+            for target_idx in _iter_list_run_targets(items, order, source_pos, max_window=max_window, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "list_run_scope")
 
 
@@ -1008,12 +1030,13 @@ def _iter_scope_targets(
     *,
     max_window: int,
     reference_only: bool = False,
+    body_font_size: float = 0.0,
 ) -> list[int]:
     targets: list[int] = []
     for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
         target_idx = order[target_pos]
         target = items[target_idx]
-        if _is_heading_item(target):
+        if _is_heading_item(target, body_font_size=body_font_size):
             break
         if _is_auxiliary_item(target):
             continue
@@ -1031,18 +1054,19 @@ def _iter_heading_scope_targets(
     source_pos: int,
     *,
     max_window: int,
+    body_font_size: float = 0.0,
 ) -> list[int]:
     """Return lower-level heading nodes inside the source heading's scope."""
 
     source = items[order[source_pos]]
-    source_level = _heading_level(source)
+    source_level = _heading_level(source, body_font_size=body_font_size)
     if source_level is None:
         return []
     targets: list[int] = []
     for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
         target_idx = order[target_pos]
         target = items[target_idx]
-        if not _is_heading_item(target):
+        if not _is_heading_item(target, body_font_size=body_font_size):
             continue
         target_level = _heading_explicit_level(target)
         if target_level is None:
@@ -1060,13 +1084,14 @@ def _iter_list_run_targets(
     source_pos: int,
     *,
     max_window: int,
+    body_font_size: float = 0.0,
 ) -> list[int]:
     targets: list[int] = []
     saw_next_marker = False
     for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
         target_idx = order[target_pos]
         target = items[target_idx]
-        if _is_heading_item(target):
+        if _is_heading_item(target, body_font_size=body_font_size):
             break
         if _is_list_item_like(target):
             saw_next_marker = True
@@ -1671,6 +1696,7 @@ def layout_band_column_id(item: dict[str, Any]) -> int | None:
             return 1
         if item.get("column_fix_span") == "FULL_SPAN":
             return 2
+        value = item.get("column_id")
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -1772,12 +1798,33 @@ def _is_auxiliary_item(item: dict[str, Any]) -> bool:
     return raw_type in AUXILIARY_TYPES or canonical in AUXILIARY_TYPES
 
 
-def _is_heading_item(item: dict[str, Any]) -> bool:
-    return canonical_type(item) == "title"
+def _is_heading_item(item: dict[str, Any], *, body_font_size: float = 0.0) -> bool:
+    if canonical_type(item) == "title":
+        return True
+    role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
+    if role == "heading":
+        return True
+    if item.get("list_marker") or role in {"list_item", "list"} or canonical_type(item) == "list":
+        return False
+    if canonical_type(item) not in {"text", "reference"}:
+        return False
+    text = _item_text(item)
+    if not _looks_like_scope_heading_text(text):
+        return False
+    if LIST_MARKER_RE.match(text) and title_numbering_path(text) is None:
+        return False
+    if title_numbering_path(text) is not None:
+        return True
+    font_size = _item_font_size(item)
+    if body_font_size > 0 and font_size >= body_font_size * 1.18 and _looks_like_title_case_heading_text(text):
+        return True
+    if body_font_size > 0 and font_size >= body_font_size * 1.12 and _item_is_bold(item) and _looks_like_title_case_heading_text(text):
+        return True
+    return False
 
 
-def _heading_level(item: dict[str, Any]) -> int | None:
-    if not _is_heading_item(item):
+def _heading_level(item: dict[str, Any], *, body_font_size: float = 0.0) -> int | None:
+    if not _is_heading_item(item, body_font_size=body_font_size):
         return None
     numbered_level = _heading_explicit_level(item)
     if numbered_level is not None:
@@ -1789,18 +1836,70 @@ def _heading_explicit_level(item: dict[str, Any]) -> int | None:
     numbered_level = title_numbering_level(_item_text(item))
     if numbered_level is not None:
         return numbered_level
+    alpha_level = _alpha_or_roman_heading_level(_item_text(item))
+    if alpha_level is not None:
+        return alpha_level
+    path = title_numbering_path(_item_text(item))
+    if path is not None:
+        return min(max(1, len(path)), 3)
     value = item.get("heading_level")
     if isinstance(value, int) and value > 0:
         return value
     return None
 
 
-def _is_reference_heading(item: dict[str, Any]) -> bool:
-    if not _is_heading_item(item):
+def _is_reference_heading(item: dict[str, Any], *, body_font_size: float = 0.0) -> bool:
+    if not _is_heading_item(item, body_font_size=body_font_size):
         return False
     text = _item_text(item).strip().lower()
     normalized = re.sub(r"[^a-z]", "", text)
     return normalized in {"references", "bibliography"}
+
+
+def _looks_like_scope_heading_text(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value or len(value) > 160:
+        return False
+    if "@" in value or "\\@" in value or value.count(",") >= 2:
+        return False
+    if value.endswith((".", "。", "?", "!", "？", "！")):
+        return False
+    return True
+
+
+def _alpha_or_roman_heading_level(text: str) -> int | None:
+    match = ALPHA_OR_ROMAN_HEADING_RE.match(" ".join(str(text or "").split()))
+    if not match:
+        return None
+    token = match.group(1).upper()
+    tail = match.group(2)
+    if len(token) > 1 or (token in {"I", "V", "X", "L", "C", "D", "M"} and _looks_like_all_caps_heading_text(tail)):
+        return 1
+    return 2
+
+
+def _looks_like_all_caps_heading_text(text: str) -> bool:
+    letters = [char for char in str(text or "") if char.isalpha()]
+    if len(letters) < 4:
+        return False
+    uppercase = sum(1 for char in letters if char.isupper())
+    return uppercase / max(1, len(letters)) >= 0.75
+
+
+def _looks_like_title_case_heading_text(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if title_numbering_path(value) is not None:
+        return True
+    tokens = [token.strip("()[]{}:;,.") for token in re.split(r"\s+", value) if token.strip("()[]{}:;,.")]
+    meaningful = [token for token in tokens if any(char.isalpha() for char in token)]
+    if not meaningful:
+        return False
+    heading_like = 0
+    for token in meaningful:
+        letters = [char for char in token if char.isalpha()]
+        if letters and (letters[0].isupper() or sum(char.isupper() for char in letters) / max(1, len(letters)) >= 0.6):
+            heading_like += 1
+    return heading_like / max(1, len(meaningful)) >= 0.6
 
 
 def _is_scope_child_candidate(item: dict[str, Any]) -> bool:

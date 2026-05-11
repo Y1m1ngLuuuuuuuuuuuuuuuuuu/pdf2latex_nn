@@ -36,6 +36,7 @@ def test_merge_raw_spans_state_machine_merges_equal_style_only():
             "is_italic": False,
             "is_inline_math": False,
             "is_inline_code": False,
+            "bbox": [10, 10, 30, 20],
         },
         {
             "text": " world",
@@ -45,6 +46,7 @@ def test_merge_raw_spans_state_machine_merges_equal_style_only():
             "is_italic": False,
             "is_inline_math": False,
             "is_inline_code": False,
+            "bbox": [31, 10, 60, 20],
         },
         {
             "text": "!",
@@ -62,6 +64,7 @@ def test_merge_raw_spans_state_machine_merges_equal_style_only():
     assert len(merged) == 2
     assert merged[0]["text"] == "hello world"
     assert merged[0]["char_count"] == 11
+    assert merged[0]["bbox"] == [10.0, 10.0, 60.0, 20.0]
     assert merged[1]["text"] == "!"
 
 

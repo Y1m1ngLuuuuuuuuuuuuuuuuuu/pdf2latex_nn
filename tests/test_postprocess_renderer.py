@@ -1,4 +1,5 @@
 from src.generation.latex_renderer import RenderConfig, render_latex_document
+from src.generation.latex_renderer import render_equation as render_generation_equation
 from src.reasoning.postprocess import (
     MERGE,
     PARENT_CHILD,
@@ -9,6 +10,7 @@ from src.reasoning.postprocess import (
     build_resolved_tree,
     decode_relations_with_arborescence,
     escape_latex,
+    render_equation,
     safe_verbatim_text,
 )
 
@@ -272,7 +274,7 @@ def test_tree_decoder_deduplicates_semantic_ghost_titles_and_reroutes_edges():
 
     assert [child.text for child in root.children] == ["References."]
     assert [child.text for child in root.children[0].children] == ["A cited work."]
-    assert tex.count(r"\section{References.}") == 1
+    assert tex.count(r"\section*{References.}") == 1
     assert "REFERENCES" not in tex
 
 
@@ -413,7 +415,7 @@ def test_tree_decoder_lifts_matching_first_title_into_document_title():
     assert r"\title{Paper\_50\%}" in tex
     assert r"\section{Paper\_50\%}" not in tex
     assert "Author A" in tex
-    assert r"\section{Abstract}" in tex
+    assert r"\section*{Abstract}" in tex
 
 
 def test_tree_decoder_adaptively_renders_numbered_title_levels():
@@ -433,6 +435,135 @@ def test_tree_decoder_adaptively_renders_numbered_title_levels():
     assert "1.1 Background" not in tex
     assert "1.1.1 Details" not in tex
     assert "II. Related Work" not in tex
+
+
+def test_tree_decoder_renders_abstract_unnumbered_and_bare_numeric_intro_as_section():
+    records = [
+        {"type": "title", "text": "Paper Title", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 0, "style_baseline_size": 20.0},
+        {"type": "paragraph", "text": "Author A", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 1, "style_baseline_size": 12.0},
+        {"type": "title", "text": "Abstract", "layout_role": "abstract", "layout_layer": "metadata_layer", "global_order": 2, "style_baseline_size": 11.0},
+        {"type": "paragraph", "text": "Abstract body.", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 3, "style_baseline_size": 11.0},
+        {"type": "title", "text": "1 Introduction", "layout_role": "heading", "layout_layer": "main_text_flow", "global_order": 4, "style_baseline_size": 17.0, "layout_band_type": "double_column", "layout_band_column": "left"},
+        {"type": "paragraph", "text": "Intro body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 5, "style_baseline_size": 12.0},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []), title="Paper Title")
+
+    assert r"\section*{Abstract}" in tex
+    assert r"\section{Introduction}" in tex
+    assert r"\subsection*{Introduction}" not in tex
+    assert tex.index(r"\section*{Abstract}") < tex.index("Abstract body.")
+    assert tex.index("Abstract body.") < tex.index(r"\section{Introduction}")
+
+
+def test_tree_decoder_does_not_promote_frontmatter_date_to_section():
+    records = [
+        {"type": "title", "text": "Paper Title", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 0, "style_baseline_size": 20.0},
+        {"type": "title", "text": "25 March 2025", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 1, "style_baseline_size": 12.0},
+        {"type": "title", "text": "Abstract", "layout_role": "abstract", "layout_layer": "metadata_layer", "global_order": 2, "style_baseline_size": 11.0},
+        {"type": "paragraph", "text": "Abstract body.", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 3, "style_baseline_size": 11.0},
+        {"type": "title", "text": "1 Introduction", "layout_role": "heading", "layout_layer": "main_text_flow", "global_order": 4, "style_baseline_size": 17.0},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []), title="Paper Title")
+
+    assert "25 March 2025" in tex
+    assert r"\section{March 2025}" not in tex
+    assert r"\section{25 March 2025}" not in tex
+    assert tex.index("25 March 2025") < tex.index(r"\section*{Abstract}")
+    assert r"\section{Introduction}" in tex
+
+
+def test_tree_decoder_renders_toc_title_as_latex_tableofcontents_and_skips_ocr_entries():
+    records = [
+        {"type": "title", "text": "Paper Title", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 0},
+        {"type": "title", "text": "Contents", "layout_role": "toc_title", "layout_layer": "metadata_layer", "global_order": 1},
+        {"type": "index", "text": "1 Introduction 3 2 Method 4", "layout_role": "toc_entry", "layout_layer": "metadata_layer", "global_order": 2},
+        {"type": "title", "text": "1 Introduction", "layout_role": "heading", "layout_layer": "main_text_flow", "global_order": 3},
+        {"type": "paragraph", "text": "Intro body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 4},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []), title="Paper Title")
+
+    assert r"\tableofcontents" in tex
+    assert r"\section{Contents}" not in tex
+    assert "1 Introduction 3 2 Method 4" not in tex
+    assert tex.index(r"\tableofcontents") < tex.index(r"\section{Introduction}")
+
+
+def test_tree_decoder_inserts_toc_from_graph_document_metadata_after_filtering_toc_nodes():
+    records = [
+        {"type": "title", "text": "Paper Title", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 0},
+        {"type": "title", "text": "1 Introduction", "layout_role": "heading", "layout_layer": "main_text_flow", "global_order": 3},
+        {"type": "paragraph", "text": "Intro body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 4},
+    ]
+
+    tex = TreeDecoder().render_document(
+        build_resolved_tree(records, []),
+        title="Paper Title",
+        document_metadata={"has_toc": True, "toc_order": 1, "toc_page_idx": 1},
+    )
+
+    assert r"\tableofcontents" in tex
+    assert tex.index(r"\tableofcontents") < tex.index(r"\section{Introduction}")
+
+
+def test_generation_renderer_does_not_strip_frontmatter_date():
+    root = ResolvedNode(
+        node_id=-1,
+        record={},
+        children=[
+            ResolvedNode(
+                node_id=0,
+                record={"type": "title", "text": "25 March 2025", "layout_role": "front_matter", "layout_layer": "metadata_layer"},
+                merged_node_ids=[0],
+            ),
+            ResolvedNode(
+                node_id=1,
+                record={"type": "title", "text": "1 Introduction", "layout_role": "heading", "layout_layer": "main_text_flow"},
+                merged_node_ids=[1],
+            ),
+        ],
+    )
+
+    tex = render_latex_document(root, RenderConfig())
+
+    assert "25 March 2025" in tex
+    assert r"\section{March 2025}" not in tex
+    assert r"\section{Introduction}" in tex
+
+
+def test_tree_decoder_treats_numbered_title_with_list_item_role_as_heading():
+    records = [
+        {"type": "title", "text": "Abstract", "layout_role": "abstract", "layout_layer": "metadata_layer", "global_order": 0, "style_baseline_size": 12.0},
+        {"type": "paragraph", "text": "Abstract body.", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 1, "style_baseline_size": 10.0},
+        {"type": "title", "text": "1. Introduction", "layout_role": "list_item", "layout_layer": "main_text_flow", "global_order": 2, "style_baseline_size": 12.0},
+        {"type": "paragraph", "text": "Intro body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 3, "style_baseline_size": 10.0},
+        {"type": "title", "text": "2. Related Work", "layout_role": "list_item", "layout_layer": "main_text_flow", "global_order": 4, "style_baseline_size": 12.0},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\section{Introduction}" in tex
+    assert r"\section{Related Work}" in tex
+    assert r"\subsection{Introduction}" not in tex
+    assert r"\begin{enumerate}" not in tex
+
+
+def test_tree_decoder_keeps_ieee_alpha_headings_under_roman_section():
+    records = [
+        {"type": "title", "text": "III. METHODOLOGY", "layout_role": "list_item", "layout_layer": "main_text_flow", "global_order": 0, "style_baseline_size": 12.0},
+        {"type": "title", "text": "A. Problem Definition", "layout_role": "list_item", "layout_layer": "main_text_flow", "global_order": 1, "style_baseline_size": 12.0},
+        {"type": "paragraph", "text": "Problem body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 2, "style_baseline_size": 10.0},
+        {"type": "title", "text": "C. Model Architecture", "layout_role": "list_item", "layout_layer": "main_text_flow", "global_order": 3, "style_baseline_size": 12.0},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\section{METHODOLOGY}" in tex
+    assert r"\subsection{Problem Definition}" in tex
+    assert r"\subsection{Model Architecture}" in tex
+    assert r"\section{Model Architecture}" not in tex
 
 
 def test_tree_decoder_uses_tree_depth_for_unnumbered_title_levels():
@@ -728,7 +859,156 @@ def test_tree_decoder_renderer_prefers_explicit_order_over_bbox_for_cross_column
     tex = TreeDecoder().render_document(root)
 
     assert tex.index(r"\section{Conclusion}") < tex.index("Conclusion body.")
-    assert tex.index("Conclusion body.") < tex.index(r"\section{References}")
+    assert tex.index("Conclusion body.") < tex.index(r"\section*{References}")
+
+
+def test_tree_decoder_demotes_custom_prefixed_same_style_titles_to_paragraphs():
+    records = [
+        {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},
+        {"type": "title", "text": "Q1: What is the probability?", "style_baseline_size": 14.0, "global_order": 1},
+        {"type": "title", "text": "Case 1-1: Exactly One Fall", "style_baseline_size": 14.0, "global_order": 2},
+        {"type": "title", "text": "1) Voxel Distributions", "style_baseline_size": 14.0, "global_order": 3},
+        {"type": "title", "text": "Method", "style_baseline_size": 14.0, "global_order": 4},
+        {"type": "paragraph", "text": "Body text.", "style_baseline_size": 10.0, "global_order": 5},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\section{Introduction}" in tex
+    assert r"\section{Method}" in tex
+    assert r"\paragraph*{Q1: What is the probability?}" in tex
+    assert r"\paragraph*{Case 1-1: Exactly One Fall}" in tex
+    assert r"\paragraph*{1) Voxel Distributions}" in tex
+    assert r"\section{Q1" not in tex
+    assert r"\section{Case" not in tex
+    assert r"\section{Voxel" not in tex
+
+
+def test_tree_decoder_demotes_numeric_list_style_title_to_subsection():
+    records = [
+        {"type": "title", "text": "Generalized Linear Models", "style_baseline_size": 15.0, "layout_role": "heading", "global_order": 0},
+        {
+            "type": "title",
+            "text": r"3. Linear Relationship in Predictors: The linear predictor \eta is modeled as \beta^\top X",
+            "style_baseline_size": 14.0,
+            "layout_role": "list_item",
+            "global_order": 1,
+        },
+        {"type": "paragraph", "text": "The body continues.", "style_baseline_size": 10.0, "global_order": 2},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\section{Generalized Linear Models}" in tex
+    assert r"\subsection{Linear Relationship in Predictors" in tex
+    assert r"\section{Linear Relationship in Predictors" not in tex
+    assert "3. Linear Relationship" not in tex
+
+
+def test_tree_decoder_keeps_cross_page_numbered_heading_in_previous_enumerate():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "4 Poisson Regression", "layout_role": "heading", "global_order": 0},
+        {"type": "title", "text": "GLMs: Associating Covariates with Risks", "layout_role": "heading", "global_order": 1},
+        {"type": "paragraph", "text": "GLMs extend linear regression.", "global_order": 2},
+        {"type": "paragraph", "text": "1. Response Variable Belongs to the Exponential Family:", "layout_role": "list_item", "global_order": 3},
+        {"type": "paragraph", "text": "2. Model Predicts the Expected Value of Y:", "layout_role": "list_item", "global_order": 4},
+        {"type": "page_number", "text": "5", "layout_role": "noise", "global_order": 5},
+        {"type": "page_header", "text": "Survival Analysis", "layout_role": "noise", "global_order": 6},
+        {
+            "type": "title",
+            "text": r"3. Linear Relationship in Predictors: The linear predictor \eta is modeled as \beta^\top X",
+            "layout_role": "list_item",
+            "global_order": 7,
+        },
+        {"type": "paragraph", "text": "The following examples illustrate GLMs.", "global_order": 8},
+    ]
+    edge_index = torch.tensor([[1, 1, 7], [3, 4, 8]], dtype=torch.long)
+    scores = torch.tensor(
+        [
+            [0.0, 0.99, 0.01],
+            [0.0, 0.99, 0.01],
+            [0.0, 0.99, 0.01],
+        ],
+        dtype=torch.float32,
+    )
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5)).decode(records, edge_index, scores)
+    tex = TreeDecoder().render_document(root)
+
+    assert tex.count(r"\begin{enumerate}") == 1
+    assert tex.count(r"\item") == 3
+    assert r"\item Linear Relationship in Predictors" in tex
+    assert "The following examples illustrate GLMs." in tex
+    assert r"\subsection{Linear Relationship in Predictors" not in tex
+    assert tex.index("Model Predicts the Expected Value") < tex.index("Linear Relationship in Predictors")
+
+
+def test_tree_decoder_keeps_layout_heading_as_subsection_scope_for_following_body():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {
+            "type": "title",
+            "text": "4 Poisson Regression in Survival Analysis Framework",
+            "layout_role": "heading",
+            "layout_band_type": "full_span",
+            "layout_band_column": "full",
+            "layout_is_band_boundary": True,
+            "global_order": 0,
+        },
+        {"type": "paragraph", "text": "Opening body.", "global_order": 1},
+        {
+            "type": "title",
+            "text": "The Exponential Family and Its Role in GLMs",
+            "layout_role": "heading",
+            "layout_band_type": "double_column",
+            "layout_band_column": "left",
+            "style_spans": [{"text": "The Exponential Family and Its Role in GLMs", "font_size": 10.0, "is_bold": True}],
+            "global_order": 2,
+        },
+        {"type": "paragraph", "text": "A prerequisite paragraph.", "global_order": 3},
+        {"type": "equation_interline", "text": "f(y;\\eta)=b(y)", "global_order": 4},
+        {"type": "paragraph", "text": "where:", "bbox": [112, 397, 163, 410], "page_idx": 0, "global_order": 5},
+        {"type": "paragraph", "text": r"\eta: the natural parameter,", "bbox": [156, 421, 866, 436], "page_idx": 0, "global_order": 6},
+        {"type": "paragraph", "text": "T(y): the sufficient statistic,", "bbox": [156, 439, 816, 455], "page_idx": 0, "global_order": 7},
+    ]
+
+    root = TreeDecoder().decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+    tex = TreeDecoder().render_document(root)
+
+    assert r"\section{Poisson Regression in Survival Analysis Framework}" in tex
+    assert r"\subsection*{The Exponential Family and Its Role in GLMs}" in tex
+    assert tex.index(r"\subsection*{The Exponential Family and Its Role in GLMs}") < tex.index("A prerequisite paragraph.")
+    assert tex.index("A prerequisite paragraph.") < tex.index("\\[\nf(y;\\eta)=b(y)\n\\]")
+    assert "where:\n\n\\begin{itemize}" in tex
+    assert r"\item $\eta$: the natural parameter," in tex
+    assert r"\item T(y): the sufficient statistic," in tex
+
+
+def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
+    records = [
+        {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},
+        {"type": "title", "text": "Related Work", "style_baseline_size": 14.0, "global_order": 1},
+        {"type": "title", "text": "Conclusion", "style_baseline_size": 14.0, "global_order": 2},
+        {"type": "paragraph", "text": "Body text.", "style_baseline_size": 10.0, "global_order": 3},
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\section{Introduction}" in tex
+    assert r"\section{Related Work}" in tex
+    assert r"\section{Conclusion}" in tex
+    assert r"\paragraph*{Related Work}" not in tex
 
 
 def test_tree_decoder_causality_barrier_drops_reversed_parent_edges():
@@ -766,7 +1046,7 @@ def test_tree_decoder_renders_algorithm_as_algorithmic_float():
     assert r"\usepackage{algpseudocode}" in tex
     assert r"\begin{algorithmic}[1]" in tex
     assert r"\Require \(\displaystyle x_i < 1 \% raw\)" in tex
-    assert r"\For{i in S}" in tex
+    assert r"\For{\texttt{i in S}}" in tex
     assert r"\State \Return \(\displaystyle x_i\)" in tex
     assert r"\EndFor" in tex
     assert r"\begin{verbatim}" not in tex
@@ -784,6 +1064,18 @@ def test_tree_decoder_algorithmic_converts_unicode_to_math_latex():
     assert "∇" not in tex
 
 
+def test_tree_decoder_algorithmic_keeps_c_like_code_out_of_math_mode():
+    raw_algorithm = "wrapper(func, ret_type, n_args, args) { ret_type ret = func(args); return ret; }"
+    records = [{"type": "algorithm", "text": raw_algorithm}]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\texttt{wrapper" in tex
+    assert r"\{" in tex
+    assert r"\}" in tex
+    assert r"\(\displaystyle wrapper" not in tex
+
+
 def test_tree_decoder_restores_line_breaks_for_heuristic_pseudocode_text():
     records = [{"type": "paragraph", "text": "Input: x_i Output: y_i for i in S return y_i end"}]
 
@@ -791,7 +1083,7 @@ def test_tree_decoder_restores_line_breaks_for_heuristic_pseudocode_text():
 
     assert r"\Require \(\displaystyle x_i\)" in tex
     assert r"\Ensure \(\displaystyle y_i\)" in tex
-    assert r"\For{i in S}" in tex
+    assert r"\For{\texttt{i in S}}" in tex
     assert r"\State \Return \(\displaystyle y_i\)" in tex
     assert r"\EndFor" in tex
     assert r"y\_i" not in tex
@@ -897,7 +1189,7 @@ def test_generation_renderer_prefers_explicit_order_over_bbox_for_cross_column_t
     tex = render_latex_document(root)
 
     assert tex.index(r"\section{Conclusion}") < tex.index("Conclusion body.")
-    assert tex.index("Conclusion body.") < tex.index(r"\section{References}")
+    assert tex.index("Conclusion body.") < tex.index(r"\section*{References}")
 
 
 def test_generation_renderer_intercepts_algorithm_like_text_before_escaping():
@@ -910,11 +1202,10 @@ def test_generation_renderer_intercepts_algorithm_like_text_before_escaping():
     assert r"\usepackage{algpseudocode}" in tex
     assert r"\caption{Search}" in tex
     assert r"\Require \(\displaystyle x_i\)" in tex
-    assert r"\If{\(\displaystyle x_i < 1\)}" in tex
+    assert r"\If{\texttt{x\_i < 1}}" in tex
     assert r"\State \Return \(\displaystyle x_i\)" in tex
     assert r"\EndIf" in tex
     assert r"\begin{verbatim}" not in tex
-    assert r"x\_i" not in tex
 
 
 def test_generation_renderer_algorithm_unicode_uses_latex_math():
@@ -987,6 +1278,108 @@ def test_generation_renderer_preserves_structured_inline_formula_segments():
     assert r"x \_ \{ i \}" not in tex
 
 
+def test_generation_renderer_repairs_contextual_inline_math_ocr_operator():
+    root = type("Root", (), {})()
+    root.children = [
+        {
+            "type": "paragraph",
+            "text": r"The linear predictor η is modeled \arcsin = \beta ^ { \top } X",
+            "block": {
+                "content": {
+                    "paragraph_content": [
+                        {"type": "text", "content": "The linear predictor η is modeled "},
+                        {"type": "equation_inline", "content": r"\arcsin = \beta ^ { \top } X"},
+                    ]
+                }
+            },
+        }
+    ]
+
+    tex = render_latex_document(root)
+
+    assert r"The linear predictor \ensuremath{\eta} is modeled as: $\eta = \beta ^ { \top } X$" in tex
+    assert r"\arcsin =" not in tex
+
+
+def test_tree_decoder_does_not_swallow_unindented_text_after_numbered_item():
+    root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
+    root.children = [
+        ResolvedNode(
+            node_id=1,
+            record={
+                "type": "paragraph",
+                "text": "3. Linear Relationship in Predictors: The predictor is modeled.",
+                "_render_as_list_item": True,
+                "bbox": [100, 100, 600, 125],
+                "page_idx": 0,
+            },
+            merged_node_ids=[1],
+        ),
+        ResolvedNode(
+            node_id=2,
+            record={
+                "type": "paragraph",
+                "text": "The following examples illustrate GLMs.",
+                "bbox": [100, 145, 600, 170],
+                "page_idx": 0,
+            },
+            merged_node_ids=[2],
+        ),
+    ]
+
+    tex = TreeDecoder().render_document(root)
+
+    assert "\\item Linear Relationship in Predictors: The predictor is modeled.\n\\end{enumerate}" in tex
+    assert "\\end{enumerate}\n\nThe following examples illustrate GLMs." in tex
+
+
+def test_tree_decoder_keeps_formula_explanation_inside_numbered_item():
+    root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
+    root.children = [
+        ResolvedNode(
+            node_id=1,
+            record={"type": "paragraph", "text": "1. Ensuring Non-Negativity:", "_render_as_list_item": True},
+            merged_node_ids=[1],
+        ),
+        ResolvedNode(
+            node_id=2,
+            record={"type": "equation", "text": r"h(t|X)=h_0(t)+\\beta^T X"},
+            merged_node_ids=[2],
+        ),
+        ResolvedNode(
+            node_id=3,
+            record={"type": "paragraph", "text": "which can result in invalid negative hazard rates."},
+            merged_node_ids=[3],
+        ),
+        ResolvedNode(
+            node_id=4,
+            record={"type": "paragraph", "text": "2. Multiplicative Nature:", "_render_as_list_item": True},
+            merged_node_ids=[4],
+        ),
+    ]
+
+    tex = TreeDecoder().render_document(root)
+
+    assert tex.count(r"\begin{enumerate}") == 1
+    assert "which can result in invalid negative hazard rates." in tex
+    assert tex.index(r"h(t|X)=h_0(t)+\\beta^T X") < tex.index("which can result")
+    assert tex.count(r"\item") == 2
+
+
+def test_algorithm_control_conditions_are_rendered_as_safe_text():
+    records = [{
+        "type": "algorithm",
+        "text": "Algorithm 1: Demo\nif l < rul then continue ▷ prune node\nfor training uses \\thetat from server",
+    }]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []))
+
+    assert r"\If{\texttt{" in tex
+    assert r"\For{\texttt{" in tex
+    assert "▷" not in tex
+    assert r"\thetat" not in tex
+
+
 def test_escape_latex_covers_reserved_characters():
     assert escape_latex(r"a_b & 50% #1") == r"a\_b \& 50\% \#1"
 
@@ -1003,6 +1396,44 @@ def test_tree_decoder_wraps_inner_math_environments():
     tex = TreeDecoder().render_document(build_resolved_tree(records, []))
 
     assert "\\[\n\\begin{array}{r}x_1\\\\x_2\\end{array}\n\\]" in tex
+
+
+def test_render_equation_splits_multiple_tags_into_align():
+    raw = r"a=b\tag{1} c=d\tag{2}"
+
+    for renderer in (render_equation, render_generation_equation):
+        tex = renderer(raw)
+        assert tex.startswith("\\begin{align}")
+        assert r"a=b \tag{1}" in tex
+        assert r"c=d \tag{2}" in tex
+        assert tex.count(r"\tag") == 2
+        assert "\\[" not in tex
+
+
+def test_tree_decoder_suppresses_long_redundant_ocr_continuation():
+    root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
+    root.children = [
+        ResolvedNode(
+            node_id=1,
+            record={
+                "type": "paragraph",
+                "text": "Large Language Models have achieved remarkable success across a wide range of tasks such as text generation and sentiment analysis.",
+            },
+            merged_node_ids=[1],
+        ),
+        ResolvedNode(
+            node_id=2,
+            record={
+                "type": "paragraph",
+                "text": "across a wide range of tasks such as text generation and sentiment analysis.",
+            },
+            merged_node_ids=[2],
+        ),
+    ]
+
+    tex = TreeDecoder().render_document(root)
+
+    assert tex.count("across a wide range of tasks") == 1
 
 
 def test_safe_verbatim_text_removes_raw_unicode_math():

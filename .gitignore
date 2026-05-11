@@ -13,6 +13,7 @@ secrets/
 local_secrets/
 docs/LOCAL_PRIVATE*.md
 docs/*_PRIVATE.md
+docs/*_副本.md
 PROJECT_TUTORIAL.md
 _legacy_reference/
 
@@ -67,6 +68,14 @@ outputs/**
 debug_output/**
 !debug_output/**/
 !debug_output/.gitkeep
+
+# Local QA/debug output generated while iterating on the pipeline.
+debug_local/
+e2e_outputs/
+qa_failed_examples/
+qa_label_visuals/
+tmp_qa_visuals/
+tmp_qa_visuals_mergesafe/
 
 # Local transfer/download staging.
 artifacts/local_arxiv_sources/

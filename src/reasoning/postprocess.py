@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
+from src.generation.citations import strip_reference_label
+from src.generation.table_assets import ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
-from src.perception.title_features import strip_title_numbering, title_numbering_level
+from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
+from src.reasoning.layout_state_machine import parse_layout_state_machine
 
 
 MERGE = 0
@@ -21,6 +24,7 @@ DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "mult
 MERGE_COMPATIBLE_TYPES = {"text", "equation", "reference"}
 NON_PARENT_RENDER_TYPES = {"equation", "inline_math", "algorithm", "code"}
 DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
+LATEX_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 INLINE_MATH_COMMANDS = {
     "alpha",
     "beta",
@@ -94,6 +98,14 @@ INLINE_MATH_COMMANDS = {
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
+NUMERIC_PAREN_PREFIX_RE = re.compile(r"^\s*\d+\)\s+")
+NUMERIC_PREFIX_RE = re.compile(r"^\s*\d+[\.\)]\s+")
+ORDERED_NUMERIC_DOT_PREFIX_RE = re.compile(r"^\s*(\d+)\.\s+")
+DOTTED_NUMERIC_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+")
+APPENDIX_DOTTED_PREFIX_RE = re.compile(r"^\s*[A-Z](?:\.\d+)+\.?\s+")
+ALPHA_PREFIX_RE = re.compile(r"^\s*[A-Za-z][\.\)]\s+")
+ROMAN_PREFIX_RE = re.compile(r"^\s*[IVXLCDM]+[\.\)]\s+", re.IGNORECASE)
+CUSTOM_COLON_PREFIX_RE = re.compile(r"^\s*[^\s:]{1,24}(?:\s+[\w\-\.]+){0,3}\s*:\s+")
 PSEUDOCODE_START_RE = re.compile(
     r"^\s*(?:Algorithm\s*\d+\b|Input\s*:|Output\s*:|Require\s*:|Ensure\s*:)",
     re.IGNORECASE,
@@ -113,6 +125,57 @@ PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECA
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
+ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
+BARE_OPERATOR_EQUATION_RE = re.compile(r"^\\(?:arc)?(?:sin|cos|tan)\s*=")
+GREEK_CONTEXT_RE = re.compile(r"[αβγδεζηθικλμνξπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΠΡΣΤΥΦΧΨΩ]")
+GREEK_TO_LATEX = {
+    "α": r"\alpha",
+    "β": r"\beta",
+    "γ": r"\gamma",
+    "δ": r"\delta",
+    "ε": r"\epsilon",
+    "ζ": r"\zeta",
+    "η": r"\eta",
+    "θ": r"\theta",
+    "ι": r"\iota",
+    "κ": r"\kappa",
+    "λ": r"\lambda",
+    "μ": r"\mu",
+    "ν": r"\nu",
+    "ξ": r"\xi",
+    "π": r"\pi",
+    "ρ": r"\rho",
+    "σ": r"\sigma",
+    "τ": r"\tau",
+    "υ": r"\upsilon",
+    "φ": r"\phi",
+    "χ": r"\chi",
+    "ψ": r"\psi",
+    "ω": r"\omega",
+    "Α": "A",
+    "Β": "B",
+    "Γ": r"\Gamma",
+    "Δ": r"\Delta",
+    "Ε": "E",
+    "Ζ": "Z",
+    "Η": "H",
+    "Θ": r"\Theta",
+    "Ι": "I",
+    "Κ": "K",
+    "Λ": r"\Lambda",
+    "Μ": "M",
+    "Ν": "N",
+    "Ξ": r"\Xi",
+    "Π": r"\Pi",
+    "Ρ": "P",
+    "Σ": r"\Sigma",
+    "Τ": "T",
+    "Υ": r"\Upsilon",
+    "Φ": r"\Phi",
+    "Χ": "X",
+    "Ψ": r"\Psi",
+    "Ω": r"\Omega",
+}
 
 
 @dataclass(frozen=True)
@@ -140,7 +203,20 @@ class TreeDecoderConfig:
     merge_gutter_threshold: float = 30.0
     merge_gutter_page_width_ratio: float = 0.05
     document_class: str = "article"
-    packages: tuple[str, ...] = ("graphicx", "amsmath", "amssymb", "booktabs", "hyperref", "float", "algorithm", "algpseudocode")
+    packages: tuple[str, ...] = (
+        "graphicx",
+        "amsmath",
+        "amssymb",
+        "mathrsfs",
+        "booktabs",
+        "hyperref",
+        "float",
+        "algorithm",
+        "algpseudocode",
+    )
+    source_pdf: str | None = None
+    table_asset_output_dir: str | None = None
+    table_asset_latex_prefix: str = "assets"
 
 
 @dataclass
@@ -179,6 +255,19 @@ class HeadingSkeleton:
     heading_levels: dict[int, int]
     heading_parent: dict[int, int | None]
     scope_by_node: dict[int, int | None]
+    parent_by_node: dict[int, int] = field(default_factory=dict)
+    render_hints: dict[int, dict[str, Any]] = field(default_factory=dict)
+    events: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HeadingDecision:
+    """Conservative render/structure decision for one title-like node."""
+
+    is_structural: bool
+    level: int
+    render_as_paragraph: bool
+    reason: str
 
 
 class TreeDecoder:
@@ -603,8 +692,16 @@ class TreeDecoder:
         nodes = {node_id: clone_resolved_node(node) for node_id, node in contracted.nodes.items()}
         parent_of: dict[int, int] = {}
 
+        for node_id, hints in skeleton.render_hints.items():
+            if node_id in nodes:
+                nodes[node_id].record.update(hints)
+
+        for child_id, parent_id in skeleton.parent_by_node.items():
+            if child_id in nodes and parent_id in nodes and child_id != parent_id:
+                parent_of[child_id] = int(parent_id)
+
         for heading_id, parent_id in skeleton.heading_parent.items():
-            if heading_id in nodes and parent_id in nodes:
+            if heading_id not in parent_of and heading_id in nodes and parent_id in nodes:
                 parent_of[heading_id] = int(parent_id)
 
         best_parent_edge: dict[int, DecodedEdge] = {}
@@ -621,6 +718,8 @@ class TreeDecoder:
                 best_parent_edge[edge.target] = edge
 
         for target_id, edge in best_parent_edge.items():
+            if target_id in parent_of:
+                continue
             if target_id in skeleton.heading_ids:
                 continue
             parent_of[target_id] = edge.source
@@ -633,6 +732,8 @@ class TreeDecoder:
             scope_id = skeleton.scope_by_node.get(node_id)
             if scope_id in nodes:
                 parent_of[node_id] = int(scope_id)
+
+        enforce_numbered_list_parent_continuity(nodes, parent_of)
 
         for child_id, parent_id in parent_of.items():
             if child_id in nodes and parent_id in nodes and child_id != parent_id:
@@ -667,10 +768,18 @@ class TreeDecoder:
         sort_tree_children(root)
         return root
 
-    def render_document(self, root: ResolvedNode, *, title: str | None = None) -> str:
+    def render_document(
+        self,
+        root: ResolvedNode,
+        *,
+        title: str | None = None,
+        document_metadata: dict[str, Any] | None = None,
+    ) -> str:
         """Stage 3: render a resolved tree to a compilable LaTeX document."""
 
         body_root = root_without_redundant_document_title(root, title) if title else root
+        body_root = root_with_document_toc(body_root, document_metadata)
+        apply_heading_render_policy(body_root)
         lines = [rf"\documentclass{{{self.config.document_class}}}"]
         for package in self.config.packages:
             lines.append(rf"\usepackage{{{package}}}")
@@ -704,8 +813,16 @@ class TreeDecoder:
         children = sorted_render_children(node.children)
         if is_algorithm_like_node(node.record, node_verbatim_text(node)):
             return render_algorithm_block(node_verbatim_text(node))
+        if is_toc_title_node(node.record, text):
+            return render_toc()
+        if block_type == "toc":
+            return ""
+        if block_type == "title" and is_front_matter_date_text(text):
+            parts = [render_textual_node(node)] if text else []
+            parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+            return "\n\n".join(part for part in parts if part)
         if block_type == "title":
-            parts = [render_title(text, depth=depth)] if text else []
+            parts = [render_title(text, depth=depth, record=node.record)] if text else []
             parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
             return "\n\n".join(part for part in parts if part)
         if block_type == "equation":
@@ -717,7 +834,14 @@ class TreeDecoder:
             parts.extend(self.render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
             return "\n\n".join(part for part in parts if part)
         if block_type == "table":
-            return render_table_placeholder(node.record, node_verbatim_text(node), node_id=node.node_id)
+            return render_table_placeholder(
+                node.record,
+                node_verbatim_text(node),
+                node_id=node.node_id,
+                source_pdf=self.config.source_pdf,
+                asset_output_dir=self.config.table_asset_output_dir,
+                asset_latex_prefix=self.config.table_asset_latex_prefix,
+            )
         if block_type == "figure":
             caption = render_text_with_inline_latex(text) if text else "Figure"
             return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
@@ -736,6 +860,9 @@ class TreeDecoder:
         child_list = sorted_render_children(children)
         while index < len(child_list):
             child = child_list[index]
+            if is_page_noise_node(child):
+                index += 1
+                continue
             if canonical_render_type(child.record) == "reference":
                 run: list[ResolvedNode] = []
                 while index < len(child_list) and canonical_render_type(child_list[index].record) == "reference":
@@ -751,6 +878,9 @@ class TreeDecoder:
                 index += 1
                 while index < len(child_list):
                     current = child_list[index]
+                    if is_page_noise_node(current):
+                        index += 1
+                        continue
                     current_environment = list_environment_for_node(current)
                     if current_environment is not None:
                         entries.append((item_node, continuations))
@@ -758,7 +888,12 @@ class TreeDecoder:
                         continuations = []
                         index += 1
                         continue
-                    if is_list_item_continuation_node(current):
+                    previous_continuation = continuations[-1] if continuations else None
+                    if is_list_item_continuation_node(
+                        current,
+                        item_node=item_node,
+                        previous_continuation=previous_continuation,
+                    ):
                         continuations.append(current)
                         index += 1
                         continue
@@ -766,9 +901,17 @@ class TreeDecoder:
                 entries.append((item_node, continuations))
                 rendered.append(self.render_dynamic_list_entries(entries, environment=list_environment, depth=depth))
                 continue
+            implicit_items, next_index = collect_implicit_indented_list_after_lead(child, child_list, index + 1)
+            if implicit_items:
+                block = self.render_node(child, depth=depth).strip()
+                if block:
+                    append_nonredundant_rendered(rendered, block)
+                append_nonredundant_rendered(rendered, self.render_dynamic_list_group(implicit_items, environment="itemize", depth=depth))
+                index = next_index
+                continue
             block = self.render_node(child, depth=depth).strip()
             if block:
-                rendered.append(block)
+                append_nonredundant_rendered(rendered, block)
             index += 1
         return rendered
 
@@ -785,9 +928,9 @@ class TreeDecoder:
                 item_body = render_textual_node_without_list_marker(item) if item.text else ""
             else:
                 item_body = self.render_list_item(item, depth=depth + 1)
-            nested = self.render_child_blocks_with_dynamic_lists(item.children, depth=depth + 1)
-            continuation_blocks = [self.render_node(node, depth=depth + 1).strip() for node in continuations]
-            body_parts = [item_body, *nested, *continuation_blocks]
+            extra_nodes = unique_nodes_by_id([*item.children, *continuations])
+            extra_blocks = [self.render_node(node, depth=depth + 1).strip() for node in sorted_render_children(extra_nodes)]
+            body_parts = [item_body, *extra_blocks]
             item_body = "\n".join(part for part in body_parts if part).strip()
             lines.append(rf"\item {item_body}".rstrip())
         lines.append(rf"\end{{{environment}}}")
@@ -814,13 +957,15 @@ class TreeDecoder:
         item_node: ResolvedNode | None = None
         continuations: list[ResolvedNode] = []
         for child in children:
+            if is_page_noise_node(child):
+                continue
             if list_environment_for_node(child) is not None:
                 if item_node is not None:
                     entries.append((item_node, continuations))
                 item_node = child
                 continuations = []
                 continue
-            if item_node is not None and is_list_item_continuation_node(child):
+            if item_node is not None and is_list_item_continuation_node(child, item_node=item_node):
                 continuations.append(child)
                 continue
             if item_node is not None:
@@ -917,7 +1062,11 @@ def build_resolved_tree(node_records: list[dict[str, Any]], decoded_edges: list[
         for edge in decoded_edges
         if edge.label != MERGE
     ]
-    return TreeDecoder().build_tree(contracted, non_merge_edges)
+    decoder = TreeDecoder()
+    if has_layout_state_signals(node.record for node in contracted.nodes.values()):
+        skeleton = build_heading_skeleton(contracted.nodes)
+        return decoder.build_skeleton_tree(contracted, skeleton, non_merge_edges)
+    return decoder.build_tree(contracted, non_merge_edges)
 
 
 def normalize_edge_index(edge_index: Any) -> Any:
@@ -962,8 +1111,34 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode]) -> HeadingSkeleton:
     if not nodes:
         return HeadingSkeleton(frozenset(), {}, {}, {})
 
+    if has_layout_state_signals(node.record for node in nodes.values()):
+        layout_result = parse_layout_state_machine(
+            {node_id: node.record for node_id, node in nodes.items()},
+            text_by_id={node_id: node.text for node_id, node in nodes.items()},
+        )
+        for node_id, hints in layout_result.render_hints.items():
+            if node_id in nodes:
+                nodes[node_id].record.update(hints)
+
+        if layout_result.heading_ids or layout_result.parent_by_node:
+            for node_id in layout_result.heading_ids:
+                if node_id not in nodes:
+                    continue
+                nodes[node_id].record["_skeleton_heading_level"] = layout_result.heading_levels.get(node_id, 1)
+                nodes[node_id].record["canonical_type"] = "title"
+            return HeadingSkeleton(
+                heading_ids=frozenset(layout_result.heading_ids),
+                heading_levels=layout_result.heading_levels,
+                heading_parent=layout_result.heading_parent,
+                scope_by_node=layout_result.scope_by_node,
+                parent_by_node=layout_result.parent_by_node,
+                render_hints=layout_result.render_hints,
+                events=layout_result.events,
+            )
+
     ordered_ids = sorted(nodes, key=lambda node_id: node_reading_order_key(nodes[node_id]))
     body_font_size = infer_body_font_size_from_nodes(nodes.values())
+    heading_decisions = resolve_heading_decisions(nodes, ordered_ids=ordered_ids, body_font_size=body_font_size)
     heading_ids: set[int] = set()
     heading_levels: dict[int, int] = {}
     heading_parent: dict[int, int | None] = {}
@@ -972,8 +1147,11 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode]) -> HeadingSkeleton:
 
     for order_pos, node_id in enumerate(ordered_ids):
         node = nodes[node_id]
-        if is_heading_candidate_node(node, body_font_size=body_font_size, order_pos=order_pos):
-            level = heading_stack_level(node, body_font_size=body_font_size, order_pos=order_pos)
+        decision = heading_decisions.get(node_id)
+        if decision is not None:
+            apply_heading_decision(node, decision)
+        if decision is not None and decision.is_structural:
+            level = decision.level
             node.record["_skeleton_heading_level"] = level
             node.record["canonical_type"] = "title"
             heading_ids.add(node_id)
@@ -993,6 +1171,301 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode]) -> HeadingSkeleton:
         heading_parent=heading_parent,
         scope_by_node=scope_by_node,
     )
+
+
+def has_layout_state_signals(records: Any) -> bool:
+    signal_keys = {
+        "layout_role",
+        "layout_layer",
+        "layout_band_id",
+        "layout_band_type",
+        "layout_band_column",
+        "layout_flow_order",
+        "regime_reading_order",
+        "dag_reading_order",
+        "column_fix_span",
+        "column_fix_column",
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if any(key in record for key in signal_keys):
+            return True
+    return False
+
+
+def apply_heading_render_policy(root: ResolvedNode) -> None:
+    """Mark uncertain title-like nodes as paragraph headings before rendering."""
+
+    nodes = {index: node for index, node in enumerate(iter_resolved_tree_nodes(root)) if node.node_id != -1}
+    if not nodes:
+        return
+    ordered_ids = sorted(nodes, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+    body_font_size = infer_body_font_size_from_nodes(nodes.values())
+    for node_id, decision in resolve_heading_decisions(nodes, ordered_ids=ordered_ids, body_font_size=body_font_size).items():
+        if nodes[node_id].record.get("_layout_state_locked") or nodes[node_id].record.get("_skeleton_heading_level") is not None:
+            continue
+        apply_heading_decision(nodes[node_id], decision)
+
+
+def iter_resolved_tree_nodes(root: ResolvedNode) -> list[ResolvedNode]:
+    nodes = [root]
+    for child in sorted_render_children(root.children):
+        nodes.extend(iter_resolved_tree_nodes(child))
+    return nodes
+
+
+def resolve_heading_decisions(
+    nodes: dict[int, ResolvedNode],
+    *,
+    ordered_ids: list[int],
+    body_font_size: float,
+) -> dict[int, HeadingDecision]:
+    """Resolve title-like nodes by style clusters and prefix-pattern stability.
+
+    This deliberately avoids domain-specific prefixes such as "Q1" or "Case".
+    It asks whether a node belongs to a stable visual/prefix system inside the
+    current document.  Unstable or custom-prefixed title nodes become safe
+    ``paragraph*`` headings instead of exploding the section tree.
+    """
+
+    candidates: list[tuple[int, int]] = []
+    style_groups: dict[tuple[float, int], list[int]] = {}
+    prefix_by_id: dict[int, tuple[str, int | None]] = {}
+    order_lookup = {node_id: pos for pos, node_id in enumerate(ordered_ids)}
+
+    for node_id in ordered_ids:
+        node = nodes[node_id]
+        order_pos = order_lookup.get(node_id, 0)
+        if not is_heading_candidate_node(node, body_font_size=body_font_size, order_pos=order_pos):
+            continue
+        candidates.append((node_id, order_pos))
+        style_groups.setdefault(heading_style_key(node, body_font_size=body_font_size), []).append(node_id)
+        prefix_by_id[node_id] = heading_prefix_signature(node.text)
+
+    dominant_prefix: dict[tuple[float, int], str] = {}
+    mixed_prefix: set[tuple[float, int]] = set()
+    for style_key, group_ids in style_groups.items():
+        counts: dict[str, int] = {}
+        for node_id in group_ids:
+            prefix_kind, _ = prefix_by_id[node_id]
+            counts[prefix_kind] = counts.get(prefix_kind, 0) + 1
+        if counts:
+            dominant_prefix[style_key] = max(counts.items(), key=lambda item: (item[1], item[0] == "freeform"))[0]
+        if len(counts) > 1:
+            mixed_prefix.add(style_key)
+
+    decisions: dict[int, HeadingDecision] = {}
+    for node_id, order_pos in candidates:
+        node = nodes[node_id]
+        style_key = heading_style_key(node, body_font_size=body_font_size)
+        prefix_kind, prefix_level = prefix_by_id[node_id]
+        special = is_special_structural_title(node.text)
+        level = heading_decision_level(
+            node,
+            prefix_kind=prefix_kind,
+            prefix_level=prefix_level,
+            body_font_size=body_font_size,
+            order_pos=order_pos,
+        )
+
+        if is_numbered_list_continuation_heading(node_id, nodes=nodes, ordered_ids=ordered_ids):
+            decisions[node_id] = HeadingDecision(
+                is_structural=False,
+                level=max(1, level),
+                render_as_paragraph=False,
+                reason="numbered-list-continuation",
+            )
+            continue
+
+        demote_reason = ""
+        if not special:
+            if prefix_kind in {"custom_colon", "numeric_paren"}:
+                demote_reason = "custom-prefix"
+            elif (
+                style_key in mixed_prefix
+                and prefix_kind != dominant_prefix.get(style_key)
+                and prefix_kind not in {"freeform", "numeric", "bare_numbered", "dotted_numeric", "appendix_dotted", "roman"}
+            ):
+                demote_reason = "style-prefix-shift"
+            elif (
+                prefix_kind == "freeform"
+                and node_layout_role(node.record) != "heading"
+                and heading_font_ratio(node, body_font_size=body_font_size) <= 1.04
+                and node_is_bold(node.record)
+            ):
+                demote_reason = "body-size-bold-heading"
+
+        if demote_reason:
+            decisions[node_id] = HeadingDecision(
+                is_structural=False,
+                level=max(1, level),
+                render_as_paragraph=True,
+                reason=demote_reason,
+            )
+        else:
+            decisions[node_id] = HeadingDecision(
+                is_structural=True,
+                level=max(0, level),
+                render_as_paragraph=False,
+                reason="structural",
+            )
+    return decisions
+
+
+def heading_decision_level(
+    node: ResolvedNode,
+    *,
+    prefix_kind: str,
+    prefix_level: int | None,
+    body_font_size: float,
+    order_pos: int,
+) -> int:
+    """Resolve heading depth with document-global style before prefix shortcuts.
+
+    A bare numeric prefix like ``3.`` is ambiguous in papers: it can be a real
+    section number, but MinerU also emits run-in/list headings as title blocks.
+    When the layout classifier already says the title-like node is a list item,
+    keep it structural but demote it under the active section instead of letting
+    the prefix alone make it a top-level ``section``.
+    """
+
+    if prefix_kind == "numeric" and node_layout_role(node.record) in {"list_item", "list"}:
+        return max(2, min(3, heading_stack_level_without_numbering(node, body_font_size=body_font_size, order_pos=order_pos)))
+    if (
+        prefix_kind == "freeform"
+        and node_layout_role(node.record) == "heading"
+        and canonical_render_type(node.record) == "title"
+        and is_local_subheading_layout(node.record)
+    ):
+        return 2
+    if prefix_level is not None:
+        return prefix_level
+    return heading_stack_level(node, body_font_size=body_font_size, order_pos=order_pos)
+
+
+def apply_heading_decision(node: ResolvedNode, decision: HeadingDecision) -> None:
+    node.record["_heading_policy_reason"] = decision.reason
+    if decision.reason == "numbered-list-continuation":
+        node.record.pop("_render_as_paragraph_heading", None)
+        node.record.pop("_heading_unnumbered", None)
+        node.record.pop("_heading_render_level", None)
+        node.record["_render_as_list_item"] = True
+        return
+    node.record.pop("_render_as_list_item", None)
+    if decision.render_as_paragraph:
+        node.record["_heading_render_level"] = int(decision.level)
+        node.record["_render_as_paragraph_heading"] = True
+        node.record.pop("_heading_unnumbered", None)
+    else:
+        node.record.pop("_render_as_paragraph_heading", None)
+        prefix_kind, _ = heading_prefix_signature(node.text)
+        if "_skeleton_heading_level" in node.record or prefix_kind != "freeform":
+            node.record["_heading_render_level"] = int(decision.level)
+        else:
+            node.record.pop("_heading_render_level", None)
+        if (
+            prefix_kind == "freeform"
+            and node_layout_role(node.record) == "heading"
+            and is_local_subheading_layout(node.record)
+        ):
+            node.record["_heading_unnumbered"] = True
+        else:
+            node.record.pop("_heading_unnumbered", None)
+
+
+def heading_style_key(node: ResolvedNode, *, body_font_size: float) -> tuple[float, int]:
+    ratio = heading_font_ratio(node, body_font_size=body_font_size)
+    return (round(ratio * 20.0) / 20.0, int(node_is_bold(node.record)))
+
+
+def heading_font_ratio(node: ResolvedNode, *, body_font_size: float) -> float:
+    font_size = node_font_size(node.record)
+    if body_font_size > 0 and font_size > 0:
+        return font_size / body_font_size
+    return font_size
+
+
+def heading_prefix_signature(text: str) -> tuple[str, int | None]:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ("empty", None)
+    if APPENDIX_DOTTED_PREFIX_RE.match(value):
+        token = value.split(maxsplit=1)[0].rstrip(".")
+        return ("appendix_dotted", max(2, token.count(".") + 1))
+    if DOTTED_NUMERIC_PREFIX_RE.match(value):
+        token = value.split(maxsplit=1)[0].rstrip(".")
+        return ("dotted_numeric", max(2, token.count(".") + 1))
+    if NUMERIC_PAREN_PREFIX_RE.match(value):
+        return ("numeric_paren", 2)
+    if NUMERIC_PREFIX_RE.match(value):
+        return ("numeric", 1)
+    numbered_level = title_numbering_level(value)
+    if numbered_level is not None:
+        return ("bare_numbered", numbered_level)
+    if ROMAN_PREFIX_RE.match(value):
+        return ("roman", 1)
+    if ALPHA_PREFIX_RE.match(value):
+        return ("alpha", 2)
+    if CUSTOM_COLON_PREFIX_RE.match(value):
+        return ("custom_colon", None)
+    return ("freeform", None)
+
+
+def is_numbered_list_continuation_heading(
+    node_id: int,
+    *,
+    nodes: dict[int, ResolvedNode],
+    ordered_ids: list[int],
+    max_effective_gap: int = 12,
+) -> bool:
+    node = nodes[node_id]
+    current_number = ordered_numeric_dot_number(node.text)
+    if current_number is None or current_number <= 1:
+        return False
+    if node_layout_role(node.record) not in {"list_item", "list"}:
+        return False
+    try:
+        current_position = ordered_ids.index(node_id)
+    except ValueError:
+        return False
+    effective_gap = 0
+    for previous_id in reversed(ordered_ids[:current_position]):
+        previous = nodes[previous_id]
+        if is_page_noise_node(previous):
+            continue
+        effective_gap += 1
+        if effective_gap > max_effective_gap:
+            break
+        previous_number = ordered_numeric_dot_number(previous.text)
+        if previous_number == current_number - 1 and record_is_numbered_list_like(previous.record, previous.text):
+            return True
+        if previous_number == 1 and current_number > 2:
+            break
+    return False
+
+
+def ordered_numeric_dot_number(text: str) -> int | None:
+    match = ORDERED_NUMERIC_DOT_PREFIX_RE.match(" ".join(str(text or "").split()))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def record_is_numbered_list_like(record: dict[str, Any], text: str) -> bool:
+    if record.get("_render_as_list_item"):
+        return True
+    if node_layout_role(record) in {"list_item", "list"} and ordered_numeric_dot_number(text) is not None:
+        return True
+    return False
+
+
+def is_special_structural_title(text: str) -> bool:
+    normalized = normalize_structural_heading_text(text)
+    return normalized in {"abstract", "references", "bibliography"} or normalized.startswith("appendix")
 
 
 def is_heading_candidate_node(node: ResolvedNode, *, body_font_size: float, order_pos: int) -> bool:
@@ -1025,6 +1498,11 @@ def heading_stack_level(node: ResolvedNode, *, body_font_size: float, order_pos:
     explicit_level = title_numbering_level(text)
     if explicit_level is not None:
         return explicit_level
+    return heading_stack_level_without_numbering(node, body_font_size=body_font_size, order_pos=order_pos)
+
+
+def heading_stack_level_without_numbering(node: ResolvedNode, *, body_font_size: float, order_pos: int) -> int:
+    text = " ".join(node.text.split())
 
     raw_type = str(
         node.record.get("type")
@@ -1051,6 +1529,31 @@ def heading_stack_level(node: ResolvedNode, *, body_font_size: float, order_pos:
     if body_font_size > 0 and font_size >= body_font_size * 1.03:
         return 2
     return 1
+
+
+def node_layout_role(record: dict[str, Any]) -> str:
+    return str(
+        record.get("layout_role")
+        or record.get("role")
+        or record.get("semantic_role")
+        or ""
+    ).casefold()
+
+
+def is_local_subheading_layout(record: dict[str, Any]) -> bool:
+    band_type = str(record.get("layout_band_type") or "").casefold()
+    band_column = str(record.get("layout_band_column") or "").casefold()
+    column_id = numeric_value(record.get("layout_band_column_id"))
+    boundary = bool(record.get("layout_is_band_boundary"))
+    if not band_type and not band_column and column_id is None:
+        return False
+    if band_type == "double_column":
+        return True
+    if band_column in {"left", "right"}:
+        return True
+    if column_id is not None and int(column_id) in {0, 1}:
+        return True
+    return not boundary and band_type not in {"full_span", "single_column"}
 
 
 def looks_like_standalone_heading(text: str) -> bool:
@@ -1210,6 +1713,18 @@ def sorted_render_children(children: list[ResolvedNode] | tuple[ResolvedNode, ..
     if any(record_has_bbox(getattr(child, "record", {})) for child in child_list):
         return sort_nodes_by_reading_order(child_list, fallback_key=node_reading_order_key)
     return sorted(child_list, key=node_reading_order_key)
+
+
+def unique_nodes_by_id(nodes: list[ResolvedNode]) -> list[ResolvedNode]:
+    seen: set[int] = set()
+    unique: list[ResolvedNode] = []
+    for node in nodes:
+        key = node.node_id
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(node)
+    return unique
 
 
 def has_explicit_reading_order(record: Any) -> bool:
@@ -1380,6 +1895,8 @@ def canonical_render_type(record: dict[str, Any]) -> str:
     raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
     if raw in {"paragraph", "text", "paragraph_text", "body"}:
         return "text"
+    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
+        return "toc"
     if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
         return "title"
     if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
@@ -1562,17 +2079,71 @@ def is_bullet_list_candidate(node: ResolvedNode) -> bool:
     return list_environment_for_node(node) is not None
 
 
-def is_list_item_continuation_node(node: ResolvedNode) -> bool:
+def is_list_item_continuation_node(
+    node: ResolvedNode,
+    *,
+    item_node: ResolvedNode | None = None,
+    previous_continuation: ResolvedNode | None = None,
+) -> bool:
     """Allow display objects to stay inside the current list item."""
 
     block_type = canonical_render_type(node.record)
-    return block_type in {"equation", "inline_math", "table", "figure", "algorithm", "code"}
+    if block_type in {"equation", "inline_math", "table", "figure", "algorithm", "code"}:
+        return True
+    if previous_continuation is not None and is_post_display_list_continuation(node, previous_continuation):
+        return True
+    if item_node is not None and item_node.record.get("_render_as_list_item") and block_type == "text":
+        if list_environment_for_node(node) is not None:
+            return False
+        if node_layout_role(node.record) == "heading":
+            return False
+        return is_hanging_list_continuation(node, item_node)
+    return False
+
+
+def is_post_display_list_continuation(node: ResolvedNode, previous: ResolvedNode) -> bool:
+    if canonical_render_type(node.record) != "text":
+        return False
+    if list_environment_for_node(node) is not None:
+        return False
+    if node_layout_role(node.record) == "heading":
+        return False
+    previous_type = canonical_render_type(previous.record)
+    if previous_type not in {"equation", "inline_math", "table", "figure", "algorithm", "code"}:
+        return False
+    text = " ".join(node.text.split())
+    if not text:
+        return False
+    return bool(re.match(r"^(where|which|this|these|therefore|thus|for example|for instance)\b", text, re.IGNORECASE))
+
+
+def is_hanging_list_continuation(node: ResolvedNode, item_node: ResolvedNode) -> bool:
+    node_bbox = merge_barrier_bbox(node.record)
+    item_bbox = merge_barrier_bbox(item_node.record)
+    if node_bbox is None or item_bbox is None:
+        return False
+    page = merge_barrier_page(node.record)
+    item_page = merge_barrier_page(item_node.record)
+    if page is not None and item_page is not None and page != item_page:
+        return False
+    page_width = max(1.0, merge_barrier_page_width(node.record, item_node.record) or 1000.0)
+    indent_threshold = max(12.0, 0.018 * page_width)
+    if node_bbox[0] >= item_bbox[0] + indent_threshold:
+        return True
+    item_text = " ".join(item_node.text.split())
+    node_text = " ".join(node.text.split())
+    if item_text and not item_text.rstrip().endswith((".", "?", "!", "。", "？", "！", ":")) and node_text[:1].islower():
+        vertical_gap = node_bbox[1] - item_bbox[3]
+        return -2.0 <= vertical_gap <= max(24.0, 0.04 * page_width) and node_bbox[0] >= item_bbox[0] - 4.0
+    return False
 
 
 def list_environment_for_node(node: ResolvedNode) -> str | None:
     record = node.record
     block_type = canonical_render_type(record)
     text = node.text
+    if record.get("_render_as_list_item"):
+        return list_environment_for_record(record, fallback_text=text)
     if block_type == "list" and not node.children:
         return list_environment_for_record(record, fallback_text=text)
     if block_type != "text":
@@ -1669,11 +2240,13 @@ def is_appendix_stop_title(node: ResolvedNode) -> bool:
 
 
 def is_page_noise_node(node: ResolvedNode) -> bool:
+    if node_layout_role(node.record) == "noise" or layout_layer_name(node.record) == "noise_layer":
+        return True
     raw_type = str(
-        node.record.get("canonical_type")
-        or node.record.get("type")
+        node.record.get("type")
         or node.record.get("raw_type")
         or node.record.get("block_type")
+        or node.record.get("canonical_type")
         or ""
     ).casefold()
     if raw_type in {
@@ -1692,6 +2265,101 @@ def is_page_noise_node(node: ResolvedNode) -> bool:
     return bool(normalized) and normalized.isdigit() and len(normalized) <= 4
 
 
+def enforce_numbered_list_parent_continuity(nodes: dict[int, ResolvedNode], parent_of: dict[int, int]) -> None:
+    """Attach cross-page numbered items to the same parent as the previous item."""
+
+    ordered_ids = sorted(nodes, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+    last_numbered_item: dict[int, tuple[int, int]] = {}
+    effective_position = 0
+    for node_id in ordered_ids:
+        node = nodes[node_id]
+        if is_page_noise_node(node):
+            continue
+        effective_position += 1
+        number = ordered_numeric_dot_number(node.text)
+        if number is None:
+            continue
+        if not record_is_numbered_list_like(node.record, node.text):
+            continue
+        if number > 1:
+            previous = last_numbered_item.get(number - 1)
+            if previous is not None:
+                previous_id, previous_position = previous
+                previous_parent = parent_of.get(previous_id)
+                if previous_parent is not None and effective_position - previous_position <= 12:
+                    parent_of[node_id] = previous_parent
+        last_numbered_item[number] = (node_id, effective_position)
+
+
+def collect_implicit_indented_list_after_lead(
+    lead: ResolvedNode,
+    children: list[ResolvedNode],
+    start_index: int,
+) -> tuple[list[ResolvedNode], int]:
+    """Recover bullet-list items whose visible marker was dropped by OCR."""
+
+    if not is_implicit_list_lead(lead):
+        return ([], start_index)
+    anchor_bbox = merge_barrier_bbox(lead.record)
+    if anchor_bbox is None:
+        return ([], start_index)
+    anchor_page = merge_barrier_page(lead.record)
+    min_indent = anchor_bbox[0] + 24.0
+    items: list[ResolvedNode] = []
+    index = start_index
+    while index < len(children) and is_page_noise_node(children[index]):
+        index += 1
+    if index < len(children) and list_environment_for_node(children[index]) is not None:
+        return ([], start_index)
+    while index < len(children):
+        candidate = children[index]
+        if is_page_noise_node(candidate):
+            index += 1
+            continue
+        if not is_implicit_indented_list_item(candidate, min_indent=min_indent, anchor_page=anchor_page):
+            break
+        items.append(candidate)
+        index += 1
+    if len(items) < 2:
+        return ([], start_index)
+    return (items, index)
+
+
+def is_implicit_list_lead(node: ResolvedNode) -> bool:
+    if canonical_render_type(node.record) != "text":
+        return False
+    text = " ".join(node.text.split()).strip()
+    if not text:
+        return False
+    return text.endswith(":") or normalize_structural_heading_text(text) == "where"
+
+
+def is_implicit_indented_list_item(
+    node: ResolvedNode,
+    *,
+    min_indent: float,
+    anchor_page: float | None,
+) -> bool:
+    if canonical_render_type(node.record) != "text":
+        return False
+    if list_environment_for_node(node) is not None:
+        return True
+    if node.children:
+        return False
+    bbox = merge_barrier_bbox(node.record)
+    if bbox is None or bbox[0] < min_indent:
+        return False
+    page = merge_barrier_page(node.record)
+    if anchor_page is not None and page is not None and page != anchor_page:
+        return False
+    text = " ".join(node.text.split()).strip()
+    if not text or len(text) > 260:
+        return False
+    if text.endswith((".", "。", "?", "!", "？", "！")) and ":" not in text[:80]:
+        return False
+    return True
+
+
 def is_abstract_root_candidate(node: ResolvedNode) -> bool:
     block_type = canonical_render_type(node.record)
     if block_type not in {"title", "text"}:
@@ -1700,13 +2368,79 @@ def is_abstract_root_candidate(node: ResolvedNode) -> bool:
     return bool(re.search(r"\babstract\b", text[:120], flags=re.IGNORECASE))
 
 
-def render_title(text: str, *, depth: int) -> str:
-    command = title_command(text, depth=depth)
+def render_title(text: str, *, depth: int, record: dict[str, Any] | None = None) -> str:
+    record = record or {}
+    if record.get("_render_as_paragraph_heading"):
+        return rf"\paragraph*{{{escape_latex(str(text or '').strip())}}}"
+    command = title_command(text, depth=depth, record=record)
     title_text = strip_title_numbering(text)
-    return rf"\{command}{{{escape_latex(title_text)}}}"
+    star = "*" if record.get("_heading_unnumbered") or is_unnumbered_frontmatter_title(text) else ""
+    return rf"\{command}{star}{{{escape_latex(title_text)}}}"
 
 
-def title_command(text: str, *, depth: int) -> str:
+def is_unnumbered_frontmatter_title(text: str) -> bool:
+    normalized = normalize_structural_heading_text(text)
+    return normalized in {"abstract", "references", "bibliography"} or normalized.startswith("appendix")
+
+
+def is_toc_title_node(record: dict[str, Any], text: str) -> bool:
+    role = str(record.get("layout_role") or "").casefold()
+    canonical = str(record.get("canonical_type") or "").casefold()
+    if role == "toc_title" or canonical == "toc_title":
+        return True
+    raw = str(record.get("type") or record.get("raw_type") or record.get("block_type") or "").casefold()
+    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
+    return raw in {"title", "section", "heading"} and normalized in {"contents", "tableofcontents"}
+
+
+def render_toc() -> str:
+    return r"\tableofcontents"
+
+
+def root_with_document_toc(root: ResolvedNode, document_metadata: dict[str, Any] | None) -> ResolvedNode:
+    if not isinstance(document_metadata, dict) or not document_metadata.get("has_toc"):
+        return root
+    if tree_contains_toc(root):
+        return root
+
+    toc_order = numeric_value(document_metadata.get("toc_order"))
+    toc_page = numeric_value(document_metadata.get("toc_page_idx"))
+    record: dict[str, Any] = {
+        "type": "toc",
+        "canonical_type": "toc",
+        "layout_role": "toc_title",
+        "layout_layer": "metadata_layer",
+        "text": "",
+        "global_order": toc_order if toc_order is not None else 0,
+        "regime_reading_order": toc_order if toc_order is not None else 0,
+        "page_idx": toc_page if toc_page is not None else None,
+        "_layout_state_locked": True,
+    }
+    toc_node = ResolvedNode(node_id=-1000001, record=record, merged_node_ids=[])
+    patched = ResolvedNode(
+        node_id=root.node_id,
+        record=dict(root.record),
+        merged_node_ids=list(root.merged_node_ids),
+        children=list(root.children) + [toc_node],
+        sibling_after=list(root.sibling_after),
+    )
+    sort_tree_children(patched)
+    return patched
+
+
+def tree_contains_toc(node: ResolvedNode) -> bool:
+    if canonical_render_type(node.record) == "toc" or is_toc_title_node(node.record, node.text):
+        return True
+    return any(tree_contains_toc(child) for child in node.children)
+
+
+def title_command(text: str, *, depth: int, record: dict[str, Any] | None = None) -> str:
+    record = record or {}
+    render_level = numeric_value(record.get("_heading_render_level"))
+    if render_level is None:
+        render_level = numeric_value(record.get("_skeleton_heading_level"))
+    if render_level is not None and render_level >= 1:
+        return SECTION_COMMANDS[min(int(render_level) - 1, len(SECTION_COMMANDS) - 1)]
     numbered_level = title_numbering_level(text)
     if numbered_level is not None:
         return SECTION_COMMANDS[min(numbered_level - 1, len(SECTION_COMMANDS) - 1)]
@@ -1714,9 +2448,12 @@ def title_command(text: str, *, depth: int) -> str:
 
 
 def render_equation(text: str) -> str:
-    stripped = str(text or "").strip()
+    stripped = strip_latex_control_chars(text).strip()
     if not stripped:
         return "\\[\n\n\\]"
+    multi_tag_render = render_multi_tag_equation(stripped)
+    if multi_tag_render:
+        return multi_tag_render
     if stripped.startswith("\\[") or stripped.startswith("$$"):
         return stripped
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
@@ -1725,8 +2462,54 @@ def render_equation(text: str) -> str:
     return "\\[\n" + stripped + "\n\\]"
 
 
+TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
+
+
+def render_multi_tag_equation(text: str) -> str | None:
+    """Render OCR-fused display formulas containing more than one equation tag.
+
+    MinerU occasionally merges consecutive display equations into one block:
+    ``expr_a \\tag{1} expr_b \\tag{2}``.  Wrapping that in ``\\[...\\]`` makes
+    amsmath fail with "Multiple \\tag".  Splitting at tag boundaries preserves
+    compilation and keeps the visual order.
+    """
+    stripped = text.strip()
+    if stripped.startswith("\\[") and stripped.endswith("\\]"):
+        stripped = stripped[2:-2].strip()
+    elif stripped.startswith("$$") and stripped.endswith("$$"):
+        stripped = stripped[2:-2].strip()
+
+    matches = list(TAG_RE.finditer(stripped))
+    if len(matches) <= 1:
+        return None
+
+    rows: list[tuple[str, str | None]] = []
+    cursor = 0
+    for match in matches:
+        expr = stripped[cursor : match.start()].strip()
+        tag = match.group(1).strip()
+        if expr:
+            rows.append((expr, tag))
+        elif rows:
+            prev_expr, _ = rows[-1]
+            rows[-1] = (prev_expr, tag)
+        cursor = match.end()
+
+    tail = stripped[cursor:].strip()
+    if tail:
+        rows.append((tail, None))
+
+    if len(rows) <= 1:
+        return None
+
+    rendered_rows = []
+    for expr, tag in rows:
+        rendered_rows.append(f"{expr} \\tag{{{tag}}}" if tag else expr)
+    return "\\begin{align}\n" + "\\\\\n".join(rendered_rows) + "\n\\end{align}"
+
+
 def render_inline_math(text: str) -> str:
-    stripped = str(text or "").strip()
+    stripped = strip_latex_control_chars(text).strip()
     if not stripped:
         return "$$"
     if stripped.startswith("$") or stripped.startswith(r"\("):
@@ -1743,7 +2526,7 @@ def render_textual_node(node: ResolvedNode) -> str:
         if extract_content_segments(record):
             used_structured_content = True
         if rendered:
-            rendered_parts.append(rendered)
+            append_nonredundant_rendered(rendered_parts, rendered)
     if used_structured_content and rendered_parts:
         return merge_latex_fragments(rendered_parts)
     if rendered_parts:
@@ -1764,12 +2547,35 @@ def render_textual_node_without_list_marker(node: ResolvedNode) -> str:
         if extract_content_segments(prepared_record):
             used_structured_content = True
         if rendered:
-            rendered_parts.append(rendered)
+            append_nonredundant_rendered(rendered_parts, rendered)
     if rendered_parts:
         if used_structured_content:
             return merge_latex_fragments(rendered_parts)
         return normalize_latex_text(" ".join(rendered_parts))
     return escape_latex(strip_list_marker(node.text))
+
+
+def append_nonredundant_rendered(parts: list[str], rendered: str) -> None:
+    if not is_redundant_rendered_text(rendered, parts):
+        parts.append(rendered)
+
+
+def is_redundant_rendered_text(rendered: str, previous_parts: Sequence[str], *, min_chars: int = 60) -> bool:
+    """Detect OCR/layout duplicates without suppressing ordinary repeated phrases."""
+    key = rendered_text_dedupe_key(rendered)
+    if len(key) < min_chars:
+        return False
+    for previous in previous_parts[-4:]:
+        previous_key = rendered_text_dedupe_key(previous)
+        if len(previous_key) >= len(key) and key in previous_key:
+            return True
+    return False
+
+
+def rendered_text_dedupe_key(value: str) -> str:
+    text = re.sub(r"\\(section|subsection|subsubsection|paragraph)\*?\{([^{}]*)\}", r"\2", str(value or ""))
+    text = re.sub(r"\\[a-zA-Z]+\*?", "", text)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
 def strip_list_marker_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -1822,18 +2628,59 @@ def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
     if not segments:
         return render_text_with_inline_latex(fallback_text)
     rendered: list[str] = []
+    plain_context = ""
     for segment in segments:
         segment_type = str(segment.get("type") or "").lower()
         content = str(segment.get("content") or segment.get("text") or "")
         if not content:
             continue
         if segment_type in {"equation_inline", "inline_equation", "inline_math", "inline_formula"}:
-            rendered.append(render_inline_math(content))
+            repaired_content, insert_as_marker = repair_inline_math_ocr_segment(content, plain_context)
+            if insert_as_marker:
+                marker = "as: " if rendered and rendered[-1].endswith((" ", "\n")) else " as: "
+                rendered.append(render_text_with_inline_latex(marker, strip=False))
+                plain_context += marker
+            rendered.append(render_inline_math(repaired_content))
         elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
             rendered.append("\n\n" + render_equation(content) + "\n\n")
         else:
             rendered.append(render_text_with_inline_latex(content, strip=False))
+            plain_context += content
     return normalize_latex_text("".join(rendered))
+
+
+def repair_inline_math_ocr_segment(content: str, left_context: str) -> tuple[str, bool]:
+    """Repair narrow OCR cases where prose was swallowed into inline math.
+
+    MinerU occasionally reads a run such as ``as: η = ...`` as the standalone
+    math command ``\\arcsin = ...``.  That shape is not a meaningful inline
+    equation by itself: inverse trig functions need an argument before equality.
+    When the nearby prose already introduced a Greek variable, reuse that
+    variable as the left-hand side and optionally restore the missing ``as:``.
+    """
+
+    value = strip_latex_control_chars(content).strip()
+    if not BARE_OPERATOR_EQUATION_RE.match(value):
+        return value, False
+    replacement = last_greek_variable_in_context(left_context)
+    if not replacement:
+        return value, False
+    repaired = BARE_OPERATOR_EQUATION_RE.sub(lambda _match: replacement + " =", value, count=1)
+    return repaired, should_insert_as_marker_before_repaired_math(left_context)
+
+
+def last_greek_variable_in_context(text: str) -> str | None:
+    matches = list(GREEK_CONTEXT_RE.finditer(str(text or "")))
+    if not matches:
+        return None
+    return GREEK_TO_LATEX.get(matches[-1].group(0))
+
+
+def should_insert_as_marker_before_repaired_math(text: str) -> bool:
+    normalized = " ".join(str(text or "").split()).casefold()
+    if not normalized or normalized.endswith((":", " as", " as:")):
+        return False
+    return normalized.endswith(("modeled", "modelled", "defined", "expressed", "written", "given"))
 
 
 def extract_content_segments(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1880,7 +2727,7 @@ def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
     math; everything else still goes through normal LaTeX escaping.
     """
 
-    value = str(text or "")
+    value = strip_latex_control_chars(text)
     if not value:
         return ""
     rendered: list[str] = []
@@ -2033,7 +2880,7 @@ def normalize_reference_items(value: Any) -> list[str]:
     items = []
     for item in value:
         text = item.get("text") if isinstance(item, dict) else item
-        text = str(text or "").strip()
+        text = strip_reference_label(str(text or "").strip())
         if text:
             items.append(text)
     return items
@@ -2092,19 +2939,19 @@ def parse_pseudo_code(text: str) -> tuple[str | None, list[str]]:
 
         for_match = PSEUDOCODE_FOR_RE.match(line)
         if for_match:
-            commands.append(rf"\For{{{format_algorithmic_text(for_match.group(1).strip())}}}")
+            commands.append(rf"\For{{{format_algorithmic_text(for_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("for")
             continue
 
         while_match = PSEUDOCODE_WHILE_RE.match(line)
         if while_match:
-            commands.append(rf"\While{{{format_algorithmic_text(while_match.group(1).strip())}}}")
+            commands.append(rf"\While{{{format_algorithmic_text(while_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("while")
             continue
 
         if_match = PSEUDOCODE_IF_RE.match(line)
         if if_match:
-            commands.append(rf"\If{{{format_algorithmic_text(if_match.group(1).strip())}}}")
+            commands.append(rf"\If{{{format_algorithmic_text(if_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("if")
             continue
 
@@ -2140,13 +2987,21 @@ def close_algorithmic_block(block_stack: list[str], close_kind: str | None) -> s
     return r"\EndFor"
 
 
-def format_algorithmic_text(text: str) -> str:
+def format_algorithmic_text(text: str, *, allow_math: bool = True) -> str:
     prepared = normalize_algorithm_math_text(text)
     if not prepared:
         return ""
-    if LATEX_MATH_MARKER_RE.search(prepared):
+    if is_algorithm_code_like(prepared) or not allow_math:
+        return r"\texttt{" + escape_algorithm_code_text(prepared) + r"}"
+    if allow_math and LATEX_MATH_MARKER_RE.search(prepared):
         return r"\(\displaystyle " + escape_algorithm_math_text(prepared) + r"\)"
     return escape_latex(prepared)
+
+
+def is_algorithm_code_like(text: str) -> bool:
+    """Detect C-like pseudo-code that must not be wrapped in math mode."""
+
+    return bool(ALGORITHM_CODE_MARKER_RE.search(str(text or "")))
 
 
 def normalize_algorithm_math_text(text: str) -> str:
@@ -2164,6 +3019,11 @@ def escape_algorithm_math_text(text: str) -> str:
     )
 
 
+def escape_algorithm_code_text(text: str) -> str:
+    safe = "".join(_safe_code_verbatim_char(char) for char in str(text or ""))
+    return escape_latex(safe)
+
+
 def restore_algorithm_line_breaks(text: str) -> str:
     body = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if "\n" in body:
@@ -2177,24 +3037,49 @@ def sanitize_verbatim_body(text: str) -> str:
     return "".join(_safe_code_verbatim_char(char) for char in sanitized)
 
 
-def render_table_placeholder(record: dict[str, Any], text: str, *, node_id: int | None = None) -> str:
+def render_table_placeholder(
+    record: dict[str, Any],
+    text: str,
+    *,
+    node_id: int | None = None,
+    source_pdf: str | None = None,
+    asset_output_dir: str | None = None,
+    asset_latex_prefix: str = "assets",
+) -> str:
+    if int(record.get("table_group_size") or 1) > 1 and record.get("table_group_primary") is False:
+        return ""
     table_id = table_node_identifier(record, node_id=node_id)
-    bbox = format_table_bbox(record.get("bbox"))
-    caption = extract_table_caption(text) or "Table reconstruction placeholder"
+    bbox = format_table_bbox(record.get("table_group_bbox") or record.get("bbox"))
+    caption = table_caption_text(record) or extract_table_caption(text) or "Table reconstruction placeholder"
+    graphic = ensure_table_pdf_crop(
+        record,
+        source_pdf=source_pdf or cfg_source_pdf(record),
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+    )
     todo = f"% [TODO_TABLE_RECONSTRUCT: BBOX={bbox}, ID={table_id}]"
+    graphic_line = rf"\includegraphics[width=\linewidth]{{{graphic}}}" if graphic else todo
     return "\n".join(
         [
             r"\begin{table}[H]",
             r"\centering",
-            todo,
+            graphic_line,
             rf"\caption{{{escape_latex(caption)}}}",
             r"\end{table}",
         ]
     )
 
 
+def cfg_source_pdf(record: dict[str, Any]) -> str | None:
+    for key in ("source_pdf", "pdf_path", "style_source_pdf"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def table_node_identifier(record: dict[str, Any], *, node_id: int | None = None) -> str:
-    for key in ("id", "block_id", "table_id"):
+    for key in ("table_group_id", "id", "block_id", "table_id"):
         value = record.get(key)
         if value:
             return str(value)
@@ -2249,7 +3134,13 @@ def escape_latex(text: str) -> str:
         "~": r"\textasciitilde{}",
         "^": r"\textasciicircum{}",
     }
-    return "".join(_escape_latex_char(char, replacements) for char in str(text))
+    return "".join(_escape_latex_char(char, replacements) for char in strip_latex_control_chars(text))
+
+
+def strip_latex_control_chars(text: Any) -> str:
+    """Remove non-printing OCR/control bytes that TeX cannot compile."""
+
+    return LATEX_CONTROL_CHAR_RE.sub("", str(text or ""))
 
 
 def _escape_latex_char(char: str, replacements: dict[str, str]) -> str:

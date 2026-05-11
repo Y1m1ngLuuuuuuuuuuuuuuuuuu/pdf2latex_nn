@@ -102,7 +102,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--raw-pdf-dir", type=Path, default=REPO_ROOT / "data/01_raw_pdfs")
-    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_source_pool")
+    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_sources")
     parser.add_argument(
         "--mineru-output-dir",
         type=Path,
@@ -136,6 +136,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", type=int, default=1000)
     parser.add_argument("--max-candidates", type=int)
     parser.add_argument("--main-tex-names", default="main.tex")
+    parser.add_argument("--compiled-accepted-manifest", action="append", type=Path, default=[])
+    parser.add_argument("--no-auto-compiled-accepted-manifests", action="store_true")
+    parser.add_argument("--require-compiled-accepted", action="store_true")
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
     parser.add_argument("--max-orphan-ratio", type=float, default=0.15)
     parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
@@ -231,6 +234,9 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         max_isolated_node_ratio=float(args.max_isolated_node_ratio),
         min_non_none_edges=int(args.min_non_none_edges),
         min_candidate_recall=float(args.min_candidate_recall),
+        compiled_accepted_manifests=tuple(path.resolve() for path in args.compiled_accepted_manifest),
+        auto_discover_compiled_manifests=not bool(args.no_auto_compiled_accepted_manifests),
+        require_compiled_accepted=bool(args.require_compiled_accepted),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=False,
         force_json=bool(args.force_json),
@@ -286,6 +292,10 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
                 "preflight_workers": config.preflight_workers,
                 "mineru_batch_size": config.mineru_batch_size,
                 "mineru_batch_max_pages": config.mineru_batch_max_pages,
+                "tex_source_dir": str(config.mini.tex_source_dir),
+                "compiled_manifest_mode": bool(config.mini.compiled_accepted_manifests)
+                or config.mini.auto_discover_compiled_manifests,
+                "require_compiled_accepted": config.mini.require_compiled_accepted,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -293,7 +303,11 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
         flush=True,
     )
     for candidate in candidates[: min(len(candidates), config.mini.target)]:
-        print(f"dry_run candidate id={candidate.document_id} pdf={candidate.pdf_path} tex={candidate.main_tex_path}")
+        print(
+            "dry_run candidate "
+            f"id={candidate.document_id} pdf={candidate.pdf_path} tex={candidate.main_tex_path} "
+            f"origin={candidate.pdf_origin} manifest={candidate.compile_manifest}"
+        )
 
 
 def run_preflight_stage(candidates: list[CandidateSample], config: StagedConfig) -> list[CandidateSample]:
@@ -642,6 +656,8 @@ def append_processing_error(path: Path, candidate: CandidateSample, error_type: 
             "document_id": candidate.document_id,
             "pdf_path": str(candidate.pdf_path),
             "tex_path": str(candidate.main_tex_path),
+            "pdf_origin": candidate.pdf_origin,
+            "compile_manifest": candidate.compile_manifest,
             "error_type": error_type,
             "error": error,
         },
@@ -655,6 +671,8 @@ def append_worker_error(path: Path, result: WorkerResult) -> None:
             "document_id": result.candidate.document_id,
             "pdf_path": str(result.candidate.pdf_path),
             "tex_path": str(result.candidate.main_tex_path),
+            "pdf_origin": result.candidate.pdf_origin,
+            "compile_manifest": result.candidate.compile_manifest,
             "error_type": result.error_type,
             "error": result.error,
             "traceback": result.traceback,

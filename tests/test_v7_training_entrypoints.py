@@ -92,6 +92,20 @@ def test_parse_predictor_hidden_dims():
     assert train_edge_gnn_full.parse_int_tuple("1024,512,128") == (1024, 512, 128)
 
 
+def test_parse_feature_ablation_groups_are_schema_aligned():
+    schema = FeatureTensorSchema()
+    ranges = train_edge_gnn_full.parse_node_feature_ablation_ranges("semantic,scroll")
+    assert ranges[0] == (0, schema.semantic_dim)
+    assert ranges[1] == (schema.semantic_dim + schema.type_dim + len(schema.geometry_fields), schema.semantic_dim + schema.type_dim + len(schema.geometry_fields) + len(schema.scroll_geometry_fields))
+    assert train_edge_gnn_full.parse_node_feature_ablation_ranges("layout_all") == ((schema.semantic_dim, schema.node_feature_dim),)
+
+    edge_indices = train_edge_gnn_full.parse_edge_feature_ablation_indices(
+        "punctuation,overlap_gutter",
+        "semantic_cosine",
+    )
+    assert edge_indices == (0, 8, 9, 15, 16)
+
+
 def test_calibrated_threshold_priority_predicts_merge_then_parent_then_none():
     try:
         import torch

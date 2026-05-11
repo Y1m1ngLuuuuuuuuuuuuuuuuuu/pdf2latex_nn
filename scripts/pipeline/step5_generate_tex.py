@@ -14,8 +14,9 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.perception.reading_order import fuse_micro_nodes  # noqa: E402
+from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
+from src.generation.table_assets import annotate_table_group_records  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
 
@@ -31,13 +32,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
+    parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table union-bbox crops")
+    parser.add_argument("--asset-dir", type=Path, help="Directory for generated table crop assets")
+    parser.add_argument("--asset-latex-prefix", default="assets", help="LaTeX path prefix for generated assets")
+    parser.add_argument(
+        "--render-table-crops",
+        action="store_true",
+        help="Generate table crop images from --source-pdf. Disabled by default to save disk.",
+    )
     return parser
 
 
 def main() -> int:
+    args = build_arg_parser().parse_args()
     import torch
 
-    args = build_arg_parser().parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = torch.load(args.graph, map_location=device, weights_only=False)
     assert_v7_graph_data(data, args.graph)
@@ -64,11 +73,18 @@ def main() -> int:
             merge_threshold=args.merge_threshold,
             parent_threshold=args.parent_threshold,
             sibling_threshold=args.sibling_threshold,
+            source_pdf=str(args.source_pdf) if args.render_table_crops and args.source_pdf else None,
+            table_asset_output_dir=(
+                str(args.asset_dir or (args.output_tex.parent / "assets"))
+                if args.render_table_crops and args.source_pdf
+                else None
+            ),
+            table_asset_latex_prefix=args.asset_latex_prefix,
         )
     )
     root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
     document_title = args.title or infer_document_title(node_records)
-    tex = decoder.render_document(root, title=document_title)
+    tex = decoder.render_document(root, title=document_title, document_metadata=getattr(data, "document_metadata", None))
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
     pred_counts = torch.bincount(torch.clamp(logits.argmax(dim=-1), max=2), minlength=3).tolist()
@@ -135,9 +151,9 @@ def load_node_records(content_json: Path | None, data: Any) -> list[dict[str, An
             raise ValueError(f"content records ({len(records)}) do not match graph.num_nodes ({int(data.num_nodes)})")
         if len(graph_records) == len(records):
             records = [merge_graph_node_metadata(content_record, graph_record) for content_record, graph_record in zip(records, graph_records)]
-        return records
+        return annotate_table_group_records(records)
     if graph_records:
-        return graph_records
+        return annotate_table_group_records(graph_records)
     return [{} for _ in range(int(data.num_nodes))]
 
 
@@ -145,14 +161,17 @@ def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[d
     """Match content JSON records to graph nodes, trying micro-fusion when needed."""
 
     expected = int(data.num_nodes)
+    filtered_records = filter_graph_content_items(records)
+    if len(filtered_records) == expected:
+        return filtered_records
     fused_records: list[dict[str, Any]] | None = None
     if bool(getattr(data, "micro_fusion_applied", False)):
-        fused_records = fuse_micro_nodes(records)
+        fused_records = fuse_micro_nodes(filtered_records if filtered_records else records)
         if len(fused_records) == expected:
             return fused_records
     if len(records) == expected:
         return records
-    fused_records = fused_records if fused_records is not None else fuse_micro_nodes(records)
+    fused_records = fused_records if fused_records is not None else fuse_micro_nodes(filtered_records if filtered_records else records)
     if len(fused_records) == expected:
         return fused_records
     return records
@@ -227,6 +246,8 @@ def canonical_content_type(value: Any) -> str:
         raw = str(value or "").lower()
     if list_type == "reference_list":
         return "reference"
+    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
+        return "toc"
     if raw in {"paragraph", "text"}:
         return "text"
     if raw in {"title", "section", "subsection", "subsubsection"}:

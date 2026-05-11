@@ -21,11 +21,41 @@ The watcher reads:
 It reports success count, skip count, skip error types, pass rate, projected
 success count, and rough ETA. It is read-only.
 
+## PDF/TeX Pairing Contract
+
+Production data must use a closed compile loop:
+
+```text
+arXiv TeX source -> latexmk compiled PDF -> MinerU -> TeX AST labels
+```
+
+The v7 builders now prefer compile `accepted.jsonl` manifests from
+`step0_compile_arxiv_source_pool.py` or
+`step0_build_compilable_arxiv_dataset.py`. Those records contain the exact
+`pdf`, `source_dir`, and `main_tex` used to produce each sample, so the builder
+does not silently pair an official PDF with a different TeX revision. When such
+manifests exist under `data/09_eval_reports/*compile*/accepted.jsonl`, they are
+auto-discovered. The fallback same-ID scan remains only for local smoke tests
+and older one-off datasets.
+
+To force strict compiled-only pairing:
+
+```bash
+python -u scripts/pipeline/build_v7_dataset_staged.py \
+  --require-compiled-accepted \
+  --compiled-accepted-manifest data/09_eval_reports/arxiv_2025_source_pool_round3_compile_fixed/accepted.jsonl \
+  ...
+```
+
+Each produced manifest document now records `pdf_origin`, `compile_manifest`,
+and `compile_status`. Production samples should have
+`pdf_origin="compiled_from_tex"`.
+
 ## Source Pool Backfill
 
-`build_mini_dataset.py` scans `data/03_tex_source_pool` for TeX sources. If
-compiled and PDF-matched sources exist in `data/03_tex_sources` but are missing
-from the pool, backfill them without overwriting existing pool entries:
+Legacy tools may still scan `data/03_tex_source_pool`. If compiled and
+PDF-matched sources exist in `data/03_tex_sources` but are missing from that
+pool, backfill them without overwriting existing pool entries:
 
 ```bash
 python tools/sync_compiled_sources_to_pool.py \
@@ -50,6 +80,7 @@ loop:
 ```bash
 python -u scripts/pipeline/build_v7_dataset_staged.py \
   --target 1000 \
+  --require-compiled-accepted \
   --manifest-output data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS.json \
   --error-log data/00_manifests/v7_staged_1000_YYYYMMDD_HHMMSS_errors.jsonl \
   --mineru-batch-size 16 \
@@ -65,6 +96,8 @@ python -u scripts/pipeline/build_v7_dataset_staged.py \
 The staged builder keeps the final graph, label, manifest, and recall contracts
 from `build_mini_dataset.py`, but changes scheduling for throughput:
 
+- Candidate discovery prefers compile manifests and `data/03_tex_sources`, so
+  PDF and TeX stay paired through the original compile record.
 - TeX preflight rejects obvious parser-breaking sources before MinerU work.
 - MinerU receives directories of staged PDFs, amortizing service/model startup
   over many documents. Batches are capped by both document count and estimated

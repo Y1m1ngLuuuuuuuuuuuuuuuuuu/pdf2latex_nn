@@ -101,6 +101,7 @@ def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConf
                     font_name = normalize_font_name(str(span.get("font") or ""))
                     size = bucket_font_size(float(span.get("size") or 0.0), config.size_bucket)
                     flags = int(span.get("flags") or 0)
+                    bbox = normalized_span_bbox(page, span.get("bbox"))
                     spans.append(
                         {
                             "text": text,
@@ -110,6 +111,7 @@ def extract_raw_spans_for_item(doc: Any, item: dict[str, Any], config: StyleConf
                             "is_italic": is_italic_font(flags, font_name),
                             "is_inline_math": is_inline_math_font(font_name, text),
                             "is_inline_code": is_inline_code_font(font_name),
+                            "bbox": bbox,
                         }
                     )
     return spans
@@ -159,6 +161,7 @@ def merge_raw_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if current is not None and style_key(current) == key:
             current["text"] = join_span_text(current["text"], span["text"])
             current["char_count"] += len(span["text"])
+            current["bbox"] = union_bbox(current.get("bbox"), span.get("bbox"))
             continue
         if current is not None:
             merged.append(current)
@@ -171,6 +174,7 @@ def merge_raw_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "is_inline_math": span["is_inline_math"],
             "is_inline_code": span["is_inline_code"],
             "char_count": len(span["text"]),
+            "bbox": span.get("bbox"),
         }
     if current is not None:
         merged.append(current)
@@ -231,6 +235,38 @@ def baseline_font_size(spans: list[dict[str, Any]]) -> float | None:
     if not counts:
         return None
     return counts.most_common(1)[0][0]
+
+
+def normalized_span_bbox(page: Any, bbox: Any) -> list[float] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
+    if page_width <= 0 or page_height <= 0:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+    except (TypeError, ValueError):
+        return None
+    return [
+        max(0.0, min(1000.0, x0 / page_width * 1000.0)),
+        max(0.0, min(1000.0, y0 / page_height * 1000.0)),
+        max(0.0, min(1000.0, x1 / page_width * 1000.0)),
+        max(0.0, min(1000.0, y1 / page_height * 1000.0)),
+    ]
+
+
+def union_bbox(left: Any, right: Any) -> list[float] | None:
+    if not isinstance(left, list) or len(left) < 4:
+        return right if isinstance(right, list) and len(right) >= 4 else None
+    if not isinstance(right, list) or len(right) < 4:
+        return left
+    return [
+        min(float(left[0]), float(right[0])),
+        min(float(left[1]), float(right[1])),
+        max(float(left[2]), float(right[2])),
+        max(float(left[3]), float(right[3])),
+    ]
 
 
 def normalize_font_name(font_name: str) -> str:

@@ -276,6 +276,53 @@ def test_candidate_edges_treat_unnumbered_and_appendix_headings_as_scope_childre
     assert (3, 5, "scope_anchor") in typed
 
 
+def test_candidate_edges_anchor_visual_heading_paragraphs():
+    items = [
+        item("Body text establishes the baseline.", [80, 40, 480, 70]),
+        {
+            **item("Supplementary Material", [80, 120, 480, 150]),
+            "layout_role": "heading",
+            "style_baseline_size": 13.0,
+            "bold_char_ratio": 1.0,
+        },
+        item("Supplementary paragraph.", [80, 170, 480, 200]),
+        {**item("A.4 Why no conditional generation model?", [80, 230, 480, 260]), "type": "title"},
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=1,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (1, 3, "scope_anchor") in typed
+
+
+def test_candidate_edges_keep_alpha_appendix_headings_under_supplement_scope():
+    items = [
+        {**item("Body text.", [80, 40, 480, 70]), "style_baseline_size": 10.0},
+        {
+            **item("Supplementary Material", [80, 120, 480, 150]),
+            "layout_role": "heading",
+            "style_baseline_size": 14.0,
+        },
+        {**item("A. Additional Experiments", [80, 180, 480, 210]), "type": "title", "style_baseline_size": 12.0},
+        {**item("A.4 Why no conditional generation model?", [80, 230, 480, 260]), "type": "title", "style_baseline_size": 11.0},
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=1,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (1, 3, "scope_anchor") in typed
+
+
 def test_edge_attr_matrix_uses_punctuation_probe_relation_features():
     if not has_torch():
         return

@@ -49,6 +49,9 @@ class CandidateSample:
     pdf_path: Path
     tex_dir: Path
     main_tex_path: Path
+    pdf_origin: str = "id_matched_scan"
+    compile_manifest: str | None = None
+    compile_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,9 @@ class ProcessedSample:
     orphan_ratio: float
     candidate_edge_recall: float | None = None
     candidate_edge_missing: int | None = None
+    pdf_origin: str = "unknown"
+    compile_manifest: str | None = None
+    compile_status: str | None = None
 
     def manifest_record(self) -> dict[str, Any]:
         payload = {
@@ -74,7 +80,12 @@ class ProcessedSample:
             "alignment_mapping": str(self.alignment_mapping.resolve()),
             "label_counts": {str(key): int(value) for key, value in self.label_counts.items()},
             "orphan_ratio": self.orphan_ratio,
+            "pdf_origin": self.pdf_origin,
         }
+        if self.compile_manifest:
+            payload["compile_manifest"] = self.compile_manifest
+        if self.compile_status:
+            payload["compile_status"] = self.compile_status
         if self.candidate_edge_recall is not None:
             payload["candidate_edge_recall"] = float(self.candidate_edge_recall)
         if self.candidate_edge_missing is not None:
@@ -105,6 +116,9 @@ class MiniDatasetConfig:
     max_isolated_node_ratio: float
     min_non_none_edges: int
     min_candidate_recall: float
+    compiled_accepted_manifests: tuple[Path, ...]
+    auto_discover_compiled_manifests: bool
+    require_compiled_accepted: bool
     reuse_existing: bool
     force_mineru: bool
     force_json: bool
@@ -117,7 +131,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--raw-pdf-dir", type=Path, default=REPO_ROOT / "data/01_raw_pdfs")
-    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_source_pool")
+    parser.add_argument("--tex-source-dir", type=Path, default=REPO_ROOT / "data/03_tex_sources")
     parser.add_argument(
         "--mineru-output-dir",
         type=Path,
@@ -152,7 +166,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--main-tex-names",
         default="main.tex",
-        help="Comma-separated TeX entry filenames. Default is strict: main.tex only.",
+        help="Comma-separated TeX entry filenames. Fallback root detection is still used when these names do not exist.",
+    )
+    parser.add_argument(
+        "--compiled-accepted-manifest",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "accepted.jsonl emitted by step0_compile_arxiv_source_pool.py or "
+            "step0_build_compilable_arxiv_dataset.py. When present, candidate "
+            "PDF/TeX pairs are read from these compile records instead of only "
+            "matching directories by arXiv id."
+        ),
+    )
+    parser.add_argument(
+        "--no-auto-compiled-accepted-manifests",
+        action="store_true",
+        help="Disable auto-discovery of data/09_eval_reports/*compile*/accepted.jsonl manifests.",
+    )
+    parser.add_argument(
+        "--require-compiled-accepted",
+        action="store_true",
+        help="Fail closed: do not fall back to id-matched PDF/TeX scanning if no compile accepted manifest yields candidates.",
     )
     parser.add_argument("--mineru-command", default=default_mineru_command())
     parser.add_argument("--mineru-timeout", type=int, default=900)
@@ -186,9 +222,10 @@ def main() -> int:
     if config.dry_run:
         for candidate in candidates[: config.target]:
             print(
-                f"dry_run candidate id={candidate.document_id} "
-                f"pdf={candidate.pdf_path} tex={candidate.main_tex_path}"
-            )
+            f"dry_run candidate id={candidate.document_id} "
+            f"pdf={candidate.pdf_path} tex={candidate.main_tex_path} "
+            f"origin={candidate.pdf_origin} manifest={candidate.compile_manifest}"
+        )
         return 0
 
     processed: list[ProcessedSample] = []
@@ -254,6 +291,9 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         max_isolated_node_ratio=float(args.max_isolated_node_ratio),
         min_non_none_edges=int(args.min_non_none_edges),
         min_candidate_recall=float(args.min_candidate_recall),
+        compiled_accepted_manifests=tuple(path.resolve() for path in args.compiled_accepted_manifest),
+        auto_discover_compiled_manifests=not bool(args.no_auto_compiled_accepted_manifests),
+        require_compiled_accepted=bool(args.require_compiled_accepted),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=bool(args.force_mineru),
         force_json=bool(args.force_json),
@@ -264,7 +304,23 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
 
 
 def scan_candidates(config: MiniDatasetConfig) -> list[CandidateSample]:
-    """Select samples that have both a raw PDF and a TeX source folder with main.tex."""
+    """Select PDF/TeX pairs.
+
+    The preferred path is an explicit compile `accepted.jsonl`, because it
+    proves the PDF in `data/01_raw_pdfs` was produced from the same TeX source
+    tree. If no compile manifest is available, the legacy id-matched scan is
+    kept as a fallback for local smoke tests and older datasets.
+    """
+
+    manifest_candidates = scan_candidates_from_compile_manifests(config)
+    if manifest_candidates or config.require_compiled_accepted:
+        return manifest_candidates
+
+    return scan_candidates_by_id(config)
+
+
+def scan_candidates_by_id(config: MiniDatasetConfig) -> list[CandidateSample]:
+    """Legacy fallback: select samples with same-id PDF and TeX source folder."""
 
     pdf_index = build_pdf_index(config.raw_pdf_dir)
     candidates: list[CandidateSample] = []
@@ -275,8 +331,127 @@ def scan_candidates(config: MiniDatasetConfig) -> list[CandidateSample]:
         main_tex = first_existing_tex_entry(tex_dir, config.main_tex_names)
         if main_tex is None:
             continue
-        candidates.append(CandidateSample(document_id=document_id, pdf_path=pdf_path, tex_dir=tex_dir, main_tex_path=main_tex))
+        candidates.append(
+            CandidateSample(
+                document_id=document_id,
+                pdf_path=pdf_path,
+                tex_dir=tex_dir,
+                main_tex_path=main_tex,
+                pdf_origin="id_matched_scan",
+            )
+        )
     return candidates
+
+
+def scan_candidates_from_compile_manifests(config: MiniDatasetConfig) -> list[CandidateSample]:
+    manifests = compile_manifest_paths(config)
+    if not manifests:
+        return []
+
+    candidates: list[CandidateSample] = []
+    seen: set[str] = set()
+    for manifest_path in manifests:
+        if not manifest_path.exists():
+            continue
+        for row in iter_jsonl(manifest_path):
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "")
+            if status not in {"accepted", "already_compiled", "already_present"}:
+                continue
+            document_id = str(row.get("arxiv_id") or row.get("document_id") or "").strip()
+            if not document_id or document_id in seen:
+                continue
+            candidate = candidate_from_compile_record(row, manifest_path, config)
+            if candidate is None:
+                continue
+            candidates.append(candidate)
+            seen.add(document_id)
+    return sorted(candidates, key=lambda item: item.document_id)
+
+
+def compile_manifest_paths(config: MiniDatasetConfig) -> tuple[Path, ...]:
+    paths: list[Path] = list(config.compiled_accepted_manifests)
+    if config.auto_discover_compiled_manifests:
+        patterns = [
+            "data/09_eval_reports/arxiv_2025_compilable*/accepted.jsonl",
+            "data/09_eval_reports/arxiv_2025_source_pool*compile*/accepted.jsonl",
+        ]
+        for pattern in patterns:
+            paths.extend(sorted(config.project_root.glob(pattern)))
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path if path.is_absolute() else config.project_root / path
+        resolved = resolved.resolve()
+        if resolved not in seen:
+            unique.append(resolved)
+            seen.add(resolved)
+    return tuple(unique)
+
+
+def candidate_from_compile_record(row: dict[str, Any], manifest_path: Path, config: MiniDatasetConfig) -> CandidateSample | None:
+    document_id = str(row.get("arxiv_id") or row.get("document_id") or "").strip()
+    if not document_id:
+        return None
+
+    pdf_path = resolve_record_path(row.get("pdf"), config.project_root)
+    if pdf_path is None or not pdf_path.is_file():
+        pdf_path = config.raw_pdf_dir / f"{document_id}.pdf"
+    if not pdf_path.is_file():
+        return None
+
+    tex_dir = resolve_record_path(row.get("source_dir"), config.project_root)
+    if tex_dir is None or not tex_dir.is_dir():
+        tex_dir = config.tex_source_dir / document_id
+    if not tex_dir.is_dir():
+        return None
+
+    main_tex = None
+    main_tex_value = row.get("main_tex")
+    if isinstance(main_tex_value, str) and main_tex_value.strip():
+        candidate_tex = tex_dir / main_tex_value.strip()
+        if candidate_tex.is_file():
+            main_tex = candidate_tex
+    if main_tex is None:
+        main_tex = first_existing_tex_entry(tex_dir, config.main_tex_names)
+    if main_tex is None:
+        return None
+
+    return CandidateSample(
+        document_id=document_id,
+        pdf_path=pdf_path.resolve(),
+        tex_dir=tex_dir.resolve(),
+        main_tex_path=main_tex.resolve(),
+        pdf_origin="compiled_from_tex",
+        compile_manifest=str(manifest_path),
+        compile_status=str(row.get("status") or ""),
+    )
+
+
+def resolve_record_path(value: Any, project_root: Path) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = project_root / path
+    return path
+
+
+def iter_jsonl(path: Path) -> Any:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return
 
 
 def build_pdf_index(raw_pdf_dir: Path) -> dict[str, Path]:
@@ -694,6 +869,9 @@ def summarize_processed_sample(
         alignment_mapping=paths["mapping"],
         label_counts={idx: int(counts[idx]) for idx in range(3)},
         orphan_ratio=orphan_ratio,
+        pdf_origin=candidate.pdf_origin,
+        compile_manifest=candidate.compile_manifest,
+        compile_status=candidate.compile_status,
         candidate_edge_recall=(
             float(recall_report["overall"]["recall"]) if recall_report is not None else getattr(graph, "candidate_edge_recall", None)
         ),
@@ -724,6 +902,8 @@ def log_processing_error(path: Path, candidate: CandidateSample, exc: BaseExcept
         "document_id": candidate.document_id,
         "pdf_path": str(candidate.pdf_path),
         "tex_path": str(candidate.main_tex_path),
+        "pdf_origin": candidate.pdf_origin,
+        "compile_manifest": candidate.compile_manifest,
         "error_type": type(exc).__name__,
         "error": str(exc),
         "traceback": traceback.format_exc(limit=20),

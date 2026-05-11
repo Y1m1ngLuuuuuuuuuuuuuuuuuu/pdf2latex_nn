@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from src.perception.reading_order import fuse_micro_nodes, style_spans_text
-from src.perception.title_features import title_numbering_level
+from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes, is_toc_record, style_spans_text
+from src.perception.title_features import title_numbering_level, title_numbering_path
 from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_file
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
@@ -258,7 +258,20 @@ SKIP_TEX_NODE_NAMES = {
 HEADING_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
 SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(\d+)[\.\)]\s+")
+ALPHA_OR_ROMAN_HEADING_RE = re.compile(r"^\s*([A-Za-z]+)[\.\)]\s+(.*)$")
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
+TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
+HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
+UPPERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[A-Z]")
+RUN_IN_HEADING_RE = re.compile(
+    r"^\s*(?:"
+    r"[A-Z][A-Za-z][A-Za-z0-9/\-\s]{1,48}[.:]"
+    r"|[IVXLCDM]{1,8}\."
+    r"|[A-Z]\."
+    r"|\d+(?:\.\d+)*[\.\)]"
+    r")\s+"
+)
 MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
 CAPTION_TEX_NODE_TYPES = {STANDARD_FIGURE_CAPTION_NODE, STANDARD_TABLE_CAPTION_NODE}
 VISUAL_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.+~/-]+)\.(?:png|jpe?g|pdf|eps|svg)", re.IGNORECASE)
@@ -361,6 +374,8 @@ class AlignmentLabeler:
         self.visual_hierarchy: VisualHierarchy | None = None
         self.flattener_summary: dict[str, Any] | None = None
         self.alignment_quality: dict[str, Any] = {}
+        self._edge_attr: Any | None = None
+        self._edge_attr_fields: dict[str, int] = {}
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
         graph = self.load_graph()
@@ -421,6 +436,9 @@ class AlignmentLabeler:
         if not isinstance(items, list):
             raise ValueError(f"Expected {self.content_json_path} to contain an items list")
         items = [item if isinstance(item, dict) else {"text_for_embedding": str(item)} for item in items]
+        filtered_items = filter_graph_content_items(items)
+        if expected_node_count is not None and len(filtered_items) == expected_node_count:
+            items = filtered_items
         if force_micro_fusion:
             fused_items = fuse_micro_nodes(items)
             if expected_node_count is None or len(fused_items) == expected_node_count:
@@ -741,13 +759,15 @@ class AlignmentLabeler:
 
         labels = []
         edge_index = graph.edge_index.detach().cpu()
+        self._edge_attr = graph.edge_attr.detach().cpu() if hasattr(graph, "edge_attr") and graph.edge_attr is not None else None
+        self._edge_attr_fields = edge_attr_fields_from_graph(graph)
         for edge_pos in range(edge_index.shape[1]):
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
-            labels.append(self.infer_relation(source, target))
+            labels.append(self.infer_relation(source, target, edge_pos=edge_pos))
         return torch.tensor(labels, dtype=torch.long)
 
-    def infer_relation(self, source_index: int, target_index: int) -> int:
+    def infer_relation(self, source_index: int, target_index: int, *, edge_pos: int | None = None) -> int:
         if self.node_is_unlabelable_visual_orphan(source_index) or self.node_is_unlabelable_visual_orphan(target_index):
             return int(TexRelationLabel.NONE)
         source_item = self.pdf_nodes[source_index].item if 0 <= source_index < len(self.pdf_nodes) else {}
@@ -766,6 +786,8 @@ class AlignmentLabeler:
             if not self.same_tex_node_are_adjacent_fragments(source_index, target_index, source_match.tex_id):
                 return int(TexRelationLabel.NONE)
             if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
+                return int(TexRelationLabel.NONE)
+            if self.same_tex_node_merge_hits_visual_boundary(source_index, target_index, edge_pos=edge_pos):
                 return int(TexRelationLabel.NONE)
             if same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
                 return int(TexRelationLabel.MERGE)
@@ -832,6 +854,124 @@ class AlignmentLabeler:
             if 0 <= index < len(self.pdf_nodes) and LIST_MARKER_RE.match(self.pdf_nodes[index].text):
                 return True
         return False
+
+    def same_tex_node_merge_hits_visual_boundary(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        edge_pos: int | None = None,
+    ) -> bool:
+        """Reject same-TeX MERGE labels across visible block boundaries.
+
+        TeX paragraphs are often coarse: a single paragraph/list item can
+        contain run-in headings, examples, equations, or visually independent
+        statements.  Those fragments share a TeX id but should teach the GNN
+        NONE, not MERGE.  These barriers are deliberately label-time rules so
+        the model never learns physically impossible stitch edges.
+        """
+
+        source_node = self.pdf_nodes[source_index]
+        target_node = self.pdf_nodes[target_index]
+        source_item = source_node.item
+        target_item = target_node.item
+        source_type = strict_pdf_merge_type(source_item)
+        target_type = strict_pdf_merge_type(target_item)
+
+        if LIST_MARKER_RE.match(target_node.text):
+            return True
+        if source_type != target_type:
+            return True
+        if target_index < source_index and is_run_in_heading_like(source_node):
+            return True
+        if is_run_in_heading_like(target_node):
+            return True
+        if self.same_tex_text_merge_crosses_paragraph_boundary(
+            source_node,
+            target_node,
+            source_type,
+            target_type,
+            edge_pos=edge_pos,
+        ):
+            return True
+        if self.same_tex_merge_hits_geometry_boundary(source_node, target_node):
+            return True
+        if edge_pos is not None and self.edge_attr_blocks_same_tex_merge(edge_pos):
+            return True
+        return False
+
+    def same_tex_text_merge_crosses_paragraph_boundary(
+        self,
+        source_node: PdfAlignmentNode,
+        target_node: PdfAlignmentNode,
+        source_type: str,
+        target_type: str,
+        *,
+        edge_pos: int | None = None,
+    ) -> bool:
+        """Block same-TeX MERGE across obvious visual paragraph boundaries.
+
+        Some TeX parser fallbacks flatten multiple visual paragraphs into one
+        coarse TeX paragraph.  Without this guard, adjacent PDF blocks such as
+        ``"... finished."`` -> ``"New paragraph starts ..."`` become MERGE
+        positives simply because they share that coarse TeX id.  We only apply
+        the rule to text-text pairs and keep hyphenated continuations intact.
+        """
+
+        if source_type != "text" or target_type != "text":
+            return False
+        if source_node.node_index == target_node.node_index:
+            return False
+        source_terminal = 0.0
+        source_hyphen = 0.0
+        if edge_pos is not None:
+            source_terminal = self.edge_attr_value(edge_pos, "source_ends_with_terminal_punctuation")
+            source_hyphen = self.edge_attr_value(edge_pos, "source_ends_with_hyphen")
+        if source_terminal <= 0.0:
+            source_terminal = float(ends_with_terminal_punctuation(source_node.text))
+        if source_hyphen <= 0.0:
+            source_hyphen = float(ends_with_hyphen(source_node.text))
+        if source_hyphen >= 0.5 or source_terminal < 0.5:
+            return False
+        return starts_with_uppercase_text(target_node.text)
+
+    def edge_attr_blocks_same_tex_merge(self, edge_pos: int) -> bool:
+        if self._edge_attr is None or not self._edge_attr_fields:
+            return False
+        if edge_pos < 0 or edge_pos >= int(self._edge_attr.shape[0]):
+            return False
+        has_gutter = self.edge_attr_value(edge_pos, "has_x_gutter")
+        y_overlap = self.edge_attr_value(edge_pos, "y_overlap_ratio")
+        if has_gutter >= 0.5 and y_overlap > 0.3:
+            return True
+        far = self.edge_attr_value(edge_pos, "index_delta_bin_far")
+        reverse = self.edge_attr_value(edge_pos, "index_delta_bin_reverse")
+        source_hyphen = self.edge_attr_value(edge_pos, "source_ends_with_hyphen")
+        if far >= 0.5 and source_hyphen < 0.5:
+            return True
+        if reverse >= 0.5:
+            return True
+        return False
+
+    def same_tex_merge_hits_geometry_boundary(self, source_node: PdfAlignmentNode, target_node: PdfAlignmentNode) -> bool:
+        source_bbox = last_bbox(source_node.item.get("bbox"))
+        target_bbox = first_bbox(target_node.item.get("bbox"))
+        if source_bbox is None or target_bbox is None:
+            return False
+        if target_node.node_index < source_node.node_index:
+            return True
+        y_overlap = bbox_y_overlap_ratio(source_bbox, target_bbox)
+        if y_overlap > 0.3 and bbox_x_gap(source_bbox, target_bbox) > 30.0:
+            return True
+        if abs(target_node.node_index - source_node.node_index) > 5 and not ends_with_hyphen(source_node.text):
+            return True
+        return False
+
+    def edge_attr_value(self, edge_pos: int, field_name: str) -> float:
+        column = self._edge_attr_fields.get(field_name)
+        if column is None or self._edge_attr is None:
+            return 0.0
+        return float(self._edge_attr[edge_pos, column].item())
 
     def same_reference_scope(self, source_index: int, target_index: int) -> bool:
         return False
@@ -959,6 +1099,8 @@ class AlignmentLabeler:
     def is_expected_visual_orphan(self, node: PdfAlignmentNode) -> bool:
         if not self.config.exclude_expected_visual_orphans:
             return False
+        if is_toc_record(node.item):
+            return True
         if layout_layer_name(node.item) == "metadata_layer":
             return True
         raw_type = canonical_pdf_type(node.item)
@@ -1032,12 +1174,16 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
     heading_ids = frozenset(node_id for node_id in heading_candidates if node_id not in document_title_ids)
     parent_by_node: dict[int, int | None] = {}
     children_by_parent: dict[int | None, list[int]] = {}
-    stack: list[tuple[int, int]] = []
+    stack: list[tuple[int, int, tuple[str, ...] | None]] = []
+    active_list_parent: int | None = None
+    active_list_next_number: int | None = None
+    active_list_last_pos = -1
+    effective_pos = 0
 
     for node in nodes:
         node_id = node.node_index
         layer = layout_layer_name(node.item)
-        if layer in {"metadata_layer", "noise_layer"}:
+        if layer == "noise_layer" or (layer == "metadata_layer" and not metadata_layer_heading_override(node.item)):
             parent_by_node[node_id] = None
             children_by_parent.setdefault(None, []).append(node_id)
             continue
@@ -1045,16 +1191,37 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             parent_by_node[node_id] = None
             children_by_parent.setdefault(None, []).append(node_id)
             continue
+        effective_pos += 1
         if node_id in heading_ids:
             level = heading_levels[node_id]
+            numbering_path = title_numbering_path(node.text)
             while stack and stack[-1][1] >= level:
                 stack.pop()
+            if numbering_path is not None:
+                while stack and not heading_numbering_parent_is_compatible(stack[-1][2], numbering_path):
+                    stack.pop()
             parent_id = stack[-1][0] if stack else None
             parent_by_node[node_id] = parent_id
             children_by_parent.setdefault(parent_id, []).append(node_id)
-            stack.append((node_id, level))
+            stack.append((node_id, level, numbering_path))
             continue
+        list_number = ordered_list_marker_number(node.text)
         parent_id = stack[-1][0] if stack else None
+        if list_number is not None:
+            if (
+                active_list_parent is not None
+                and active_list_next_number == list_number
+                and 0 <= effective_pos - active_list_last_pos <= 18
+            ):
+                parent_id = active_list_parent
+            else:
+                active_list_parent = parent_id
+            active_list_next_number = list_number + 1
+            active_list_last_pos = effective_pos
+        elif LIST_MARKER_RE.match(node.text):
+            active_list_parent = parent_id
+            active_list_next_number = None
+            active_list_last_pos = effective_pos
         parent_by_node[node_id] = parent_id
         children_by_parent.setdefault(parent_id, []).append(node_id)
 
@@ -1071,6 +1238,43 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
         document_title_ids=frozenset(document_title_ids),
         body_font_size=body_font_size,
     )
+
+
+def heading_numbering_parent_is_compatible(parent_path: tuple[str, ...] | None, child_path: tuple[str, ...]) -> bool:
+    if not parent_path:
+        return True
+    if len(parent_path) >= len(child_path):
+        return False
+    return child_path[: len(parent_path)] == parent_path
+
+
+def ordered_list_marker_number(text: str) -> int | None:
+    match = ORDERED_LIST_MARKER_RE.match(str(text or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def alpha_or_roman_heading_level(text: str) -> int | None:
+    match = ALPHA_OR_ROMAN_HEADING_RE.match(" ".join(str(text or "").split()))
+    if not match:
+        return None
+    token = match.group(1).upper()
+    tail = match.group(2)
+    if len(token) > 1 or (token in {"I", "V", "X", "L", "C", "D", "M"} and looks_like_all_caps_heading(tail)):
+        return 1
+    return 2
+
+
+def looks_like_all_caps_heading(text: str) -> bool:
+    letters = [char for char in str(text or "") if char.isalpha()]
+    if len(letters) < 4:
+        return False
+    uppercase = sum(1 for char in letters if char.isupper())
+    return uppercase / max(1, len(letters)) >= 0.75
 
 
 def infer_body_font_size(nodes: list[PdfAlignmentNode]) -> float:
@@ -1101,9 +1305,12 @@ def is_visual_heading_candidate(
     text = node.text.strip()
     if not text:
         return False
-    if layout_layer_name(node.item) in {"metadata_layer", "noise_layer"}:
-        return False
+    layer = layout_layer_name(node.item)
     raw_type = canonical_pdf_type(node.item)
+    if layer == "noise_layer":
+        return False
+    if layer == "metadata_layer" and not metadata_layer_heading_override(node.item):
+        return False
     if raw_type in HEADING_TYPES:
         return True
     if raw_type in NON_HEADING_PDF_TYPES or str(node.item.get("list_type") or "").lower() == "reference_list":
@@ -1113,13 +1320,19 @@ def is_visual_heading_candidate(
     if title_numbering_level(text) is not None and looks_like_standalone_heading(text):
         return True
     font_size = pdf_font_size(node.item)
-    if body_font_size > 0 and font_size >= body_font_size * config.visual_heading_font_scale and looks_like_standalone_heading(text):
+    if (
+        body_font_size > 0
+        and font_size >= body_font_size * max(1.18, config.visual_heading_font_scale)
+        and looks_like_standalone_heading(text)
+        and looks_like_title_case_heading(text)
+    ):
         return True
     if (
         body_font_size > 0
-        and font_size >= body_font_size * config.visual_bold_heading_font_scale
+        and font_size >= body_font_size * max(1.12, config.visual_bold_heading_font_scale)
         and pdf_bold_ratio(node.item) >= 0.45
         and looks_like_standalone_heading(text)
+        and looks_like_title_case_heading(text)
     ):
         return True
     return False
@@ -1176,6 +1389,10 @@ def infer_visual_heading_levels(
         if numbered_level is not None:
             levels[node_id] = min(max(1, numbered_level), 3)
             continue
+        alpha_level = alpha_or_roman_heading_level(node.text)
+        if alpha_level is not None:
+            levels[node_id] = alpha_level
+            continue
         raw_type = canonical_pdf_type(node.item)
         if raw_type in SECTION_TYPE_LEVELS:
             levels[node_id] = SECTION_TYPE_LEVELS[raw_type]
@@ -1204,6 +1421,24 @@ def looks_like_standalone_heading(text: str) -> bool:
     return True
 
 
+def looks_like_title_case_heading(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if title_numbering_path(value) is not None:
+        return True
+    tokens = [token.strip("()[]{}:;,.") for token in re.split(r"\s+", value) if token.strip("()[]{}:;,.")]
+    meaningful = [token for token in tokens if any(char.isalpha() for char in token)]
+    if not meaningful:
+        return False
+    heading_like = 0
+    for token in meaningful:
+        letters = [char for char in token if char.isalpha()]
+        if not letters:
+            continue
+        if letters[0].isupper() or sum(char.isupper() for char in letters) / max(1, len(letters)) >= 0.6:
+            heading_like += 1
+    return heading_like / max(1, len(meaningful)) >= 0.6
+
+
 def canonical_pdf_type(item: dict[str, Any]) -> str:
     return str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").strip().lower()
 
@@ -1214,7 +1449,41 @@ def canonical_pdf_merge_type(item: dict[str, Any]) -> str:
     if str(item.get("list_type") or "").lower() == "reference_list":
         return "reference"
     raw = canonical_pdf_type(item)
+    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
+        return "toc"
     if raw in {"paragraph", "text", "paragraph_text", "body", "list", "item"}:
+        return "text"
+    if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
+        return "title"
+    if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
+        return "equation"
+    if raw in {"inline_math", "inline_formula", "math_inline"}:
+        return "inline_math"
+    if raw in {"reference", "references", "bibliography"}:
+        return "reference"
+    if raw in {"table", "figure", "image", "chart", "algorithm", "code"}:
+        return raw
+    return "text"
+
+
+def strict_pdf_merge_type(item: dict[str, Any]) -> str:
+    """Return a visual merge family without folding list items into text.
+
+    ``canonical_pdf_merge_type`` is intentionally broad for alignment and
+    fallback matching.  MERGE labels need a stricter view: a MinerU/PyMuPDF
+    ``list`` block is a structural/list item boundary, not just ordinary body
+    text, and it must not be stitched into a neighboring paragraph solely
+    because the TeX parser mapped both fragments to the same node.
+    """
+
+    if str(item.get("list_type") or "").lower() == "reference_list":
+        return "reference"
+    raw = canonical_pdf_type(item)
+    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
+        return "toc"
+    if raw in {"list", "item"}:
+        return "list"
+    if raw in {"paragraph", "text", "paragraph_text", "body"}:
         return "text"
     if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
         return "title"
@@ -1237,13 +1506,50 @@ def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> 
     MERGE edges even though fuzzy alignment maps them to the same TeX node.
     """
 
-    left_type = canonical_pdf_merge_type(left.item)
-    right_type = canonical_pdf_merge_type(right.item)
+    left_type = strict_pdf_merge_type(left.item)
+    right_type = strict_pdf_merge_type(right.item)
     if LIST_MARKER_RE.match(right.text):
         return False
     if not same_layout_scope_can_merge(left.item, right.item):
         return False
     return left_type == right_type and left_type in MERGE_COMPATIBLE_PDF_TYPES
+
+
+def is_run_in_heading_like(node: PdfAlignmentNode) -> bool:
+    """Detect visually independent run-in headings inside coarse TeX nodes."""
+
+    text = str(node.text or "").strip()
+    if not text:
+        return False
+    if LIST_MARKER_RE.match(text):
+        return True
+    if not RUN_IN_HEADING_RE.match(text):
+        return False
+    # Plain subsection titles are already blocked by the title family.  This
+    # probe catches paragraph-internal heads such as "Put operation." and
+    # "Space complexity." that appear as separate visual blocks.
+    return len(clean_text(text)) >= 3
+
+
+def ends_with_terminal_punctuation(text: str) -> bool:
+    return bool(TERMINAL_PUNCTUATION_RE.search(str(text or "").strip()))
+
+
+def ends_with_hyphen(text: str) -> bool:
+    return bool(HYPHEN_END_RE.search(str(text or "").strip()))
+
+
+def starts_with_uppercase_text(text: str) -> bool:
+    return bool(UPPERCASE_START_RE.match(str(text or "")))
+
+
+def edge_attr_fields_from_graph(graph: Any) -> dict[str, int]:
+    schema = getattr(graph, "edge_attr_schema", None)
+    if isinstance(schema, dict):
+        fields = schema.get("fields")
+        if isinstance(fields, list):
+            return {str(name): index for index, name in enumerate(fields)}
+    return {}
 
 
 def same_layout_scope_can_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -1272,8 +1578,23 @@ def relation_layers_are_incompatible(left: dict[str, Any], right: dict[str, Any]
     if "noise_layer" in {left_layer, right_layer}:
         return True
     if "metadata_layer" in {left_layer, right_layer} and left_layer != right_layer:
+        if metadata_layer_heading_override(left) or metadata_layer_heading_override(right):
+            return False
         return True
     return False
+
+
+def metadata_layer_heading_override(item: dict[str, Any]) -> bool:
+    raw = canonical_pdf_type(item)
+    if raw not in HEADING_TYPES:
+        return False
+    text = stringify_text_payload(
+        item.get("text_for_embedding") or item.get("text") or item.get("merged_text") or item.get("text_preview")
+    ).strip()
+    if title_numbering_path(text) is not None:
+        return True
+    normalized = re.sub(r"[^a-z]+", "", text.casefold())
+    return normalized in {"abstract", "references", "bibliography", "appendix", "acknowledgements", "acknowledgments"}
 
 
 def layout_layer_name(item: dict[str, Any]) -> str:
@@ -1342,6 +1663,21 @@ def pdf_bold_ratio(item: dict[str, Any]) -> float:
 def first_bbox(value: Any) -> tuple[float, float, float, float] | None:
     chunks = bbox_chunks(value)
     return chunks[0] if chunks else None
+
+
+def last_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    chunks = bbox_chunks(value)
+    return chunks[-1] if chunks else None
+
+
+def bbox_y_overlap_ratio(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    intersection = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    min_height = max(1.0, min(left[3] - left[1], right[3] - right[1]))
+    return intersection / min_height
+
+
+def bbox_x_gap(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    return max(0.0, max(left[0], right[0]) - min(left[2], right[2]))
 
 
 def bbox_chunks(value: Any) -> list[tuple[float, float, float, float]]:

@@ -1,6 +1,6 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-05-07
+**Last updated**: 2026-05-11
 
 This project should be managed as a source repository plus external runtime artifacts. The source repository is for code and reproducibility metadata. AutoDL is for data, feature caches, training, and generated outputs.
 
@@ -49,6 +49,7 @@ docs/
 data/00_manifests/
 data/01_raw_pdfs/
 data/02_mineru_outputs/
+data/03_tex_sources/
 data/03_tex_source_pool/
 data/04_ground_truth_ir/
 data/05_observed_ir/
@@ -62,10 +63,25 @@ Current maintained docs:
 
 ```text
 docs/PROJECT_SOURCE_OF_TRUTH.md      repository / AutoDL boundary
+docs/PROJECT_OVERVIEW.md             project framework, methodology, implementation summary
+docs/ablation_plan_v2.md             reproducible GNN and feature ablation protocol
+docs/frontend_backend_contract_v1.md decoupled PDF/TeX/GNN/generator interfaces
 docs/feature_schema_v0.md            PDF IR and tensor feature contract
 docs/ground_truth_labeling_v0.md     TeX-to-PDF alignment and GNN label contract
+docs/v7_training_and_monitoring.md   v7 batch, strict PDF/TeX pairing, training commands
 docs/LOCAL_CONFIGURATION.md          local private configuration notes
 ```
+
+Production training samples must come from a compile-closed pair:
+
+```text
+TeX source -> latexmk compiled PDF in data/01_raw_pdfs -> MinerU/GNN labels
+```
+
+The v7 builders should prefer compile `accepted.jsonl` manifests and
+`data/03_tex_sources` over implicit same-ID pairing against
+`data/03_tex_source_pool`. `data/03_tex_source_pool` is kept as a legacy/source
+staging area, not as the authoritative TeX side for new production runs.
 
 Legacy reference material is stored outside the active skeleton:
 
@@ -180,6 +196,115 @@ output root
 The manifest can be committed. The bulk data should stay on AutoDL or external storage.
 
 ## Current Pipeline Contracts
+
+The active architecture is interface-first. Heavy front-end extraction,
+truth-label generation, GNN inference, TreeDecoder, and LaTeX rendering must
+communicate through stable IR boundaries rather than importing each other's
+private implementation details. The canonical interface document is:
+
+```text
+docs/frontend_backend_contract_v1.md
+```
+
+Code-level IR contracts live in:
+
+```text
+src/ir/schema.py
+src/ir/serialization.py
+src/ir/validators.py
+```
+
+The active v7-to-IR adapter lives in:
+
+```text
+src/adapters/mineru_v7_document_ir.py
+scripts/pipeline/convert_v7_to_document_ir.py
+```
+
+v7 content JSON is a frontend-private format. `DocumentIR` is the stable
+frontend/backend boundary. Renderers, style extractors, citation repair, and
+future journal-template generators should consume `DocumentIR`, not raw
+`*_content_list_v7_styles.json`.
+
+The stable cross-module artifacts are:
+
+```text
+DocumentIR          PDF frontend output
+GraphInput          unlabeled GNN input tensor reference
+GraphLabels         TeX-derived truth labels
+PredictedRelations  model inference output
+RenderTreeIR        TreeDecoder output for generation
+StyleProfile        rendering mode/style template
+CitationResolution  citation/bibliography repair sidecar
+```
+
+Current implementation may continue to write legacy `.pt` graph files while the
+IR layer is adopted incrementally. New code should add sidecar JSON manifests
+instead of changing running production `.pt` schemas in place.
+
+Generation-side original-layout reconstruction now starts from explicit sidecar
+modules instead of embedding style and citation rules inside TreeDecoder:
+
+```text
+src/generation/style_profile.py  DocumentIR -> StyleProfile
+src/generation/citations.py      DocumentIR -> CitationResolution
+src/generation/ir_renderer.py    DocumentIR + RenderTreeIR + StyleProfile -> .tex
+```
+
+`StyleProfileExtractor` owns global document appearance such as page size,
+margins, column count/gap, body font, title font clusters, paragraph spacing,
+and bibliography style. `CitationResolver` owns `[1]`/`[1-3]` citation repair
+and strips OCR reference labels before emitting `\bibitem`. These two modules
+are additive and do not change the active AutoDL extraction process.
+
+The original-like backend now covers the first reconstruction layer:
+
+```text
+1. page/layout profile:
+   page size, margin ratios, text area, column count/gap, column mode
+2. role-level typography:
+   body/heading/list/math/bibliography font size and spacing estimates
+   header/footer is tracked separately and does not pollute body style
+   stable page headers, footers, and page numbers are inferred statistically
+   from repeated edge nodes and rendered globally with fancyhdr; OCR edge
+   text is never replayed page-by-page
+   document-level font clusters are derived from StyleSpan font_size/font_name
+   weights and exposed as `font_clusters` / `role_font_clusters`
+   PDF font names are canonicalized into font classes and optional fontspec
+   fallbacks (`TeX Gyre Termes/Heros/Cursor`, `Latin Modern`). Recognition
+   uses embedded PDF span metadata and does not require installed fonts;
+   exact font replay is opt-in because it requires XeLaTeX/LuaLaTeX and local
+   font availability.
+3. local spans:
+   bold, italic, inline code, inline math, and citation-aware span rendering
+   local font-family changes, font-size changes, and super/subscript rendering
+   must be driven by StyleSpan font/bbox/size features, not content keywords
+4. citations/references:
+   numeric marker repair, real key passthrough from reference_items, OCR
+   reference-label stripping, and thebibliography rendering
+5. table fallback:
+   adjacent MinerU table fragments are grouped; only the primary group node is
+   rendered. Batch rendering defaults to a placeholder to avoid large image
+   assets; union-bbox PDF crops require an explicit render flag/config
+6. render-tree safety:
+   IR renderer sorts siblings by source reading_index before rendering, so MST
+   insertion order cannot scramble the body flow. Consecutive list-like
+   siblings are grouped into itemize/enumerate, and display equations or other
+   structural blocks between list items stay inside the active list item.
+7. type dispatch:
+   abstract, table, figure, algorithm, code, toc placeholder, display equation,
+   inline math, references, and raw LaTeX roles have explicit renderer branches
+   instead of falling through to ordinary paragraphs.
+8. OCR/math safety:
+   lone symbol-font braces and unicode math glyphs are guarded so dirty OCR
+   spans do not produce uncompilable inline math. Repeated reference render
+   nodes are collapsed into one bibliography block.
+```
+
+Structured table-to-tabular reconstruction, footnotes, margin notes, exact float
+placement, and journal template learning remain later backend phases.
+`table_body`/HTML is retained as weak evidence, but default original-like
+rendering should not create table crop images unless explicitly requested.
 
 The current PDF-side production JSON format is:
 

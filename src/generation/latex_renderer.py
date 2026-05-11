@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
+from src.generation.citations import strip_reference_label
+from src.generation.table_assets import ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
-from src.perception.title_features import strip_title_numbering, title_numbering_level
+from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
 
 
 DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref", "float", "algorithm", "algpseudocode"]
@@ -104,9 +107,47 @@ PSEUDOCODE_WHILE_RE = re.compile(r"^\s*while\s+(.+?)(?:\s+do)?\s*$", re.IGNORECA
 PSEUDOCODE_IF_RE = re.compile(r"^\s*if\s+(.+?)(?:\s+then)?\s*$", re.IGNORECASE)
 PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
 PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
+ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
+BARE_OPERATOR_EQUATION_RE = re.compile(r"^\\(?:arc)?(?:sin|cos|tan)\s*=")
+GREEK_CONTEXT_RE = re.compile(r"[αβγδεζηθικλμνξπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΠΡΣΤΥΦΧΨΩ]")
+GREEK_TO_LATEX = {
+    "α": r"\alpha",
+    "β": r"\beta",
+    "γ": r"\gamma",
+    "δ": r"\delta",
+    "ε": r"\epsilon",
+    "ζ": r"\zeta",
+    "η": r"\eta",
+    "θ": r"\theta",
+    "ι": r"\iota",
+    "κ": r"\kappa",
+    "λ": r"\lambda",
+    "μ": r"\mu",
+    "ν": r"\nu",
+    "ξ": r"\xi",
+    "π": r"\pi",
+    "ρ": r"\rho",
+    "σ": r"\sigma",
+    "τ": r"\tau",
+    "υ": r"\upsilon",
+    "φ": r"\phi",
+    "χ": r"\chi",
+    "ψ": r"\psi",
+    "ω": r"\omega",
+    "Γ": r"\Gamma",
+    "Δ": r"\Delta",
+    "Θ": r"\Theta",
+    "Λ": r"\Lambda",
+    "Ξ": r"\Xi",
+    "Π": r"\Pi",
+    "Σ": r"\Sigma",
+    "Φ": r"\Phi",
+    "Ψ": r"\Psi",
+    "Ω": r"\Omega",
+}
 
 
 @dataclass
@@ -114,6 +155,9 @@ class RenderConfig:
     document_class: str = "article"
     packages: list[str] = field(default_factory=lambda: list(DEFAULT_PACKAGES))
     title: str | None = None
+    source_pdf: str | None = None
+    table_asset_output_dir: str | None = None
+    table_asset_latex_prefix: str = "assets"
 
 
 def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
@@ -145,6 +189,14 @@ def render_node(node: Any, *, depth: int = 0) -> str:
 
     if is_algorithm_like_node(record, text):
         return render_algorithm_block(text)
+    if is_toc_title_node(record, text):
+        return render_toc()
+    if block_type == "toc":
+        return ""
+    if block_type == "title" and is_front_matter_date_text(text):
+        body = [render_textual_content(record, text)] if text else []
+        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
+        return "\n\n".join(part for part in body if part)
     if block_type == "title":
         body = [render_title(text, depth=depth)] if text else []
         body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
@@ -158,7 +210,12 @@ def render_node(node: Any, *, depth: int = 0) -> str:
         body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1))
         return "\n\n".join(part for part in body if part)
     if block_type == "table":
-        return render_table_placeholder(record, text)
+        return render_table_placeholder(
+            record,
+            text,
+            source_pdf=cfg_source_pdf(record),
+            asset_output_dir=None,
+        )
     if block_type == "figure":
         caption = render_text_with_inline_latex(text) if text else "Figure"
         return "\\begin{figure}[htbp]\n\\centering\n% image placeholder\n" + rf"\caption{{{caption}}}" + "\n\\end{figure}"
@@ -185,7 +242,7 @@ def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list
             while index < len(child_list) and canonical_render_type(node_record(child_list[index])) == "reference":
                 run.append(child_list[index])
                 index += 1
-            rendered.append(render_reference_run(run))
+            append_nonredundant_rendered(rendered, render_reference_run(run))
             continue
         list_environment = list_environment_for_node(child)
         if list_environment is not None:
@@ -193,11 +250,11 @@ def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int) -> list
             while index < len(child_list) and list_environment_for_node(child_list[index]) is not None:
                 run.append(child_list[index])
                 index += 1
-            rendered.append(render_dynamic_list_group(run, environment=list_environment, depth=depth))
+            append_nonredundant_rendered(rendered, render_dynamic_list_group(run, environment=list_environment, depth=depth))
             continue
         block = render_child_block(child, depth=depth)
         if block:
-            rendered.append(block)
+            append_nonredundant_rendered(rendered, block)
         index += 1
     return rendered
 
@@ -336,7 +393,7 @@ def normalize_reference_items(value: Any) -> list[str]:
     items = []
     for item in value:
         text = item.get("text") if isinstance(item, dict) else item
-        text = str(text or "").strip()
+        text = strip_reference_label(str(text or "").strip())
         if text:
             items.append(text)
     return items
@@ -395,19 +452,19 @@ def parse_pseudo_code(text: str) -> tuple[str | None, list[str]]:
 
         for_match = PSEUDOCODE_FOR_RE.match(line)
         if for_match:
-            commands.append(rf"\For{{{format_algorithmic_text(for_match.group(1).strip())}}}")
+            commands.append(rf"\For{{{format_algorithmic_text(for_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("for")
             continue
 
         while_match = PSEUDOCODE_WHILE_RE.match(line)
         if while_match:
-            commands.append(rf"\While{{{format_algorithmic_text(while_match.group(1).strip())}}}")
+            commands.append(rf"\While{{{format_algorithmic_text(while_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("while")
             continue
 
         if_match = PSEUDOCODE_IF_RE.match(line)
         if if_match:
-            commands.append(rf"\If{{{format_algorithmic_text(if_match.group(1).strip())}}}")
+            commands.append(rf"\If{{{format_algorithmic_text(if_match.group(1).strip(), allow_math=False)}}}")
             block_stack.append("if")
             continue
 
@@ -443,13 +500,19 @@ def close_algorithmic_block(block_stack: list[str], close_kind: str | None) -> s
     return r"\EndFor"
 
 
-def format_algorithmic_text(text: str) -> str:
+def format_algorithmic_text(text: str, *, allow_math: bool = True) -> str:
     prepared = normalize_algorithm_math_text(text)
     if not prepared:
         return ""
-    if LATEX_MATH_MARKER_RE.search(prepared):
+    if is_algorithm_code_like(prepared) or not allow_math:
+        return r"\texttt{" + escape_algorithm_code_text(prepared) + r"}"
+    if allow_math and LATEX_MATH_MARKER_RE.search(prepared):
         return r"\(\displaystyle " + escape_algorithm_math_text(prepared) + r"\)"
     return escape_latex(prepared)
+
+
+def is_algorithm_code_like(text: str) -> bool:
+    return bool(ALGORITHM_CODE_MARKER_RE.search(str(text or "")))
 
 
 def normalize_algorithm_math_text(text: str) -> str:
@@ -467,6 +530,11 @@ def escape_algorithm_math_text(text: str) -> str:
     )
 
 
+def escape_algorithm_code_text(text: str) -> str:
+    safe = "".join(_safe_code_verbatim_char(char) for char in str(text or ""))
+    return escape_latex(safe)
+
+
 def restore_algorithm_line_breaks(text: str) -> str:
     body = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if "\n" in body:
@@ -480,24 +548,55 @@ def sanitize_verbatim_body(text: str) -> str:
     return "".join(_safe_code_verbatim_char(char) for char in sanitized)
 
 
-def render_table_placeholder(record: dict[str, Any], text: str) -> str:
+def render_table_placeholder(
+    record: dict[str, Any],
+    text: str,
+    *,
+    source_pdf: str | Path | None = None,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+) -> str:
+    if int(record.get("table_group_size") or 1) > 1 and record.get("table_group_primary") is False:
+        return ""
     table_id = table_node_identifier(record)
-    bbox = format_table_bbox(record.get("bbox"))
-    caption = extract_table_caption(text) or "Table reconstruction placeholder"
+    bbox = format_table_bbox(record.get("table_group_bbox") or record.get("bbox"))
+    caption = table_caption_text(record) or extract_table_caption(text) or "Table reconstruction placeholder"
+    graphic = ensure_table_pdf_crop(
+        record,
+        source_pdf=source_pdf or cfg_source_pdf(record),
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+    )
     todo = f"% [TODO_TABLE_RECONSTRUCT: BBOX={bbox}, ID={table_id}]"
+    graphic_line = rf"\includegraphics[width=\linewidth]{{{graphic}}}" if graphic else todo
     return "\n".join(
         [
             r"\begin{table}[H]",
             r"\centering",
-            todo,
+            graphic_line,
             rf"\caption{{{escape_latex(caption)}}}",
             r"\end{table}",
         ]
     )
 
 
+def cfg_source_pdf(record: dict[str, Any]) -> str | None:
+    for key in ("source_pdf", "pdf_path", "style_source_pdf"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    source_refs = record.get("source_refs")
+    if isinstance(source_refs, list):
+        for ref in source_refs:
+            if isinstance(ref, dict):
+                metadata = ref.get("metadata")
+                if isinstance(metadata, dict) and isinstance(metadata.get("pdf_path"), str):
+                    return metadata["pdf_path"]
+    return None
+
+
 def table_node_identifier(record: dict[str, Any]) -> str:
-    for key in ("id", "block_id", "table_id"):
+    for key in ("table_group_id", "id", "block_id", "table_id"):
         value = record.get(key)
         if value:
             return str(value)
@@ -540,7 +639,35 @@ def _safe_code_verbatim_char(char: str) -> str:
 def render_title(text: str, *, depth: int) -> str:
     command = title_command(text, depth=depth)
     title_text = strip_title_numbering(text)
-    return rf"\{command}{{{escape_latex(title_text)}}}"
+    star = "*" if is_unnumbered_frontmatter_title(text) else ""
+    return rf"\{command}{star}{{{escape_latex(title_text)}}}"
+
+
+def is_unnumbered_frontmatter_title(text: str) -> bool:
+    normalized = normalize_structural_heading_text(text)
+    return normalized in {"abstract", "references", "bibliography"} or normalized.startswith("appendix")
+
+
+def is_toc_title_node(record: dict[str, Any], text: str) -> bool:
+    role = str(record.get("layout_role") or "").casefold()
+    canonical = str(record.get("canonical_type") or "").casefold()
+    if role == "toc_title" or canonical == "toc_title":
+        return True
+    raw = str(record.get("type") or record.get("raw_type") or record.get("block_type") or "").casefold()
+    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
+    return raw in {"title", "section", "heading"} and normalized in {"contents", "tableofcontents"}
+
+
+def render_toc() -> str:
+    return r"\tableofcontents"
+
+
+def normalize_structural_heading_text(text: str) -> str:
+    lowered = str(text or "").casefold().strip()
+    without_punctuation = "".join(
+        char for char in lowered if not unicodedata.category(char).startswith("P")
+    )
+    return " ".join(without_punctuation.split())
 
 
 def title_command(text: str, *, depth: int) -> str:
@@ -554,6 +681,9 @@ def render_equation(text: str) -> str:
     stripped = str(text or "").strip()
     if not stripped:
         return "\\[\n\n\\]"
+    multi_tag_render = render_multi_tag_equation(stripped)
+    if multi_tag_render:
+        return multi_tag_render
     if stripped.startswith("\\[") or stripped.startswith("$$"):
         return stripped
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
@@ -562,13 +692,79 @@ def render_equation(text: str) -> str:
     return "\\[\n" + stripped + "\n\\]"
 
 
+TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
+
+
+def render_multi_tag_equation(text: str) -> str | None:
+    stripped = text.strip()
+    if stripped.startswith("\\[") and stripped.endswith("\\]"):
+        stripped = stripped[2:-2].strip()
+    elif stripped.startswith("$$") and stripped.endswith("$$"):
+        stripped = stripped[2:-2].strip()
+
+    matches = list(TAG_RE.finditer(stripped))
+    if len(matches) <= 1:
+        return None
+
+    rows: list[tuple[str, str | None]] = []
+    cursor = 0
+    for match in matches:
+        expr = stripped[cursor : match.start()].strip()
+        tag = match.group(1).strip()
+        if expr:
+            rows.append((expr, tag))
+        elif rows:
+            prev_expr, _ = rows[-1]
+            rows[-1] = (prev_expr, tag)
+        cursor = match.end()
+
+    tail = stripped[cursor:].strip()
+    if tail:
+        rows.append((tail, None))
+
+    if len(rows) <= 1:
+        return None
+
+    rendered_rows = []
+    for expr, tag in rows:
+        rendered_rows.append(f"{expr} \\tag{{{tag}}}" if tag else expr)
+    return "\\begin{align}\n" + "\\\\\n".join(rendered_rows) + "\n\\end{align}"
+
+
 def render_inline_math(text: str) -> str:
     stripped = str(text or "").strip()
     if not stripped:
         return "$$"
-    if stripped.startswith("$") or stripped.startswith(r"\("):
-        return stripped
-    return "$" + stripped + "$"
+    if not is_plausible_inline_math_payload(stripped):
+        return escape_latex(stripped)
+    if stripped.startswith("$") and stripped.endswith("$") and len(stripped) >= 2:
+        return "$" + normalize_inline_math_unicode(stripped[1:-1].strip()) + "$"
+    if stripped.startswith(r"\(") and stripped.endswith(r"\)") and len(stripped) >= 4:
+        return r"\(" + normalize_inline_math_unicode(stripped[2:-2].strip()) + r"\)"
+    return "$" + normalize_inline_math_unicode(stripped) + "$"
+
+
+def normalize_inline_math_unicode(text: str) -> str:
+    return "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+
+
+def is_plausible_inline_math_payload(text: str) -> bool:
+    """Reject OCR/style-span artifacts that are not real inline formulae.
+
+    PyMuPDF often marks lone braces from email addresses or affiliation blocks
+    as math because they use a symbol font.  Rendering ``{`` as ``${$`` creates
+    uncompilable LaTeX, so inline math must contain at least one substantive
+    math token: a letter/number, a Greek glyph, or a LaTeX command.
+    """
+
+    value = str(text or "").strip()
+    if value.startswith("$") and value.endswith("$") and len(value) >= 2:
+        value = value[1:-1].strip()
+    if value.startswith(r"\(") and value.endswith(r"\)") and len(value) >= 4:
+        value = value[2:-2].strip()
+    if not value:
+        return False
+    return any(char.isalnum() for char in value) or bool(GREEK_CONTEXT_RE.search(value)) or "\\" in value
 
 
 def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
@@ -576,18 +772,50 @@ def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
     if not segments:
         return render_text_with_inline_latex(fallback_text)
     rendered: list[str] = []
+    plain_context = ""
     for segment in segments:
         segment_type = str(segment.get("type") or "").lower()
         content = str(segment.get("content") or segment.get("text") or "")
         if not content:
             continue
         if segment_type in {"equation_inline", "inline_equation", "inline_math", "inline_formula"}:
-            rendered.append(render_inline_math(content))
+            repaired_content, insert_as_marker = repair_inline_math_ocr_segment(content, plain_context)
+            if insert_as_marker:
+                marker = "as: " if rendered and rendered[-1].endswith((" ", "\n")) else " as: "
+                rendered.append(render_text_with_inline_latex(marker, strip=False))
+                plain_context += marker
+            rendered.append(render_inline_math(repaired_content))
         elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
             rendered.append("\n\n" + render_equation(content) + "\n\n")
         else:
             rendered.append(render_text_with_inline_latex(content, strip=False))
+            plain_context += content
     return normalize_latex_text("".join(rendered))
+
+
+def repair_inline_math_ocr_segment(content: str, left_context: str) -> tuple[str, bool]:
+    value = str(content or "").strip()
+    if not BARE_OPERATOR_EQUATION_RE.match(value):
+        return value, False
+    replacement = last_greek_variable_in_context(left_context)
+    if not replacement:
+        return value, False
+    repaired = BARE_OPERATOR_EQUATION_RE.sub(lambda _match: replacement + " =", value, count=1)
+    return repaired, should_insert_as_marker_before_repaired_math(left_context)
+
+
+def last_greek_variable_in_context(text: str) -> str | None:
+    matches = list(GREEK_CONTEXT_RE.finditer(str(text or "")))
+    if not matches:
+        return None
+    return GREEK_TO_LATEX.get(matches[-1].group(0))
+
+
+def should_insert_as_marker_before_repaired_math(text: str) -> bool:
+    normalized = " ".join(str(text or "").split()).casefold()
+    if not normalized or normalized.endswith((":", " as", " as:")):
+        return False
+    return normalized.endswith(("modeled", "modelled", "defined", "expressed", "written", "given"))
 
 
 def render_textual_node_without_list_marker(node: Any) -> str:
@@ -604,12 +832,34 @@ def render_textual_node_without_list_marker(node: Any) -> str:
         if extract_content_segments(prepared_record):
             used_structured_content = True
         if rendered:
-            rendered_parts.append(rendered)
+            append_nonredundant_rendered(rendered_parts, rendered)
     if rendered_parts:
         if used_structured_content:
             return merge_latex_fragments(rendered_parts)
         return normalize_latex_text(" ".join(rendered_parts))
     return escape_latex(strip_list_marker(node_text(node)))
+
+
+def append_nonredundant_rendered(parts: list[str], rendered: str) -> None:
+    if not is_redundant_rendered_text(rendered, parts):
+        parts.append(rendered)
+
+
+def is_redundant_rendered_text(rendered: str, previous_parts: Sequence[str], *, min_chars: int = 60) -> bool:
+    key = rendered_text_dedupe_key(rendered)
+    if len(key) < min_chars:
+        return False
+    for previous in previous_parts[-4:]:
+        previous_key = rendered_text_dedupe_key(previous)
+        if len(previous_key) >= len(key) and key in previous_key:
+            return True
+    return False
+
+
+def rendered_text_dedupe_key(value: str) -> str:
+    text = re.sub(r"\\(section|subsection|subsubsection|paragraph)\*?\{([^{}]*)\}", r"\2", str(value or ""))
+    text = re.sub(r"\\[a-zA-Z]+\*?", "", text)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
 def strip_list_marker_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -784,6 +1034,8 @@ def canonical_render_type(record: dict[str, Any]) -> str:
     if str(record.get("list_type") or "").lower() == "reference_list":
         return "reference"
     raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
+    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
+        return "toc"
     if raw in {"paragraph", "text", "paragraph_text"}:
         return "text"
     if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
@@ -1150,6 +1402,7 @@ UNICODE_LATEX_REPLACEMENTS = {
     "δ": r"\ensuremath{\delta}",
     "ϵ": r"\ensuremath{\epsilon}",
     "ε": r"\ensuremath{\epsilon}",
+    "η": r"\ensuremath{\eta}",
     "θ": r"\ensuremath{\theta}",
     "λ": r"\ensuremath{\lambda}",
     "μ": r"\ensuremath{\mu}",

@@ -119,6 +119,9 @@ class EdgeGATConfig:
     dropout: float = 0.1
     predictor_hidden_dims: tuple[int, ...] = (1024, 512, 128)
     predictor_layer_norm: bool = True
+    edge_feature_mode: str = "full"
+    disabled_node_feature_ranges: tuple[tuple[int, int], ...] = ()
+    disabled_edge_attr_indices: tuple[int, ...] = ()
 
     @property
     def projected_node_dim(self) -> int:
@@ -137,7 +140,7 @@ class EdgeRelationGAT(_MODULE_BASE):
 
         convs = []
         in_dim = self.config.projected_node_dim
-        for _ in range(max(1, self.config.num_layers)):
+        for _ in range(max(0, self.config.num_layers)):
             convs.append(
                 GATv2Conv(
                     in_channels=in_dim,
@@ -150,7 +153,7 @@ class EdgeRelationGAT(_MODULE_BASE):
             )
             in_dim = self.config.hidden_dim * self.config.heads
         self.convs = nn.ModuleList(convs)
-        self.edge_feature_dim = in_dim * 4 + self.config.edge_dim
+        self.edge_feature_dim = self._edge_feature_dim(in_dim)
         self.edge_head = build_edge_predictor_head(
             input_dim=self.edge_feature_dim,
             hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
@@ -167,6 +170,7 @@ class EdgeRelationGAT(_MODULE_BASE):
         if x is None or edge_index is None or edge_attr is None:
             raise ValueError("EdgeRelationGAT.forward requires data or x/edge_index/edge_attr")
 
+        x, edge_attr = self._mask_inputs(x, edge_attr)
         edge_attr = self._align_edge_attr(edge_attr)
         h = self.projector(x)
         for conv in self.convs:
@@ -178,12 +182,36 @@ class EdgeRelationGAT(_MODULE_BASE):
         edge_features = self._build_edge_features(h, source, target, edge_attr)
         return self.edge_head(edge_features)
 
-    @staticmethod
-    def _build_edge_features(h, source, target, edge_attr):  # type: ignore[no-untyped-def]
+    def _mask_inputs(self, x, edge_attr):  # type: ignore[no-untyped-def]
+        """Apply checkpoint-stored feature ablations without mutating graph data."""
+
+        node_ranges = tuple(getattr(self.config, "disabled_node_feature_ranges", ()) or ())
+        edge_indices = tuple(getattr(self.config, "disabled_edge_attr_indices", ()) or ())
+        if node_ranges:
+            x = x.clone()
+            width = int(x.shape[1])
+            for start, end in node_ranges:
+                start_i = max(0, min(width, int(start)))
+                end_i = max(start_i, min(width, int(end)))
+                if end_i > start_i:
+                    x[:, start_i:end_i] = 0.0
+        if edge_indices:
+            edge_attr = edge_attr.clone()
+            width = int(edge_attr.shape[1])
+            for idx in edge_indices:
+                idx_i = int(idx)
+                if 0 <= idx_i < width:
+                    edge_attr[:, idx_i] = 0.0
+        return x, edge_attr
+
+    def _build_edge_features(self, h, source, target, edge_attr):  # type: ignore[no-untyped-def]
         """Build directional edge features with symmetry-breaking terms."""
 
         h_source = h[source]
         h_target = h[target]
+        mode = getattr(self.config, "edge_feature_mode", "full")
+        if mode == "simple_concat":
+            return torch.cat([h_source, h_target, edge_attr], dim=-1)
         return torch.cat(
             [
                 h_source,
@@ -194,6 +222,14 @@ class EdgeRelationGAT(_MODULE_BASE):
             ],
             dim=-1,
         )
+
+    def _edge_feature_dim(self, node_dim: int) -> int:
+        mode = getattr(self.config, "edge_feature_mode", "full")
+        if mode == "full":
+            return int(node_dim) * 4 + self.config.edge_dim
+        if mode == "simple_concat":
+            return int(node_dim) * 2 + self.config.edge_dim
+        raise ValueError(f"Unknown edge_feature_mode: {mode}")
 
     def _align_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
         """Pad or truncate runtime edge attributes to the checkpoint config."""

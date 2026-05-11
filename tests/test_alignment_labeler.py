@@ -507,6 +507,197 @@ def test_alignment_labeler_allows_same_type_text_continuation_after_list_marker(
     assert graph.y.tolist() == [int(TexRelationLabel.MERGE), int(TexRelationLabel.NONE)]
 
 
+def test_alignment_labeler_refuses_same_tex_text_list_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "We collected diary entries,"},
+                    {"type": "list", "text_for_embedding": "post-study interviews, and compliance data."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        "We collected diary entries, post-study interviews, and compliance data.",
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE), int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_refuses_same_tex_run_in_heading_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "Buckets contain lists of key value pairs."},
+                    {"type": "paragraph", "text_for_embedding": "Put operation. To add a pair, compute a hash value."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        "Buckets contain lists of key value pairs. Put operation. To add a pair, compute a hash value.",
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE), int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_refuses_same_tex_terminal_to_new_paragraph_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {"type": "paragraph", "text_for_embedding": "The first visual paragraph is complete."},
+                    {"type": "paragraph", "text_for_embedding": "The second visual paragraph starts here."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The first visual paragraph is complete. The second visual paragraph starts here.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1, 2], [2, 1]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE), int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_allows_same_tex_hyphenated_text_continuation(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {"type": "paragraph", "text_for_embedding": "The transportation system uses trans-"},
+                    {"type": "paragraph", "text_for_embedding": "portation-aware routing to continue."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The transportation system uses transportation-aware routing to continue.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 15), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+
+
+def test_alignment_labeler_refuses_same_tex_merge_across_edge_gutter(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "The first physical fragment"},
+                    {"type": "paragraph", "text_for_embedding": "continues after a large column gap."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text("The first physical fragment continues after a large column gap.", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+    )
+    data.edge_attr_schema = {"fields": ["has_x_gutter", "y_overlap_ratio"]}
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
 def test_alignment_labeler_refuses_merge_across_intermediate_list_marker(tmp_path):
     if not has_alignment_deps():
         return
@@ -1075,3 +1266,156 @@ def test_alignment_labeler_uses_visual_heading_stack_when_tex_paths_are_flat(tmp
         int(TexRelationLabel.PARENT_CHILD),
         int(TexRelationLabel.NONE),
     ]
+
+
+def test_alignment_labeler_rejects_incompatible_numbered_heading_parent(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "1 Introduction", "bbox": [80, 80, 360, 110]},
+                    {"type": "paragraph", "text_for_embedding": "Intro body.", "bbox": [80, 125, 500, 170]},
+                    {"type": "title", "text_for_embedding": "2 Related Research", "bbox": [80, 210, 420, 240]},
+                    {"type": "title", "text_for_embedding": "2.3 Continual Assurance", "bbox": [80, 260, 470, 290]},
+                    {"type": "paragraph", "text_for_embedding": "Continual assurance body.", "bbox": [80, 305, 500, 350]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{1 Introduction}
+        Intro body.
+
+        \section{2 Related Research}
+        \subsection{2.3 Continual Assurance}
+        Continual assurance body.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((5, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 2], [3, 3]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(),
+    ).run()
+
+    assert graph.y.tolist() == [
+        int(TexRelationLabel.NONE),
+        int(TexRelationLabel.PARENT_CHILD),
+    ]
+
+
+def test_alignment_labeler_keeps_cross_column_numbered_list_under_original_scope(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Methodology", "bbox": [80, 80, 360, 110]},
+                    {"type": "paragraph", "text_for_embedding": "1) First step.", "bbox": [80, 125, 500, 150]},
+                    {"type": "title", "text_for_embedding": "A. Evaluation", "bbox": [80, 170, 360, 200]},
+                    {"type": "paragraph", "text_for_embedding": "2) Second step.", "bbox": [560, 125, 930, 150]},
+                    {"type": "paragraph", "text_for_embedding": "3) Third step.", "bbox": [560, 165, 930, 190]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        """
+        Methodology
+
+        1) First step.
+
+        A. Evaluation
+
+        2) Second step.
+
+        3) Third step.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((5, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 2, 0], [3, 3, 4]], dtype=torch.long),
+        edge_attr=torch.zeros((3, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(),
+    ).run()
+
+    assert graph.y.tolist() == [
+        int(TexRelationLabel.PARENT_CHILD),
+        int(TexRelationLabel.NONE),
+        int(TexRelationLabel.PARENT_CHILD),
+    ]
+
+
+def test_alignment_labeler_blocks_same_tex_merge_across_column_gutter_without_edge_attr(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "Calendar type definition", "bbox": [80, 100, 350, 130]},
+                    {"type": "paragraph", "text_for_embedding": "Another calendar type definition", "bbox": [560, 102, 900, 132]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text("Calendar type definition Another calendar type definition", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(max_window_nodes=3, similarity_threshold=55.0),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]

@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.datasets.document_dataset import DocumentDataset, DocumentDatasetConfig, build_document_dataloader  # noqa: E402
+from src.perception.schema import EDGE_ATTR_FIELDS, FeatureTensorSchema  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig  # noqa: E402
 from src.reasoning.training import (  # noqa: E402
     FocalLoss,
@@ -50,9 +51,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--predictor-hidden-dims", default="1024,512,128")
     parser.add_argument("--predictor-layer-norm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--edge-feature-mode",
+        choices=["full", "simple_concat"],
+        default="full",
+        help="full uses concat([Hu,Hv,Hu-Hv,Hu*Hv,Euv]); simple_concat uses concat([Hu,Hv,Euv]).",
+    )
     parser.add_argument("--semantic-hidden-dim", type=int, default=96)
     parser.add_argument("--layout-hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--ablate-node-groups",
+        default="",
+        help=(
+            "Comma-separated runtime node feature groups to zero. "
+            "Supported: semantic,type,geometry,scroll,derived,style,sequence,column,title,layout_layer,flow_context,layout_all."
+        ),
+    )
+    parser.add_argument(
+        "--ablate-edge-groups",
+        default="",
+        help=(
+            "Comma-separated runtime edge feature groups to zero. "
+            "Supported: semantic,spatial,typography,overlap_gutter,index_bins,punctuation,layout_flow,all."
+        ),
+    )
+    parser.add_argument(
+        "--ablate-edge-fields",
+        default="",
+        help="Comma-separated exact edge_attr field names to zero at runtime.",
+    )
     parser.add_argument("--loss", choices=["cross_entropy", "focal"], default="cross_entropy")
     parser.add_argument("--class-weights", choices=["none", "default", "inverse", "custom"], default="none")
     parser.add_argument(
@@ -102,9 +130,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    args = build_arg_parser().parse_args()
     import torch
 
-    args = build_arg_parser().parse_args()
     set_seed(args.seed, torch=torch)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -200,6 +228,8 @@ def main() -> int:
 
 
 def build_model(args: argparse.Namespace) -> EdgeRelationGAT:
+    disabled_node_ranges = parse_node_feature_ablation_ranges(args.ablate_node_groups)
+    disabled_edge_indices = parse_edge_feature_ablation_indices(args.ablate_edge_groups, args.ablate_edge_fields)
     return EdgeRelationGAT(
         EdgeGATConfig(
             node_projector=FeatureProjectorConfig(
@@ -213,6 +243,9 @@ def build_model(args: argparse.Namespace) -> EdgeRelationGAT:
             dropout=args.dropout,
             predictor_hidden_dims=parse_int_tuple(args.predictor_hidden_dims),
             predictor_layer_norm=bool(args.predictor_layer_norm),
+            edge_feature_mode=args.edge_feature_mode,
+            disabled_node_feature_ranges=disabled_node_ranges,
+            disabled_edge_attr_indices=disabled_edge_indices,
         )
     )
 
@@ -225,6 +258,108 @@ def parse_int_tuple(value: str) -> tuple[int, ...]:
     if any(dim <= 0 for dim in dims):
         raise ValueError("predictor hidden dims must be positive integers")
     return dims
+
+
+def parse_node_feature_ablation_ranges(value: str) -> tuple[tuple[int, int], ...]:
+    groups = parse_name_list(value)
+    if not groups:
+        return ()
+    ranges = node_feature_group_ranges()
+    selected: list[tuple[int, int]] = []
+    for group in groups:
+        if group == "layout_all":
+            selected.extend(span for name, span in ranges.items() if name != "semantic")
+            continue
+        if group not in ranges:
+            raise ValueError(f"Unknown node ablation group '{group}'. Supported: {sorted(ranges)} plus layout_all")
+        selected.append(ranges[group])
+    return normalize_ranges(selected)
+
+
+def parse_edge_feature_ablation_indices(groups_value: str, fields_value: str) -> tuple[int, ...]:
+    field_to_idx = {field: idx for idx, field in enumerate(EDGE_ATTR_FIELDS)}
+    groups = parse_name_list(groups_value)
+    fields = parse_name_list(fields_value)
+    selected: set[int] = set()
+    edge_groups = edge_feature_group_fields()
+    for group in groups:
+        if group == "all":
+            selected.update(range(len(EDGE_ATTR_FIELDS)))
+            continue
+        if group not in edge_groups:
+            raise ValueError(f"Unknown edge ablation group '{group}'. Supported: {sorted(edge_groups)} plus all")
+        selected.update(field_to_idx[field] for field in edge_groups[group] if field in field_to_idx)
+    for field in fields:
+        if field not in field_to_idx:
+            raise ValueError(f"Unknown edge_attr field '{field}'. Supported: {EDGE_ATTR_FIELDS}")
+        selected.add(field_to_idx[field])
+    return tuple(sorted(selected))
+
+
+def parse_name_list(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def normalize_ranges(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    cleaned = sorted({(int(start), int(end)) for start, end in ranges if int(end) > int(start)})
+    if not cleaned:
+        return ()
+    merged: list[tuple[int, int]] = []
+    for start, end in cleaned:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return tuple(merged)
+
+
+def node_feature_group_ranges() -> dict[str, tuple[int, int]]:
+    schema = FeatureTensorSchema()
+    cursor = 0
+    ranges: dict[str, tuple[int, int]] = {}
+    ranges["semantic"] = (cursor, cursor + schema.semantic_dim)
+    cursor += schema.semantic_dim
+    ranges["type"] = (cursor, cursor + schema.type_dim)
+    cursor += schema.type_dim
+    ordered_groups = [
+        ("geometry", len(schema.geometry_fields)),
+        ("scroll", len(schema.scroll_geometry_fields)),
+        ("derived", len(schema.derived_stat_fields)),
+        ("style", len(schema.style_stat_fields)),
+        ("sequence", len(schema.sequence_position_fields)),
+        ("column", len(schema.column_feature_fields)),
+        ("title", len(schema.title_structure_fields)),
+        ("layout_layer", len(schema.layout_layer_fields)),
+        ("flow_context", len(schema.flow_context_fields)),
+    ]
+    for name, width in ordered_groups:
+        ranges[name] = (cursor, cursor + width)
+        cursor += width
+    return ranges
+
+
+def edge_feature_group_fields() -> dict[str, tuple[str, ...]]:
+    return {
+        "semantic": ("semantic_cosine",),
+        "spatial": ("delta_y_gap", "delta_x_left", "left_alignment", "center_distance"),
+        "typography": ("font_size_delta", "bold_to_regular", "line_height_ratio"),
+        "overlap_gutter": ("y_overlap_ratio", "has_x_gutter"),
+        "index_bins": (
+            "index_delta_bin_adjacent",
+            "index_delta_bin_skip_one",
+            "index_delta_bin_near",
+            "index_delta_bin_far",
+            "index_delta_bin_reverse",
+        ),
+        "punctuation": ("source_ends_with_terminal_punctuation", "source_ends_with_hyphen"),
+        "layout_flow": (
+            "same_layout_layer",
+            "same_layout_band",
+            "same_band_column",
+            "band_order_delta",
+            "crosses_band_boundary",
+        ),
+    }
 
 
 def build_loss(args: argparse.Namespace, train_labels: Any, *, device: Any, torch: Any) -> Any:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.perception.title_features import is_front_matter_date_text
 from src.perception.xy_cut import rebuild_reading_order
 
 AUXILIARY_TYPES = {
@@ -94,10 +95,13 @@ LAYOUT_LAYER_FLOAT = "float_layer"
 LAYOUT_LAYER_METADATA = "metadata_layer"
 LAYOUT_LAYER_NOISE = "noise_layer"
 LAYOUT_LAYER_OTHER = "other_layer"
+TOC_TITLE_ROLE = "toc_title"
+TOC_ENTRY_ROLE = "toc_entry"
 MATH_LAYOUT_TYPES = MICRO_INLINE_MATH_TYPES | MICRO_EQUATION_TYPES
 FLOAT_LAYOUT_TYPES = {"figure", "image", "chart", "table", "algorithm"}
 METADATA_LAYOUT_TYPES = {"title", "author", "affiliation", "abstract"}
 NOISE_LAYOUT_TYPES = AUXILIARY_TYPES | {"header", "footer"}
+TOC_ENTRY_TYPES = {"index", "toc", "table_of_contents"}
 FRONT_MATTER_AFFILIATION_RE = re.compile(
     r"\b("
     r"affiliation|department|university|institute|school|college|faculty|"
@@ -367,6 +371,7 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
             item["layout_band_global_id"] = None
             item["layout_band_global_order"] = None
     refine_front_matter_layers(ordered)
+    mark_toc_layers(ordered)
 
     return {
         "schema_version": "content_v7_columnfix_listmarkers",
@@ -431,6 +436,7 @@ def refresh_content_v7_layout_metadata(payload: dict[str, Any]) -> dict[str, Any
             item["layout_band_global_id"] = None
             item["layout_band_global_order"] = None
     refine_front_matter_layers(ordered)
+    mark_toc_layers(ordered)
 
     refreshed = dict(payload)
     refreshed["schema_version"] = str(payload.get("schema_version") or "content_v7_columnfix_listmarkers")
@@ -808,6 +814,8 @@ def infer_layout_layer(node: dict[str, Any]) -> str:
 
     node_type = _layout_raw_type(node)
     text = _layout_text(node)
+    if node_type in TOC_ENTRY_TYPES or is_toc_title_text(text):
+        return LAYOUT_LAYER_METADATA
     if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
         return LAYOUT_LAYER_MAIN_TEXT
     if node_type in NOISE_LAYOUT_TYPES:
@@ -828,6 +836,11 @@ def infer_layout_layer(node: dict[str, Any]) -> str:
 def infer_layout_role(node: dict[str, Any], *, layer: str | None = None) -> str:
     node_type = _layout_raw_type(node)
     layer = layer or infer_layout_layer(node)
+    text = _layout_text(node)
+    if node_type in TOC_ENTRY_TYPES:
+        return TOC_ENTRY_ROLE
+    if is_toc_title_text(text):
+        return TOC_TITLE_ROLE
     if layer == LAYOUT_LAYER_NOISE:
         return "noise"
     if layer == LAYOUT_LAYER_FLOAT:
@@ -836,7 +849,7 @@ def infer_layout_role(node: dict[str, Any], *, layer: str | None = None) -> str:
         return "inline_math" if node_type in MICRO_INLINE_MATH_TYPES else "display_math"
     if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
         return "reference_list"
-    if detect_list_marker(_layout_text(node)):
+    if detect_list_marker(text):
         return "list_item"
     if node_type in {"title", "section", "subsection", "subsubsection", "heading"}:
         return "heading"
@@ -928,6 +941,8 @@ def _looks_like_front_matter(node: dict[str, Any], text: str) -> bool:
     return (
         normalized in {"abstract", "author", "authors"}
         or normalized.startswith("abstract")
+        or is_toc_title_text(text)
+        or is_front_matter_date_text(text)
         or FRONT_MATTER_EMAIL_RE.search(text) is not None
         or FRONT_MATTER_AFFILIATION_RE.search(text) is not None
     )
@@ -972,10 +987,14 @@ def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
 
 def _is_body_heading_candidate(item: dict[str, Any]) -> bool:
     raw = _layout_raw_type(item)
+    if raw in TOC_ENTRY_TYPES:
+        return False
     if raw not in {"title", "section", "subsection", "subsubsection", "heading"}:
         return False
     normalized = " ".join(_layout_text(item).lower().split())
     if not normalized:
+        return False
+    if is_toc_title_text(normalized):
         return False
     if _front_matter_text_marker(normalized):
         return False
@@ -988,7 +1007,11 @@ def _is_body_heading_candidate(item: dict[str, Any]) -> bool:
 
 def _front_matter_text_marker(text: str) -> bool:
     normalized = " ".join(str(text).lower().split())
-    return normalized.startswith(("abstract", "keywords", "author", "authors", "affiliation"))
+    return (
+        normalized.startswith(("abstract", "keywords", "author", "authors", "affiliation"))
+        or is_toc_title_text(text)
+        or is_front_matter_date_text(text)
+    )
 
 
 def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_heading_y0: float | None) -> bool:
@@ -1021,6 +1044,10 @@ def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_headin
 
 def _front_matter_role(item: dict[str, Any]) -> str:
     text = _layout_text(item)
+    if is_toc_title_text(text):
+        return TOC_TITLE_ROLE
+    if is_front_matter_date_text(text):
+        return "front_matter"
     if _front_matter_text_marker(text):
         return "abstract" if text.strip().lower().startswith("abstract") else "front_matter"
     if FRONT_MATTER_EMAIL_RE.search(text) or FRONT_MATTER_AFFILIATION_RE.search(text):
@@ -1028,6 +1055,94 @@ def _front_matter_role(item: dict[str, Any]) -> str:
     if _looks_like_author_name(text):
         return "author"
     return "front_matter"
+
+
+def is_toc_title_text(text: str) -> bool:
+    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
+    return normalized in {"contents", "tableofcontents"}
+
+
+def is_toc_record(item: dict[str, Any]) -> bool:
+    role = str(item.get("layout_role") or "").casefold()
+    canonical = str(item.get("canonical_type") or "").casefold()
+    raw = _layout_raw_type(item)
+    return (
+        role in {TOC_TITLE_ROLE, TOC_ENTRY_ROLE}
+        or canonical in {"toc", TOC_TITLE_ROLE, TOC_ENTRY_ROLE}
+        or raw in TOC_ENTRY_TYPES
+        or is_toc_title_text(_layout_text(item))
+    )
+
+
+def filter_graph_content_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop derived table-of-contents OCR blocks before GNN featurization."""
+
+    return [item for item in items if not is_toc_record(item)]
+
+
+def document_toc_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
+    toc_items = [item for item in items if is_toc_record(item)]
+    if not toc_items:
+        return {"has_toc": False}
+
+    orders = [
+        _numeric_or_none(item.get("global_order"))
+        for item in toc_items
+        if _numeric_or_none(item.get("global_order")) is not None
+    ]
+    pages = [
+        _numeric_or_none(item.get("page_idx"))
+        for item in toc_items
+        if _numeric_or_none(item.get("page_idx")) is not None
+    ]
+    return {
+        "has_toc": True,
+        "toc_order": min(orders) if orders else None,
+        "toc_page_idx": min(pages) if pages else None,
+        "toc_item_count": len(toc_items),
+    }
+
+
+def mark_toc_layers(items: list[dict[str, Any]]) -> None:
+    """Mark MinerU ``index`` blocks and their Contents heading as TOC metadata."""
+
+    toc_entry_indexes = [index for index, item in enumerate(items) if _layout_raw_type(item) in TOC_ENTRY_TYPES]
+    toc_title_indexes: set[int] = set()
+    for index in toc_entry_indexes:
+        items[index]["layout_layer"] = LAYOUT_LAYER_METADATA
+        items[index]["layout_role"] = TOC_ENTRY_ROLE
+        items[index]["canonical_type"] = "toc"
+        items[index]["is_main_flow_candidate"] = False
+
+        cursor = index - 1
+        skipped_noise = 0
+        while cursor >= 0 and skipped_noise <= 3:
+            previous = items[cursor]
+            if _layout_raw_type(previous) in NOISE_LAYOUT_TYPES:
+                skipped_noise += 1
+                cursor -= 1
+                continue
+            if is_toc_title_text(_layout_text(previous)):
+                toc_title_indexes.add(cursor)
+            break
+
+    for index, item in enumerate(items):
+        if is_toc_title_text(_layout_text(item)):
+            next_non_noise = None
+            for cursor in range(index + 1, min(len(items), index + 5)):
+                candidate = items[cursor]
+                if _layout_raw_type(candidate) in NOISE_LAYOUT_TYPES:
+                    continue
+                next_non_noise = candidate
+                break
+            if next_non_noise is not None and _layout_raw_type(next_non_noise) in TOC_ENTRY_TYPES:
+                toc_title_indexes.add(index)
+
+    for index in toc_title_indexes:
+        items[index]["layout_layer"] = LAYOUT_LAYER_METADATA
+        items[index]["layout_role"] = TOC_TITLE_ROLE
+        items[index]["canonical_type"] = "toc"
+        items[index]["is_main_flow_candidate"] = False
 
 
 def _looks_like_author_name(text: str) -> bool:

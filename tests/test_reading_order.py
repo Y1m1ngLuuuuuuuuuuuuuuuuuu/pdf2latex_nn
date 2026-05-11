@@ -1,4 +1,13 @@
-from src.perception.reading_order import build_content_v7, detect_list_marker, extract_text, fix_columnar_reading_order, fuse_micro_nodes, sort_content_list_v2
+from src.perception.reading_order import (
+    build_content_v7,
+    detect_list_marker,
+    document_toc_metadata,
+    extract_text,
+    filter_graph_content_items,
+    fix_columnar_reading_order,
+    fuse_micro_nodes,
+    sort_content_list_v2,
+)
 
 
 def para(text, bbox):
@@ -90,6 +99,32 @@ def test_fix_columnar_reading_order_sorts_half_span_block_left_then_right():
     assert fixed[1]["layout_band_column"] == "left"
     assert fixed[3]["layout_band_column"] == "right"
     assert fixed[1]["layout_band_id"] == fixed[3]["layout_band_id"]
+
+
+def test_content_v7_marks_mineru_index_as_toc_metadata_and_filters_graph_items():
+    pages = [
+        [
+            title("Contents", [100, 80, 240, 110]),
+            {"type": "index", "content": "1 Introduction 3 2 Method 4", "bbox": [100, 120, 900, 500]},
+            title("1 Introduction", [100, 540, 300, 570]),
+            para("Intro body.", [100, 580, 900, 640]),
+        ]
+    ]
+
+    result = build_content_v7(pages)
+    items = result["items"]
+
+    assert items[0]["layout_role"] == "toc_title"
+    assert items[0]["layout_layer"] == "metadata_layer"
+    assert items[0]["is_main_flow_candidate"] is False
+    assert items[1]["type"] == "index"
+    assert items[1]["layout_role"] == "toc_entry"
+    assert items[1]["canonical_type"] == "toc"
+    assert document_toc_metadata(items)["has_toc"] is True
+    assert [item["text_for_embedding"] for item in filter_graph_content_items(items)] == [
+        "1 Introduction",
+        "Intro body.",
+    ]
 
 
 def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_span_separator():
