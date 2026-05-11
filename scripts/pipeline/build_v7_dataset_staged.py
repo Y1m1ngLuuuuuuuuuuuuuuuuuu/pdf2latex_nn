@@ -61,6 +61,8 @@ class StagedConfig:
     mini: MiniDatasetConfig
     run_name: str
     stage_root: Path
+    target_total: int | None
+    excluded_success_count: int
     mineru_batch_size: int
     mineru_batch_max_pages: int
     mineru_batch_timeout: int
@@ -134,6 +136,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", default=lambda_run_name())
     parser.add_argument("--stage-root", type=Path, default=REPO_ROOT / "data/_tmp_v7_staged_builder")
     parser.add_argument("--target", type=int, default=1000)
+    parser.add_argument(
+        "--target-total",
+        type=int,
+        help=(
+            "Desired total successful documents after applying --exclude-manifest. "
+            "For example, with 1800 excluded successes and --target-total 2000, "
+            "this run only tries to produce 200 additional documents. "
+            "--target remains the number of new documents when this is omitted."
+        ),
+    )
     parser.add_argument("--max-candidates", type=int)
     parser.add_argument("--main-tex-names", default="main.tex")
     parser.add_argument("--compiled-accepted-manifest", action="append", type=Path, default=[])
@@ -180,6 +192,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     config = config_from_args(build_arg_parser().parse_args())
+    if config.mini.target <= 0:
+        print(
+            "[staged] target already satisfied "
+            f"target_total={config.target_total} excluded_success={config.excluded_success_count}",
+            flush=True,
+        )
+        write_manifest(config.mini.manifest_output, [], config.mini)
+        return 0
     candidates = prepare_candidates(config)
     print(
         "staged_builder "
@@ -209,8 +229,12 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
     main_tex_names = tuple(name.strip() for name in args.main_tex_names.split(",") if name.strip())
     if not main_tex_names:
         raise ValueError("--main-tex-names must contain at least one filename")
-    target = int(args.target)
-    if target <= 0:
+    excluded_success_count = len(load_excluded_document_ids(tuple(path.resolve() for path in args.exclude_manifest)))
+    target_total = int(args.target_total) if args.target_total is not None else None
+    if target_total is not None and target_total <= 0:
+        raise ValueError("--target-total must be positive when provided")
+    target = max(0, target_total - excluded_success_count) if target_total is not None else int(args.target)
+    if target <= 0 and target_total is None:
         raise ValueError("--target must be positive")
     mini = MiniDatasetConfig(
         project_root=args.project_root.resolve(),
@@ -248,6 +272,8 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         mini=mini,
         run_name=str(args.run_name),
         stage_root=args.stage_root.resolve() / str(args.run_name),
+        target_total=target_total,
+        excluded_success_count=excluded_success_count,
         mineru_batch_size=max(1, int(args.mineru_batch_size)),
         mineru_batch_max_pages=max(1, int(args.mineru_batch_max_pages)),
         mineru_batch_timeout=max(1, int(args.mineru_batch_timeout)),
@@ -284,7 +310,9 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
             {
                 "candidate_count": len(candidates),
                 "target": config.mini.target,
+                "target_total": config.target_total,
                 "excluded_success_ids": len(excluded),
+                "excluded_success_ids_used_for_target_total": config.excluded_success_count,
                 "existing_mineru_outputs": mineru_existing,
                 "existing_valid_labeled_graphs": labeled_existing,
                 "mineru_missing": len(candidates) - mineru_existing,

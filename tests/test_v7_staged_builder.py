@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.pipeline.build_mini_dataset import CandidateSample, config_from_args as mini_config_from_args, build_arg_parser as build_mini_arg_parser, scan_candidates
 from scripts.pipeline.build_v7_dataset_staged import (
+    build_arg_parser,
     chunked,
     config_from_args,
     load_excluded_document_ids,
@@ -116,9 +117,63 @@ def test_config_exposes_page_aware_mineru_batch_limit() -> None:
         "128",
         "--dry-run",
     ]
-    from scripts.pipeline.build_v7_dataset_staged import build_arg_parser
-
     config = config_from_args(build_arg_parser().parse_args(parser_args))
 
     assert config.mineru_batch_size == 8
     assert config.mineru_batch_max_pages == 128
+
+
+def test_target_total_only_requests_missing_successes(tmp_path: Path) -> None:
+    manifest = tmp_path / "done.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "documents": [
+                    {"document_id": "2501.00001"},
+                    {"document_id": "2501.00002"},
+                    {"document_id": "2501.00003"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = config_from_args(
+        build_arg_parser().parse_args(
+            [
+                "--target",
+                "999",
+                "--target-total",
+                "5",
+                "--exclude-manifest",
+                str(manifest),
+                "--dry-run",
+            ]
+        )
+    )
+
+    assert config.target_total == 5
+    assert config.excluded_success_count == 3
+    assert config.mini.target == 2
+
+
+def test_target_total_can_be_already_satisfied(tmp_path: Path) -> None:
+    manifest = tmp_path / "done.json"
+    manifest.write_text(
+        json.dumps({"documents": [{"document_id": "a"}, {"document_id": "b"}]}),
+        encoding="utf-8",
+    )
+
+    config = config_from_args(
+        build_arg_parser().parse_args(
+            [
+                "--target-total",
+                "2",
+                "--exclude-manifest",
+                str(manifest),
+                "--dry-run",
+            ]
+        )
+    )
+
+    assert config.mini.target == 0
