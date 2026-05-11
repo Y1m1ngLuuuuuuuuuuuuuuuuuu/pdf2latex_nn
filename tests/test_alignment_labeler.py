@@ -7,6 +7,7 @@ from src.reasoning.label_generator import (
     PdfAlignmentNode,
     build_visual_hierarchy,
     clean_text,
+    normalized_heading_keyword,
     visual_parent_pair_is_quality_gate_required,
 )
 from src.reasoning.tex_relation_labeler import TexRelationLabel
@@ -26,6 +27,12 @@ def has_alignment_deps():
 def test_clean_text_collapses_latex_math_and_noise():
     assert clean_text("A $x+y$ formula, with punctuation!") == "axyformulawithpunctuation"
     assert clean_text(r"\begin{equation}x=y\end{equation}") == "xy"
+
+
+def test_normalized_heading_keyword_strips_numbered_prefixes():
+    assert normalized_heading_keyword("VII. ACKNOWLEDGEMENTS") == "acknowledgements"
+    assert normalized_heading_keyword("9 References") == "references"
+    assert normalized_heading_keyword("Appendix A Proofs") == "appendix"
 
 
 def test_tex_parser_standardizes_basic_nodes_and_unwraps_unknown_macros(tmp_path):
@@ -421,6 +428,48 @@ def test_visual_hierarchy_closes_references_before_appendix_headings():
     assert hierarchy.parent_by_node[3] == 2
 
 
+def test_visual_hierarchy_closes_acknowledgements_before_references_and_later_body():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="VII. ACKNOWLEDGEMENTS",
+            clean=clean_text("VII. ACKNOWLEDGEMENTS"),
+            item={"type": "title", "text_for_embedding": "VII. ACKNOWLEDGEMENTS"},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="This work was supported by a grant.",
+            clean=clean_text("This work was supported by a grant."),
+            item={"type": "paragraph", "text_for_embedding": "This work was supported by a grant."},
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="REFERENCES",
+            clean=clean_text("REFERENCES"),
+            item={"type": "title", "text_for_embedding": "REFERENCES"},
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="[1] A. Author. A paper.",
+            clean=clean_text("[1] A. Author. A paper."),
+            item={"type": "reference", "list_type": "reference_list", "text_for_embedding": "[1] A. Author. A paper."},
+        ),
+        PdfAlignmentNode(
+            node_index=4,
+            text="The pseudocode is listed below.",
+            clean=clean_text("The pseudocode is listed below."),
+            item={"type": "paragraph", "text_for_embedding": "The pseudocode is listed below."},
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] is None
+    assert hierarchy.parent_by_node[3] == 2
+    assert hierarchy.parent_by_node[4] is None
+
+
 def test_visual_hierarchy_does_not_reuse_stale_list_intro_after_body_text():
     nodes = [
         PdfAlignmentNode(
@@ -685,6 +734,46 @@ def test_visual_hierarchy_does_not_treat_algorithm_io_labels_as_headings():
             text="The algorithm returns an updated state.",
             clean=clean_text("The algorithm returns an updated state."),
             item={"type": "paragraph", "text_for_embedding": "The algorithm returns an updated state."},
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert 1 not in hierarchy.heading_ids
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] == 0
+
+
+def test_visual_hierarchy_does_not_treat_formula_signatures_as_headings():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="A State-space Model",
+            clean=clean_text("A State-space Model"),
+            item={"type": "title", "text_for_embedding": "A State-space Model"},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text=r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones",
+            clean=clean_text(r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones"),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones",
+                "style_baseline_size": 12.0,
+                "style_spans": [
+                    {
+                        "text": r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones",
+                        "font_size": 12.0,
+                        "is_bold": True,
+                    }
+                ],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="ConstructQueryGraph constructs a query graph.",
+            clean=clean_text("ConstructQueryGraph constructs a query graph."),
+            item={"type": "paragraph", "text_for_embedding": "ConstructQueryGraph constructs a query graph."},
         ),
     ]
 

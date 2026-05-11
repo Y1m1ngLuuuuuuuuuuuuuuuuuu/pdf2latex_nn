@@ -1369,9 +1369,13 @@ def heading_scope_must_close_before_child(*, parent_text: str, child_text: str) 
     """
 
     parent_kind = normalized_heading_keyword(parent_text)
+    child_kind = normalized_heading_keyword(child_text)
+    if parent_kind in {"acknowledgements", "acknowledgments"}:
+        if child_kind in {"references", "bibliography", "appendix"}:
+            return True
+        return title_numbering_path(child_text) is not None
     if parent_kind not in {"references", "bibliography"}:
         return False
-    child_kind = normalized_heading_keyword(child_text)
     if child_kind in {"references", "bibliography"}:
         return False
     if title_numbering_path(child_text) is not None:
@@ -1464,7 +1468,13 @@ def item_looks_like_reference_entry(item: dict[str, Any]) -> bool:
 
 
 def normalized_heading_keyword(text: str) -> str:
-    return re.sub(r"[^a-z]+", "", str(text or "").casefold())
+    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
+    for keyword in ("references", "bibliography", "acknowledgements", "acknowledgments"):
+        if normalized == keyword or normalized.endswith(keyword):
+            return keyword
+    if normalized.startswith("appendix"):
+        return "appendix"
+    return normalized
 
 
 def ordered_list_marker_number(text: str) -> int | None:
@@ -1488,6 +1498,15 @@ def text_can_anchor_visible_list(text: str) -> bool:
 
 def is_algorithm_io_label(text: str) -> bool:
     return bool(ALGORITHM_IO_LABEL_RE.match(str(text or "")))
+
+
+def is_formula_heavy_scope_heading_text(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    math_tokens = sum(value.count(token) for token in ("\\", "_", "^", "{", "}", "=", "\\tag", "\\mathbf", "\\colon"))
+    word_tokens = len(re.findall(r"[A-Za-z]{2,}", value))
+    return math_tokens >= 5 and math_tokens >= word_tokens
 
 
 def visible_list_proxy_parent(
@@ -1553,6 +1572,8 @@ def is_visual_heading_candidate(
     if not text:
         return False
     if is_algorithm_io_label(text):
+        return False
+    if is_formula_heavy_scope_heading_text(text):
         return False
     if node.item.get("run_in_heading"):
         return True
