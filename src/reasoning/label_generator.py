@@ -1248,6 +1248,11 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
         if node_id in heading_ids:
             level = heading_levels[node_id]
             numbering_path = title_numbering_path(node.text)
+            while stack and heading_scope_must_close_before_child(
+                parent_text=nodes[stack[-1][0]].text,
+                child_text=node.text,
+            ):
+                stack.pop()
             while stack and stack[-1][1] >= level:
                 stack.pop()
             if numbering_path is not None:
@@ -1315,6 +1320,33 @@ def heading_numbering_parent_is_compatible(parent_path: tuple[str, ...] | None, 
     if len(parent_path) >= len(child_path):
         return False
     return child_path[: len(parent_path)] == parent_path
+
+
+def heading_scope_must_close_before_child(*, parent_text: str, child_text: str) -> bool:
+    """Close terminal bibliography scopes before later appendix/body headings.
+
+    Visual heading stacks are intentionally layout-based, so they can see a
+    bibliography title before an appendix title even when the TeX AST is noisy.
+    A ``References`` / ``Bibliography`` heading may parent reference-list
+    entries, but it must never become the parent of later appendix or normal
+    section headings.
+    """
+
+    parent_kind = normalized_heading_keyword(parent_text)
+    if parent_kind not in {"references", "bibliography"}:
+        return False
+    child_kind = normalized_heading_keyword(child_text)
+    if child_kind in {"references", "bibliography"}:
+        return False
+    if title_numbering_path(child_text) is not None:
+        return True
+    return child_kind in {"appendix", "acknowledgements", "acknowledgments"} or bool(
+        str(child_text or "").strip()
+    )
+
+
+def normalized_heading_keyword(text: str) -> str:
+    return re.sub(r"[^a-z]+", "", str(text or "").casefold())
 
 
 def ordered_list_marker_number(text: str) -> int | None:

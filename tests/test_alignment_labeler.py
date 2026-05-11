@@ -372,6 +372,54 @@ def test_visual_hierarchy_uses_colon_paragraph_as_list_proxy_parent():
     assert hierarchy.parent_by_node[3] == 1
 
 
+def test_visual_hierarchy_closes_references_before_appendix_headings():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="References",
+            clean=clean_text("References"),
+            item={"type": "title", "text_for_embedding": "References", "bbox": [220, 120, 330, 145]},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="[1] A. Author. A paper.",
+            clean=clean_text("[1] A. Author. A paper."),
+            item={
+                "type": "reference",
+                "list_type": "reference_list",
+                "text_for_embedding": "[1] A. Author. A paper.",
+                "bbox": [80, 170, 520, 190],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="A.2. Markov Decision Process (MDP)",
+            clean=clean_text("A.2. Markov Decision Process (MDP)"),
+            item={
+                "type": "title",
+                "text_for_embedding": "A.2. Markov Decision Process (MDP)",
+                "bbox": [80, 300, 420, 320],
+            },
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="The appendix continues with technical definitions.",
+            clean=clean_text("The appendix continues with technical definitions."),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "The appendix continues with technical definitions.",
+                "bbox": [80, 340, 760, 365],
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] is None
+    assert hierarchy.parent_by_node[3] == 2
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return
