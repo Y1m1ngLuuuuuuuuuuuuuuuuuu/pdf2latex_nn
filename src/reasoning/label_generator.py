@@ -1468,13 +1468,15 @@ def item_looks_like_reference_entry(item: dict[str, Any]) -> bool:
 
 
 def normalized_heading_keyword(text: str) -> str:
-    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
-    for keyword in ("references", "bibliography", "acknowledgements", "acknowledgments"):
-        if normalized == keyword or normalized.endswith(keyword):
-            return keyword
-    if normalized.startswith("appendix"):
+    raw = str(text or "").casefold()
+    tokens = re.findall(r"[a-z]+|\d+", raw)
+    while tokens and (tokens[0].isdigit() or re.fullmatch(r"[ivxlcdm]+", tokens[0])):
+        tokens.pop(0)
+    if tokens and tokens[0] in {"references", "bibliography", "acknowledgements", "acknowledgments"}:
+        return tokens[0]
+    if tokens and tokens[0] == "appendix":
         return "appendix"
-    return normalized
+    return "".join(tokens)
 
 
 def ordered_list_marker_number(text: str) -> int | None:

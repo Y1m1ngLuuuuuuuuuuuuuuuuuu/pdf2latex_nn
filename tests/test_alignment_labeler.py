@@ -33,6 +33,7 @@ def test_normalized_heading_keyword_strips_numbered_prefixes():
     assert normalized_heading_keyword("VII. ACKNOWLEDGEMENTS") == "acknowledgements"
     assert normalized_heading_keyword("9 References") == "references"
     assert normalized_heading_keyword("Appendix A Proofs") == "appendix"
+    assert normalized_heading_keyword("3.5 Activation Functions and Representational Preferences") != "references"
 
 
 def test_tex_parser_standardizes_basic_nodes_and_unwraps_unknown_macros(tmp_path):
