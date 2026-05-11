@@ -50,11 +50,13 @@ EDGE_SOURCE_TYPES = [
     "float_skip",
     "scope_anchor",
     "list_run_scope",
+    "list_intro_scope",
 ]
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
 ALPHA_OR_ROMAN_HEADING_RE = re.compile(r"^\s*([A-Za-z]+)[\.\)]\s+(.*)$")
 TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
+VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
 STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
 TEXT_FLOW_TYPES = {"text", "list", "reference"}
 AUXILIARY_TYPES = {"page_header", "header", "page_footer", "footer", "page_number"}
@@ -1018,6 +1020,16 @@ def add_scope_anchor_edges(
             for target_idx in _iter_heading_scope_targets(items, order, source_pos, max_window=max_window, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "scope_anchor")
             continue
+        if _is_visible_list_intro(source):
+            for target_idx in _iter_visible_list_intro_targets(
+                items,
+                order,
+                source_pos,
+                max_window=max_window,
+                body_font_size=body_font_size,
+            ):
+                add_edge(source_idx, target_idx, "list_intro_scope")
+            continue
         if _is_list_item_like(source):
             for target_idx in _iter_list_run_targets(items, order, source_pos, max_window=max_window, body_font_size=body_font_size):
                 add_edge(source_idx, target_idx, "list_run_scope")
@@ -1101,6 +1113,41 @@ def _iter_list_run_targets(
             targets.append(target_idx)
             continue
         if saw_next_marker and _is_text_continuation_target(target) and not _is_list_item_like(target):
+            break
+    return targets
+
+
+def _iter_visible_list_intro_targets(
+    items: list[dict[str, Any]],
+    order: list[int],
+    source_pos: int,
+    *,
+    max_window: int,
+    body_font_size: float = 0.0,
+) -> list[int]:
+    """Return bullet/numbered items governed by a visible colon intro line.
+
+    The TeX list container is invisible in PDF.  A sentence such as
+    "the following:" is the visible proxy parent, so candidate edges must
+    explicitly connect it to every immediately following list item.
+    """
+
+    targets: list[int] = []
+    in_list_run = False
+    for target_pos in range(source_pos + 1, min(len(order), source_pos + max_window + 1)):
+        target_idx = order[target_pos]
+        target = items[target_idx]
+        if _is_heading_item(target, body_font_size=body_font_size):
+            break
+        if _is_auxiliary_item(target):
+            continue
+        if _is_list_item_like(target):
+            targets.append(target_idx)
+            in_list_run = True
+            continue
+        if in_list_run:
+            break
+        if _item_text(target).strip():
             break
     return targets
 
@@ -1940,6 +1987,18 @@ def _is_list_item_like(item: dict[str, Any]) -> bool:
     if canonical_type(item) == "list":
         return True
     return bool(LIST_MARKER_RE.match(_item_text(item)))
+
+
+def _is_visible_list_intro(item: dict[str, Any]) -> bool:
+    if canonical_type(item) not in {"text", "reference"}:
+        return False
+    text = " ".join(_item_text(item).split())
+    if not text or LIST_MARKER_RE.match(text):
+        return False
+    letters = [char for char in text if char.isalnum()]
+    if len(letters) < 8:
+        return False
+    return bool(VISIBLE_LIST_INTRO_RE.search(text))
 
 
 def _item_text(item: dict[str, Any]) -> str:

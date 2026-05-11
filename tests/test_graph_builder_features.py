@@ -231,6 +231,28 @@ def test_candidate_edges_add_scope_and_float_skip_recall_edges():
     assert any(source == 4 and target == 5 for source, target, _ in pairs)
 
 
+def test_candidate_edges_connect_visible_list_intro_to_bullet_items():
+    items = [
+        {**item("1 Introduction", [80, 80, 360, 110], page=0), "type": "title"},
+        item("ADD faces several shortcomings related to:", [80, 130, 860, 160], page=0),
+        item("• Data: Creating labeled datasets is costly.", [120, 180, 860, 210], page=0),
+        item("• Machine Learning: ML methods struggle with rare cases.", [120, 220, 860, 250], page=0),
+        item("Next paragraph after list.", [80, 300, 860, 340], page=0),
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=0,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (1, 2, "list_intro_scope") in typed
+    assert (1, 3, "list_intro_scope") in typed
+    assert (1, 4, "list_intro_scope") not in typed
+
+
 def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
     items = [
         {**item("2 Results", [80, 40, 920, 80], page=0, full=True), "type": "title"},
