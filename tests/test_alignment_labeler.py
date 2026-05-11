@@ -546,6 +546,47 @@ def test_visual_parent_quality_gate_ignores_float_and_misplaced_reference_childr
     assert visual_parent_pair_is_quality_gate_required(references, reference_item)
 
 
+def test_visual_hierarchy_keeps_reference_like_paragraphs_under_references():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="A Paper Title",
+            clean=clean_text("A Paper Title"),
+            item={"type": "title", "text_for_embedding": "A Paper Title"},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="8 Reproducibility",
+            clean=clean_text("8 Reproducibility"),
+            item={"type": "title", "text_for_embedding": "8 Reproducibility"},
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="References",
+            clean=clean_text("References"),
+            item={"type": "title", "text_for_embedding": "References"},
+        ),
+        PdfAlignmentNode(
+            node_index=3,
+            text="Jane Doe, John Smith, and Max Mustermann. A useful paper, 2024. URL https://example.com.",
+            clean=clean_text(
+                "Jane Doe, John Smith, and Max Mustermann. A useful paper, 2024. URL https://example.com."
+            ),
+            item={
+                "type": "paragraph",
+                "text_for_embedding": "Jane Doe, John Smith, and Max Mustermann. A useful paper, 2024. URL https://example.com.",
+            },
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert hierarchy.parent_by_node[1] is None
+    assert hierarchy.parent_by_node[2] is None
+    assert hierarchy.parent_by_node[3] == 2
+    assert not visual_parent_pair_is_quality_gate_required(nodes[2], nodes[3])
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return

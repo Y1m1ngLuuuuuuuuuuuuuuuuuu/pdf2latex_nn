@@ -1371,7 +1371,7 @@ def reference_scope_must_close_before_item(*, parent_text: str, item: dict[str, 
     parent_kind = normalized_heading_keyword(parent_text)
     if parent_kind not in {"references", "bibliography"}:
         return False
-    return canonical_pdf_merge_type(item) != "reference"
+    return canonical_pdf_merge_type(item) != "reference" and not item_looks_like_reference_entry(item)
 
 
 def visual_parent_pair_is_quality_gate_required(parent: PdfAlignmentNode, child: PdfAlignmentNode) -> bool:
@@ -1388,10 +1388,36 @@ def visual_parent_pair_is_quality_gate_required(parent: PdfAlignmentNode, child:
     child_kind = canonical_pdf_merge_type(child.item)
     if child_kind in {"figure", "image", "chart", "table", "algorithm", "code"}:
         return False
+    parent_kind = normalized_heading_keyword(parent.text)
+    if parent_kind in {"references", "bibliography"} and item_looks_like_reference_entry(child.item):
+        return child_kind == "reference"
     if child_kind == "reference":
-        parent_kind = normalized_heading_keyword(parent.text)
         return parent_kind in {"references", "bibliography"}
     return True
+
+
+def item_looks_like_reference_entry(item: dict[str, Any]) -> bool:
+    if str(item.get("list_type") or "").lower() == "reference_list":
+        return True
+    text = stringify_text_payload(
+        item.get("text_for_embedding") or item.get("text") or item.get("merged_text") or item.get("text_preview")
+    )
+    compact = " ".join(str(text or "").split())
+    if len(compact) < 40:
+        return False
+    lower = compact.casefold()
+    if len(compact) >= 100 and compact.count(",") >= 5:
+        return True
+    signals = 0
+    if re.search(r"\b(?:19|20)\d{2}[a-z]?\b", compact):
+        signals += 1
+    if any(token in lower for token in ("http://", "https://", "doi", "arxiv", "accessed", "conference", "journal")):
+        signals += 1
+    if compact.count(",") >= 2 or " et al" in lower:
+        signals += 1
+    if re.search(r"\bpp\.\s*\d", lower):
+        signals += 1
+    return signals >= 2
 
 
 def normalized_heading_keyword(text: str) -> str:
