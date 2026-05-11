@@ -1850,10 +1850,13 @@ def _is_auxiliary_item(item: dict[str, Any]) -> bool:
 
 
 def _is_heading_item(item: dict[str, Any], *, body_font_size: float = 0.0) -> bool:
-    if _is_algorithm_io_label(_item_text(item)):
+    text = _item_text(item)
+    if _is_algorithm_io_label(text):
         return False
     if canonical_type(item) == "title":
         return True
+    if _is_formula_heavy_scope_heading_text(text):
+        return False
     role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
     if role == "heading":
         return True
@@ -1861,7 +1864,6 @@ def _is_heading_item(item: dict[str, Any], *, body_font_size: float = 0.0) -> bo
         return False
     if canonical_type(item) not in {"text", "reference"}:
         return False
-    text = _item_text(item)
     if not _looks_like_scope_heading_text(text):
         return False
     if LIST_MARKER_RE.match(text) and title_numbering_path(text) is None:
@@ -1924,6 +1926,23 @@ def _looks_like_scope_heading_text(text: str) -> bool:
     return True
 
 
+def _is_formula_heavy_scope_heading_text(text: str) -> bool:
+    """Reject math/code signatures that visually look bold but are not headings.
+
+    MinerU sometimes emits algorithm I/O signatures or formula descriptions as
+    bold paragraph blocks.  If these are treated as headings, scope-anchor
+    edges are truncated before the real section body.  True title nodes bypass
+    this guard through ``canonical_type(item) == "title"`` above.
+    """
+
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    math_tokens = sum(value.count(token) for token in ("\\", "_", "^", "{", "}", "=", "\\tag", "\\mathbf", "\\colon"))
+    word_tokens = len(re.findall(r"[A-Za-z]{2,}", value))
+    return math_tokens >= 5 and math_tokens >= word_tokens
+
+
 def _alpha_or_roman_heading_level(text: str) -> int | None:
     match = ALPHA_OR_ROMAN_HEADING_RE.match(" ".join(str(text or "").split()))
     if not match:
@@ -1962,6 +1981,8 @@ def _looks_like_title_case_heading_text(text: str) -> bool:
 def _is_scope_child_candidate(item: dict[str, Any]) -> bool:
     if _is_auxiliary_item(item):
         return False
+    if _is_algorithm_io_label(_item_text(item)):
+        return True
     raw_type = str(item.get("type") or item.get("raw_type") or "").lower()
     if raw_type in FOOTNOTE_TYPES:
         return True

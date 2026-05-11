@@ -269,8 +269,43 @@ def test_candidate_edges_do_not_stop_scope_at_algorithm_io_labels():
     )
     typed = {(source, target, source_type) for source, target, source_type in pairs}
 
+    assert (0, 2, "scope_anchor") in typed
     assert (0, 3, "scope_anchor") in typed
     assert (2, 3, "scope_anchor") not in typed
+
+
+def test_candidate_edges_do_not_stop_scope_at_formula_heavy_signatures():
+    items = [
+        {**item("A State-space Model", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        item("State text.", [80, 100, 480, 130], page=0),
+        {
+            **item(
+                r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones",
+                [80, 160, 480, 190],
+                page=0,
+            ),
+            "style_baseline_size": 12.0,
+            "style_spans": [
+                {
+                    "text": r"M _ { \mathbf { n e w } } \colon \mathbf { A } set of newly extracted external milestones",
+                    "font_size": 12.0,
+                    "is_bold": True,
+                }
+            ],
+        },
+        item("ConstructQueryGraph constructs a query graph.", [80, 220, 480, 250], page=0),
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=0,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 2, "scope_anchor") in typed
+    assert (0, 3, "scope_anchor") in typed
 
 
 def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
