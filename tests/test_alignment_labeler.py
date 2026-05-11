@@ -1382,6 +1382,60 @@ def test_alignment_labeler_keeps_cross_column_numbered_list_under_original_scope
     ]
 
 
+def test_alignment_labeler_visual_parent_does_not_require_first_tex_anchor(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "bbox": [80, 80, 360, 110]},
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "This paragraph begins",
+                        "bbox": [80, 125, 500, 150],
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "and continues later.",
+                        "bbox": [80, 160, 500, 185],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        This paragraph begins and continues later.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.PARENT_CHILD)]
+
+
 def test_alignment_labeler_blocks_same_tex_merge_across_column_gutter_without_edge_attr(tmp_path):
     if not has_alignment_deps():
         return

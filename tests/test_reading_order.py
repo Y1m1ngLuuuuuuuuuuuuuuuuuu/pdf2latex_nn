@@ -148,6 +148,36 @@ def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_sp
     assert fixed[2]["column_fix_span"] == "FULL_SPAN"
 
 
+def test_fix_columnar_reading_order_groups_same_row_figure_fragments_left_to_right():
+    nodes = [
+        {"type": "image", "text_for_embedding": "(b) Coarse Feature", "bbox": [321, 88, 483, 184]},
+        {"type": "image", "text_for_embedding": "(a) Input, Prediction", "bbox": [163, 89, 312, 185]},
+        {"type": "paragraph", "text_for_embedding": "left body", "bbox": [75, 285, 470, 465]},
+        {"type": "image", "text_for_embedding": "(c) Refiner Feature", "bbox": [486, 88, 648, 184]},
+        {
+            "type": "image",
+            "text_for_embedding": "(d) Refiner Feature Figure 3. Visualization of F2C input feature maps.",
+            "bbox": [651, 88, 813, 184],
+        },
+        {"type": "paragraph", "text_for_embedding": "right body", "bbox": [498, 285, 892, 314]},
+    ]
+
+    fixed = fix_columnar_reading_order(nodes)
+
+    assert [item["text_for_embedding"] for item in fixed[:4]] == [
+        "(a) Input, Prediction",
+        "(b) Coarse Feature",
+        "(c) Refiner Feature",
+        "(d) Refiner Feature Figure 3. Visualization of F2C input feature maps.",
+    ]
+    assert fixed[0]["layout_band_type"] == "float_group"
+    assert fixed[0]["figure_group_id"] == fixed[3]["figure_group_id"]
+    assert [item["figure_group_member_index"] for item in fixed[:4]] == [0, 1, 2, 3]
+    assert fixed[3]["figure_group_primary"] is True
+    assert fixed[3]["figure_group_caption"].startswith("Figure 3.")
+    assert [item["text_for_embedding"] for item in fixed[4:]] == ["left body", "right body"]
+
+
 def test_content_v7_reorders_each_page_without_merging_or_rewriting_bbox():
     pages = [
         [

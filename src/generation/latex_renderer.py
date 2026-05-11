@@ -231,6 +231,8 @@ def render_node(node: Any, *, depth: int = 0, config: RenderConfig | None = None
             asset_latex_prefix=cfg.table_asset_latex_prefix,
         )
     if block_type == "figure":
+        if int(record.get("figure_group_size") or record.get("image_group_size") or 1) > 1 and record.get("figure_group_primary") is False:
+            return ""
         return render_figure_block(
             record,
             text,
@@ -626,7 +628,7 @@ def render_figure_block(
 ) -> str:
     caption = rendered_caption
     if caption is None:
-        caption_text = str(record.get("figure_caption") or record.get("caption") or text or "Figure")
+        caption_text = str(record.get("figure_group_caption") or record.get("image_group_caption") or record.get("figure_caption") or record.get("caption") or text or "Figure")
         caption = render_text_with_inline_latex(caption_text)
     asset_path = ensure_figure_asset(
         record,

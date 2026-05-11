@@ -701,7 +701,12 @@ class OriginalLikeIRLatexRenderer:
         primary = _primary_visual_node(source_nodes, BlockType.FIGURE)
         if source_nodes:
             for node in source_nodes:
-                value = node.metadata.get("figure_caption") or node.metadata.get("caption")
+                value = (
+                    node.metadata.get("figure_group_caption")
+                    or node.metadata.get("image_group_caption")
+                    or node.metadata.get("figure_caption")
+                    or node.metadata.get("caption")
+                )
                 if isinstance(value, str) and value.strip():
                     caption = value.strip()
                     break
@@ -1102,6 +1107,9 @@ def _page_width_for_nodes(nodes: list[DocumentNode]) -> float:
 def _primary_visual_node(nodes: list[DocumentNode], node_type: BlockType) -> DocumentNode | None:
     typed = [node for node in nodes if node.node_type == node_type]
     if typed:
+        for node in typed:
+            if node.metadata.get("figure_group_primary") is True:
+                return node
         return min(typed, key=lambda node: node.reading_index)
     return min(nodes, key=lambda node: node.reading_index) if nodes else None
 

@@ -41,6 +41,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
     parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.60)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.90)
+    parser.add_argument("--min-visual-parent-label-recall", type=float, default=0.98)
     parser.add_argument("--min-section-nodes", type=int, default=1)
     parser.add_argument(
         "--allow-bad-alignment",
@@ -82,6 +83,7 @@ def main() -> int:
                 "max_orphan_ratio": args.max_orphan_ratio,
                 "max_unmapped_tex_ratio": args.max_unmapped_tex_ratio,
                 "max_isolated_node_ratio": args.max_isolated_node_ratio,
+                "min_visual_parent_label_recall": args.min_visual_parent_label_recall,
                 "min_section_nodes": args.min_section_nodes,
                 "abort_on_bad_alignment": not args.allow_bad_alignment,
             },

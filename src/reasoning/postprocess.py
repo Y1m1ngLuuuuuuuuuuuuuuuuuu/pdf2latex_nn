@@ -848,7 +848,10 @@ class TreeDecoder:
                 asset_latex_prefix=self.config.table_asset_latex_prefix,
             )
         if block_type == "figure":
-            caption = render_text_with_inline_latex(text) if text else "Figure"
+            if int(node.record.get("figure_group_size") or node.record.get("image_group_size") or 1) > 1 and node.record.get("figure_group_primary") is False:
+                return ""
+            raw_caption = node.record.get("figure_group_caption") or node.record.get("image_group_caption") or text
+            caption = render_text_with_inline_latex(raw_caption) if raw_caption else "Figure"
             asset_path = ensure_figure_asset(
                 node.record,
                 source_pdf=self.config.source_pdf,

@@ -487,14 +487,21 @@ def fix_columnar_reading_order(
 
     blocks: list[tuple[str, list[ColumnarOrderView]]] = []
     current_half_block: list[ColumnarOrderView] = []
-    for view in y_ordered:
-        if view.span_label == "FULL_SPAN":
+    for row in _cluster_columnar_rows(y_ordered):
+        if _row_is_float_group(row, page_width=page_width):
             if current_half_block:
                 blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
                 current_half_block = []
-            blocks.append(("FULL_SPAN", [view]))
+            blocks.append(("FLOAT_GROUP_BLOCK", _sort_visual_row(row)))
             continue
-        current_half_block.append(view)
+        for view in row:
+            if view.span_label == "FULL_SPAN":
+                if current_half_block:
+                    blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
+                    current_half_block = []
+                blocks.append(("FULL_SPAN", [view]))
+                continue
+            current_half_block.append(view)
     if current_half_block:
         blocks.append(("DOUBLE_COLUMN_BLOCK", current_half_block))
 
@@ -504,10 +511,14 @@ def fix_columnar_reading_order(
             for local_order, view in enumerate(block):
                 ordered_entries.append((view, band_id, "full_span", local_order, 2))
             continue
+        if block_type == "FLOAT_GROUP_BLOCK":
+            for local_order, view in enumerate(_sort_visual_row(block)):
+                ordered_entries.append((view, band_id, "float_group", local_order, 2))
+            continue
         left_list = [view for view in block if view.column_label == "LEFT_COL"]
         right_list = [view for view in block if view.column_label == "RIGHT_COL"]
-        left_list.sort(key=_columnar_top_key)
-        right_list.sort(key=_columnar_top_key)
+        left_list = _sort_columnar_column(left_list)
+        right_list = _sort_columnar_column(right_list)
         combined = left_list + right_list
         for local_order, view in enumerate(combined):
             band_column_id = 0 if view.column_label == "LEFT_COL" else 1
@@ -533,6 +544,7 @@ def fix_columnar_reading_order(
         node["layout_is_band_boundary"] = is_layout_band_boundary_node(node, span_label=view.span_label, layer=layer)
         node["is_main_flow_candidate"] = layer == LAYOUT_LAYER_MAIN_TEXT
         ordered_nodes.append(node)
+    _annotate_float_groups(ordered_nodes)
     return ordered_nodes
 
 
@@ -803,6 +815,129 @@ def _columnar_order_view(
 
 def _columnar_top_key(view: ColumnarOrderView) -> tuple[float, float, int]:
     return (view.y0, view.x0, view.original_index)
+
+
+def _cluster_columnar_rows(views: list[ColumnarOrderView]) -> list[list[ColumnarOrderView]]:
+    rows: list[list[ColumnarOrderView]] = []
+    for view in sorted(views, key=_columnar_top_key):
+        placed = False
+        for row in rows:
+            if _view_fits_row(view, row):
+                row.append(view)
+                placed = True
+                break
+        if not placed:
+            rows.append([view])
+    return [sorted(row, key=_columnar_top_key) for row in rows]
+
+
+def _view_fits_row(view: ColumnarOrderView, row: list[ColumnarOrderView]) -> bool:
+    if view.bbox is None or not row:
+        return False
+    row_y0 = min(member.y0 for member in row)
+    row_y1 = max(member.y1 for member in row)
+    height = max(view.y1 - view.y0, 1.0)
+    row_height = max(row_y1 - row_y0, 1.0)
+    tolerance = max(6.0, 0.35 * (height + row_height) / 2.0)
+    center = (view.y0 + view.y1) / 2.0
+    row_center = (row_y0 + row_y1) / 2.0
+    if abs(center - row_center) <= tolerance:
+        return True
+    intersection = max(0.0, min(view.y1, row_y1) - max(view.y0, row_y0))
+    return intersection / max(1.0, min(height, row_height)) >= 0.55
+
+
+def _row_is_float_group(row: list[ColumnarOrderView], *, page_width: float) -> bool:
+    float_views = [view for view in row if infer_layout_layer(view.node) == LAYOUT_LAYER_FLOAT]
+    if len(float_views) < 2:
+        return False
+    if len(float_views) < len(row):
+        return False
+    caption_numbers = {
+        match.group(2)
+        for view in float_views
+        for match in [re.search(r"\b(fig(?:ure)?|table)\s*\.?\s*(\d+)", _layout_text(view.node), re.IGNORECASE)]
+        if match is not None
+    }
+    if len(caption_numbers) > 1:
+        return False
+    boxes = [view.bbox for view in float_views if view.bbox is not None]
+    if len(boxes) < 2:
+        return False
+    union_width = max(box[2] for box in boxes) - min(box[0] for box in boxes)
+    return union_width >= max(0.45 * page_width, max((box[2] - box[0] for box in boxes), default=0.0))
+
+
+def _sort_columnar_column(views: list[ColumnarOrderView]) -> list[ColumnarOrderView]:
+    ordered: list[ColumnarOrderView] = []
+    for row in _cluster_columnar_rows(views):
+        if any(infer_layout_layer(view.node) == LAYOUT_LAYER_FLOAT for view in row):
+            ordered.extend(_sort_visual_row(row))
+        else:
+            ordered.extend(sorted(row, key=_columnar_top_key))
+    return ordered
+
+
+def _sort_visual_row(row: list[ColumnarOrderView]) -> list[ColumnarOrderView]:
+    return sorted(row, key=lambda view: (view.x0, view.y0, view.original_index))
+
+
+def _annotate_float_groups(nodes: list[dict[str, Any]]) -> None:
+    groups: dict[tuple[int, int], list[int]] = {}
+    for index, node in enumerate(nodes):
+        if node.get("layout_band_type") != "float_group":
+            continue
+        if infer_layout_layer(node) != LAYOUT_LAYER_FLOAT:
+            continue
+        page_idx = _numeric_or_none(node.get("page_idx"))
+        if page_idx is None:
+            page_idx = 0
+        band_id = _numeric_or_none(node.get("layout_band_id"))
+        if page_idx is None or band_id is None:
+            continue
+        groups.setdefault((page_idx, band_id), []).append(index)
+    for group_number, ((page_idx, band_id), indexes) in enumerate(sorted(groups.items())):
+        if len(indexes) < 2:
+            continue
+        boxes = [_parse_bbox(nodes[index].get("bbox")) for index in indexes]
+        boxes = [box for box in boxes if box is not None]
+        if not boxes:
+            continue
+        union = [
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        ]
+        ordered = sorted(indexes, key=lambda index: (_parse_bbox(nodes[index].get("bbox")) or (0, 0, 0, 0))[0])
+        captioned = [index for index in ordered if _float_caption_text(nodes[index])]
+        primary = captioned[-1] if captioned else ordered[0]
+        group_id = f"figure_group_p{page_idx:04d}_{band_id:04d}_{group_number:04d}"
+        member_ids = [str(nodes[index].get("global_order", nodes[index].get("original_index", index))) for index in ordered]
+        caption = _float_caption_text(nodes[primary])
+        for member_index, index in enumerate(ordered):
+            nodes[index].update(
+                {
+                    "figure_group_id": group_id,
+                    "image_group_id": group_id,
+                    "figure_group_member_ids": member_ids,
+                    "figure_group_member_index": member_index,
+                    "figure_group_size": len(ordered),
+                    "figure_group_primary": index == primary,
+                    "figure_group_bbox": union,
+                    "image_group_bbox": union,
+                    "figure_group_caption": caption,
+                    "figure_group_render_strategy": "union_pdf_crop",
+                }
+            )
+
+
+def _float_caption_text(node: dict[str, Any]) -> str:
+    text = _layout_text(node)
+    match = re.search(r"\b((?:Fig\.?|Figure|Table)\s*\.?\s*\d+[:.\-]?\s+.+)$", text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return " ".join(match.group(1).split())
+    return ""
 
 
 def infer_layout_layer(node: dict[str, Any]) -> str:

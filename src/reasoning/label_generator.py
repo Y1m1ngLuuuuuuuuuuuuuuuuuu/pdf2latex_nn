@@ -107,6 +107,7 @@ class AlignmentLabelerConfig:
     max_orphan_ratio: float = 0.15
     max_unmapped_tex_ratio: float = 0.30
     max_isolated_node_ratio: float = 0.85
+    min_visual_parent_label_recall: float = 0.98
     min_section_nodes: int = 1
     abort_on_bad_alignment: bool = False
     output_mapping_json: Path | None = None
@@ -774,6 +775,9 @@ class AlignmentLabeler:
         target_item = self.pdf_nodes[target_index].item if 0 <= target_index < len(self.pdf_nodes) else {}
         if relation_layers_are_incompatible(source_item, target_item):
             return int(TexRelationLabel.NONE)
+        visual_relation = self.infer_visual_relation(source_index, target_index)
+        if visual_relation is not None:
+            return visual_relation
         source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
         target_match = self.matches[target_index] if 0 <= target_index < len(self.matches) else None
         if source_match is None or target_match is None or not source_match.tex_id or not target_match.tex_id:
@@ -792,9 +796,6 @@ class AlignmentLabeler:
             if same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
                 return int(TexRelationLabel.MERGE)
             return int(TexRelationLabel.NONE)
-        visual_relation = self.infer_visual_relation(source_index, target_index, source_match, target_match)
-        if visual_relation is not None:
-            return visual_relation
         if self.config.relation_strategy == "visual_only":
             return int(TexRelationLabel.NONE)
         if self.visual_hierarchy is not None and self.visual_hierarchy.heading_ids:
@@ -809,21 +810,13 @@ class AlignmentLabeler:
         self,
         source_index: int,
         target_index: int,
-        source_match: AlignmentMatch,
-        target_match: AlignmentMatch,
     ) -> int | None:
         hierarchy = self.visual_hierarchy
         if hierarchy is None or not hierarchy.heading_ids:
             return None
-        if not self.is_first_pdf_anchor(source_index, source_match.tex_id) or not self.is_first_pdf_anchor(
-            target_index, target_match.tex_id
-        ):
-            return int(TexRelationLabel.NONE)
         if hierarchy.parent_by_node.get(target_index) == source_index:
             return int(TexRelationLabel.PARENT_CHILD)
-        source_parent = hierarchy.parent_by_node.get(source_index)
-        target_parent = hierarchy.parent_by_node.get(target_index)
-        return int(TexRelationLabel.NONE)
+        return None
 
     def is_first_pdf_anchor(self, pdf_index: int, tex_id: str | None) -> bool:
         if not tex_id:
@@ -1031,6 +1024,7 @@ class AlignmentLabeler:
             ]
             isolated_count = sum(1 for node_index in candidates if node_index not in connected)
             isolated_ratio = isolated_count / max(1, len(candidates))
+        visual_parent_quality = self.visual_parent_label_quality(graph=graph, labels=labels)
         self.alignment_quality = {
             "orphan_count": orphan_count,
             "raw_orphan_count": sum(1 for match in self.matches if not match.tex_id),
@@ -1058,6 +1052,7 @@ class AlignmentLabeler:
             "isolated_node_count": isolated_count,
             "isolated_node_ratio": isolated_ratio,
             "max_isolated_node_ratio": self.config.max_isolated_node_ratio,
+            **visual_parent_quality,
         }
         failures: list[str] = []
         if orphan_ratio > self.config.max_orphan_ratio:
@@ -1068,8 +1063,63 @@ class AlignmentLabeler:
             failures.append(f"section_count={section_count} < min_section_nodes={self.config.min_section_nodes}")
         if isolated_ratio > self.config.max_isolated_node_ratio:
             failures.append(f"isolated_node_ratio={isolated_ratio:.2%} > {self.config.max_isolated_node_ratio:.2%}")
+        visual_parent_recall = visual_parent_quality.get("visual_parent_label_recall")
+        if (
+            visual_parent_recall is not None
+            and visual_parent_quality.get("visual_parent_pairs", 0) > 0
+            and float(visual_parent_recall) < self.config.min_visual_parent_label_recall
+        ):
+            failures.append(
+                "visual_parent_label_recall="
+                f"{float(visual_parent_recall):.2%} < {self.config.min_visual_parent_label_recall:.2%}"
+            )
         if failures and self.config.abort_on_bad_alignment:
             raise AlignmentQualityError("bad alignment quality: " + "; ".join(failures))
+
+    def visual_parent_label_quality(self, *, graph: Any | None, labels: Any | None) -> dict[str, Any]:
+        hierarchy = self.visual_hierarchy
+        if hierarchy is None or graph is None or labels is None or not hasattr(graph, "edge_index"):
+            return {
+                "visual_parent_pairs": 0,
+                "visual_parent_labeled_pairs": 0,
+                "visual_parent_missing_candidate_pairs": 0,
+                "visual_parent_label_recall": None,
+                "min_visual_parent_label_recall": self.config.min_visual_parent_label_recall,
+            }
+        expected_pairs: list[tuple[int, int]] = []
+        for child_index, parent_index in hierarchy.parent_by_node.items():
+            if parent_index is None:
+                continue
+            if self.node_is_unlabelable_visual_orphan(parent_index) or self.node_is_unlabelable_visual_orphan(child_index):
+                continue
+            parent_item = self.pdf_nodes[parent_index].item if 0 <= parent_index < len(self.pdf_nodes) else {}
+            child_item = self.pdf_nodes[child_index].item if 0 <= child_index < len(self.pdf_nodes) else {}
+            if relation_layers_are_incompatible(parent_item, child_item):
+                continue
+            expected_pairs.append((parent_index, child_index))
+        if not expected_pairs:
+            return {
+                "visual_parent_pairs": 0,
+                "visual_parent_labeled_pairs": 0,
+                "visual_parent_missing_candidate_pairs": 0,
+                "visual_parent_label_recall": None,
+                "min_visual_parent_label_recall": self.config.min_visual_parent_label_recall,
+            }
+        edge_index = graph.edge_index.detach().cpu()
+        label_values = labels.detach().cpu().tolist()
+        edge_labels = {
+            (int(edge_index[0, edge_pos].item()), int(edge_index[1, edge_pos].item())): int(label)
+            for edge_pos, label in enumerate(label_values)
+        }
+        labeled = sum(1 for pair in expected_pairs if edge_labels.get(pair) == int(TexRelationLabel.PARENT_CHILD))
+        missing_candidate = sum(1 for pair in expected_pairs if pair not in edge_labels)
+        return {
+            "visual_parent_pairs": len(expected_pairs),
+            "visual_parent_labeled_pairs": labeled,
+            "visual_parent_missing_candidate_pairs": missing_candidate,
+            "visual_parent_label_recall": labeled / max(1, len(expected_pairs)),
+            "min_visual_parent_label_recall": self.config.min_visual_parent_label_recall,
+        }
 
     def write_mapping_json(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1353,6 +1403,17 @@ def infer_document_title_ids(nodes: list[PdfAlignmentNode], heading_candidates: 
     text = first.text.strip()
     width = max(0.0, bbox[2] - bbox[0])
     if page_idx == 0 and bbox[1] < 220 and width >= 520 and len(text) >= 35:
+        return {first_id}
+    if (
+        (page_idx in {None, 0})
+        and bbox[1] < 260
+        and canonical_pdf_type(first.item) in HEADING_TYPES
+        and title_numbering_path(text) is None
+        and any(
+            re.sub(r"[^a-z]+", "", candidate.text.casefold()) == "abstract"
+            for candidate in nodes[first.node_index + 1 : first.node_index + 8]
+        )
+    ):
         return {first_id}
     return set()
 
