@@ -57,6 +57,10 @@ ALPHA_OR_ROMAN_HEADING_RE = re.compile(r"^\s*([A-Za-z]+)[\.\)]\s+(.*)$")
 TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
+ALGORITHM_IO_LABEL_RE = re.compile(
+    r"^\s*(?:input|output|require|ensure|parameters?|returns?)\s*[:：]\s*$",
+    re.IGNORECASE,
+)
 STRUCTURAL_SKIP_TYPES = {"figure", "table", "algorithm", "equation"}
 TEXT_FLOW_TYPES = {"text", "list", "reference"}
 AUXILIARY_TYPES = {"page_header", "header", "page_footer", "footer", "page_number"}
@@ -1846,6 +1850,8 @@ def _is_auxiliary_item(item: dict[str, Any]) -> bool:
 
 
 def _is_heading_item(item: dict[str, Any], *, body_font_size: float = 0.0) -> bool:
+    if _is_algorithm_io_label(_item_text(item)):
+        return False
     if canonical_type(item) == "title":
         return True
     role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
@@ -1999,6 +2005,10 @@ def _is_visible_list_intro(item: dict[str, Any]) -> bool:
     if len(letters) < 8:
         return False
     return bool(VISIBLE_LIST_INTRO_RE.search(text))
+
+
+def _is_algorithm_io_label(text: str) -> bool:
+    return bool(ALGORITHM_IO_LABEL_RE.match(str(text or "")))
 
 
 def _item_text(item: dict[str, Any]) -> str:

@@ -666,6 +666,35 @@ def test_visual_hierarchy_moves_author_biography_continuations_out_of_section_sc
     assert hierarchy.parent_by_node[3] is None
 
 
+def test_visual_hierarchy_does_not_treat_algorithm_io_labels_as_headings():
+    nodes = [
+        PdfAlignmentNode(
+            node_index=0,
+            text="2 Method",
+            clean=clean_text("2 Method"),
+            item={"type": "title", "text_for_embedding": "2 Method"},
+        ),
+        PdfAlignmentNode(
+            node_index=1,
+            text="Output:",
+            clean=clean_text("Output:"),
+            item={"type": "title", "text_for_embedding": "Output:"},
+        ),
+        PdfAlignmentNode(
+            node_index=2,
+            text="The algorithm returns an updated state.",
+            clean=clean_text("The algorithm returns an updated state."),
+            item={"type": "paragraph", "text_for_embedding": "The algorithm returns an updated state."},
+        ),
+    ]
+
+    hierarchy = build_visual_hierarchy(nodes, config=AlignmentLabelerConfig())
+
+    assert 1 not in hierarchy.heading_ids
+    assert hierarchy.parent_by_node[1] == 0
+    assert hierarchy.parent_by_node[2] == 0
+
+
 def test_alignment_labeler_accumulates_pdf_fragments_for_one_tex_node(tmp_path):
     if not has_alignment_deps():
         return

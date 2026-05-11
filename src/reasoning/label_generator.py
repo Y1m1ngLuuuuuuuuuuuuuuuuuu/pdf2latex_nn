@@ -266,6 +266,10 @@ TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 UPPERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[A-Z]")
 VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
+ALGORITHM_IO_LABEL_RE = re.compile(
+    r"^\s*(?:input|output|require|ensure|parameters?|returns?)\s*[:：]\s*$",
+    re.IGNORECASE,
+)
 RUN_IN_HEADING_RE = re.compile(
     r"^\s*(?:"
     r"[A-Z][A-Za-z][A-Za-z0-9/\-\s]{1,48}[.:]"
@@ -1482,6 +1486,10 @@ def text_can_anchor_visible_list(text: str) -> bool:
     return bool(VISIBLE_LIST_INTRO_RE.search(stripped))
 
 
+def is_algorithm_io_label(text: str) -> bool:
+    return bool(ALGORITHM_IO_LABEL_RE.match(str(text or "")))
+
+
 def visible_list_proxy_parent(
     recent_list_intro_by_scope: dict[int | None, tuple[int, int]],
     *,
@@ -1543,6 +1551,8 @@ def is_visual_heading_candidate(
 ) -> bool:
     text = node.text.strip()
     if not text:
+        return False
+    if is_algorithm_io_label(text):
         return False
     if node.item.get("run_in_heading"):
         return True

@@ -253,6 +253,26 @@ def test_candidate_edges_connect_visible_list_intro_to_bullet_items():
     assert not any(source == 1 and target == 4 for source, target, _ in pairs)
 
 
+def test_candidate_edges_do_not_stop_scope_at_algorithm_io_labels():
+    items = [
+        {**item("A State-space Model", [80, 40, 920, 80], page=0, full=True), "type": "title"},
+        item("State text.", [80, 100, 480, 130], page=0),
+        {**item("Output:", [80, 160, 180, 180], page=0), "type": "title"},
+        item("UpdateEntityPriorities adjusts entity priorities dynamically.", [80, 220, 480, 250], page=0),
+    ]
+
+    pairs = build_candidate_edge_pairs(
+        items,
+        sequential_window=0,
+        spatial_k=0,
+        scope_anchor_window=10,
+    )
+    typed = {(source, target, source_type) for source, target, source_type in pairs}
+
+    assert (0, 3, "scope_anchor") in typed
+    assert (2, 3, "scope_anchor") not in typed
+
+
 def test_candidate_edges_anchor_parent_headings_to_deep_child_headings():
     items = [
         {**item("2 Results", [80, 40, 920, 80], page=0, full=True), "type": "title"},
