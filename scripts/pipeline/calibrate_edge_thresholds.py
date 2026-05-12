@@ -45,6 +45,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau-max", type=float, default=0.95)
     parser.add_argument("--tau-step", type=float, default=0.01)
     parser.add_argument(
+        "--min-merge-precision",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional validation precision floor for MERGE while selecting the main calibrated threshold. "
+            "Use this for deployment/visual QA settings where false MERGE edges are more harmful than missed merges."
+        ),
+    )
+    parser.add_argument(
+        "--precision-floors",
+        default="0.70,0.75,0.80,0.85,0.90",
+        help="Comma-separated MERGE precision floors to report as secondary operating points.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["threshold_priority", "scaled_argmax"],
         default="threshold_priority",
@@ -89,6 +103,7 @@ def main() -> int:
         val_target,
         tau_values=tau_grid(args.tau_min, args.tau_max, args.tau_step),
         mode=args.mode,
+        min_merge_precision=args.min_merge_precision,
         torch=torch,
     )
     test_pred = predict_with_thresholds(
@@ -112,17 +127,31 @@ def main() -> int:
         "mode": args.mode,
         "split_docs": {name: len(samples) for name, samples in split_samples.items()},
         "search_grid": {"tau_min": args.tau_min, "tau_max": args.tau_max, "tau_step": args.tau_step},
+        "constraints": {"min_merge_precision": args.min_merge_precision},
         "best_thresholds": {
             "tau_merge": search["tau_merge"],
             "tau_parent": search["tau_parent"],
             "val_positive_macro_f1": search["val_positive_macro_f1"],
             "val_macro_f1": search["val_macro_f1"],
+            "val_merge_precision": search.get("merge_precision"),
+            "val_merge_recall": search.get("merge_recall"),
+            "val_merge_f1": search.get("merge_f1"),
         },
         "argmax": {"val": argmax_val, "test": argmax_test},
         "calibrated": {
             "val": metric_payload(val_pred, val_target),
             "test": metric_payload(test_pred, test_target),
         },
+        "precision_constrained": precision_constrained_payload(
+            val_prob,
+            val_target,
+            test_prob,
+            test_target,
+            tau_values=tau_grid(args.tau_min, args.tau_max, args.tau_step),
+            floors=parse_float_list(args.precision_floors),
+            mode=args.mode,
+            torch=torch,
+        ),
         "top_val_candidates": search["top_candidates"][:20],
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -157,9 +186,22 @@ def tau_grid(start: float, stop: float, step: float) -> list[float]:
     return values
 
 
-def search_thresholds(prob: Any, target: Any, *, tau_values: list[float], mode: str, torch: Any) -> dict[str, Any]:
+def search_thresholds(
+    prob: Any,
+    target: Any,
+    *,
+    tau_values: list[float],
+    mode: str,
+    min_merge_precision: float = 0.0,
+    torch: Any,
+) -> dict[str, Any]:
     if mode == "threshold_priority":
-        return search_thresholds_numpy_priority(prob, target, tau_values=tau_values)
+        return search_thresholds_numpy_priority(
+            prob,
+            target,
+            tau_values=tau_values,
+            min_merge_precision=min_merge_precision,
+        )
 
     best: dict[str, Any] | None = None
     top: list[dict[str, Any]] = []
@@ -173,18 +215,29 @@ def search_thresholds(prob: Any, target: Any, *, tau_values: list[float], mode: 
                 "tau_parent": float(tau_parent),
                 "val_positive_macro_f1": positive_macro,
                 "val_macro_f1": metrics.macro_f1,
+                "merge_precision": metrics.per_class[0]["precision"],
+                "merge_recall": metrics.per_class[0]["recall"],
                 "merge_f1": metrics.per_class[0]["f1"],
                 "parent_f1": metrics.per_class[1]["f1"],
             }
             top.append(row)
+            if float(row["merge_precision"]) < float(min_merge_precision):
+                continue
             if best is None or sort_key(row) > sort_key(best):
                 best = row
     top.sort(key=sort_key, reverse=True)
-    assert best is not None
+    if best is None:
+        best = top[0]
     return {**best, "top_candidates": top}
 
 
-def search_thresholds_numpy_priority(prob: Any, target: Any, *, tau_values: list[float]) -> dict[str, Any]:
+def search_thresholds_numpy_priority(
+    prob: Any,
+    target: Any,
+    *,
+    tau_values: list[float],
+    min_merge_precision: float = 0.0,
+) -> dict[str, Any]:
     """Fast CPU grid search for MERGE-priority thresholding.
 
     The straightforward torch metric loop is correct but slow because it
@@ -208,12 +261,12 @@ def search_thresholds_numpy_priority(prob: Any, target: Any, *, tau_values: list
     for tau_merge in tau_values:
         merge_mask = p_merge >= tau_merge
         not_merge = ~merge_mask
-        f1_merge = f1_from_masks(merge_mask, y_merge, np=np)
+        merge_precision, merge_recall, f1_merge = precision_recall_f1_from_masks(merge_mask, y_merge, np=np)
         for tau_parent in tau_values:
             parent_mask = not_merge & (p_parent >= tau_parent)
             none_mask = not_merge & (p_parent < tau_parent)
-            f1_parent = f1_from_masks(parent_mask, y_parent, np=np)
-            f1_none = f1_from_masks(none_mask, y_none, np=np)
+            parent_precision, parent_recall, f1_parent = precision_recall_f1_from_masks(parent_mask, y_parent, np=np)
+            _, _, f1_none = precision_recall_f1_from_masks(none_mask, y_none, np=np)
             positive_macro = (f1_merge + f1_parent) / 2.0
             macro = (f1_merge + f1_parent + f1_none) / 3.0
             row = {
@@ -221,25 +274,84 @@ def search_thresholds_numpy_priority(prob: Any, target: Any, *, tau_values: list
                 "tau_parent": float(tau_parent),
                 "val_positive_macro_f1": float(positive_macro),
                 "val_macro_f1": float(macro),
+                "merge_precision": float(merge_precision),
+                "merge_recall": float(merge_recall),
                 "merge_f1": float(f1_merge),
+                "parent_precision": float(parent_precision),
+                "parent_recall": float(parent_recall),
                 "parent_f1": float(f1_parent),
             }
             top.append(row)
+            if float(row["merge_precision"]) < float(min_merge_precision):
+                continue
             if best is None or sort_key(row) > sort_key(best):
                 best = row
 
     top.sort(key=sort_key, reverse=True)
-    assert best is not None
+    if best is None:
+        best = top[0]
     return {**best, "top_candidates": top}
 
 
 def f1_from_masks(pred_mask: Any, true_mask: Any, *, np: Any) -> float:
+    return precision_recall_f1_from_masks(pred_mask, true_mask, np=np)[2]
+
+
+def precision_recall_f1_from_masks(pred_mask: Any, true_mask: Any, *, np: Any) -> tuple[float, float, float]:
     true_positive = int(np.count_nonzero(pred_mask & true_mask))
     false_positive = int(np.count_nonzero(pred_mask & ~true_mask))
     false_negative = int(np.count_nonzero(~pred_mask & true_mask))
     precision = true_positive / max(1, true_positive + false_positive)
     recall = true_positive / max(1, true_positive + false_negative)
-    return 2.0 * precision * recall / max(1e-12, precision + recall)
+    f1 = 2.0 * precision * recall / max(1e-12, precision + recall)
+    return precision, recall, f1
+
+
+def precision_constrained_payload(
+    val_prob: Any,
+    val_target: Any,
+    test_prob: Any,
+    test_target: Any,
+    *,
+    tau_values: list[float],
+    floors: list[float],
+    mode: str,
+    torch: Any,
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for floor in floors:
+        search = search_thresholds(
+            val_prob,
+            val_target,
+            tau_values=tau_values,
+            mode=mode,
+            min_merge_precision=floor,
+            torch=torch,
+        )
+        test_pred = predict_with_thresholds(
+            test_prob,
+            tau_merge=search["tau_merge"],
+            tau_parent=search["tau_parent"],
+            mode=mode,
+            torch=torch,
+        )
+        val_pred = predict_with_thresholds(
+            val_prob,
+            tau_merge=search["tau_merge"],
+            tau_parent=search["tau_parent"],
+            mode=mode,
+            torch=torch,
+        )
+        payload.append(
+            {
+                "val_precision_floor": float(floor),
+                "tau_merge": search["tau_merge"],
+                "tau_parent": search["tau_parent"],
+                "val": metric_payload(val_pred, val_target),
+                "test": metric_payload(test_pred, test_target),
+            }
+        )
+    return payload
 
 
 def sort_key(row: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -249,6 +361,16 @@ def sort_key(row: dict[str, Any]) -> tuple[float, float, float, float]:
         float(row["parent_f1"]),
         float(row["val_macro_f1"]),
     )
+
+
+def parse_float_list(value: str) -> list[float]:
+    floors = []
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        floors.append(float(part))
+    return floors
 
 
 def predict_with_thresholds(prob: Any, *, tau_merge: float, tau_parent: float, mode: str, torch: Any) -> Any:
@@ -302,6 +424,16 @@ def print_summary(payload: dict[str, Any]) -> None:
             print(
                 f"  {split}: pos_f1={metrics['positive_macro_f1']:.4f} macro={metrics['macro_f1']:.4f} "
                 f"merge_f1={merge['f1']:.4f} parent_f1={parent['f1']:.4f} pred={metrics['pred_counts']}"
+            )
+    if payload.get("precision_constrained"):
+        print("precision_constrained")
+        for row in payload["precision_constrained"]:
+            merge = row["test"]["per_class"]["0"] if "0" in row["test"]["per_class"] else row["test"]["per_class"][0]
+            parent = row["test"]["per_class"]["1"] if "1" in row["test"]["per_class"] else row["test"]["per_class"][1]
+            print(
+                f"  floor={row['val_precision_floor']:.2f} tau=({row['tau_merge']:.2f},{row['tau_parent']:.2f}) "
+                f"test_merge P/R/F1={merge['precision']:.4f}/{merge['recall']:.4f}/{merge['f1']:.4f} "
+                f"test_parent_f1={parent['f1']:.4f} pos_f1={row['test']['positive_macro_f1']:.4f}"
             )
 
 

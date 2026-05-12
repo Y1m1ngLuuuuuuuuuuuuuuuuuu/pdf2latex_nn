@@ -122,7 +122,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument(
         "--selection-metric",
-        choices=["val_macro_f1", "val_positive_macro_f1"],
+        choices=[
+            "val_macro_f1",
+            "val_positive_macro_f1",
+            "val_positive_macro_f0_5",
+            "val_merge_f1",
+            "val_merge_f0_5",
+            "val_merge_precision",
+        ],
         default="val_positive_macro_f1",
         help="Metric used for best checkpoint selection.",
     )
@@ -534,13 +541,36 @@ def evaluate(model: Any, loader: Any, loss_fn: Any, *, device: Any, torch: Any) 
     target_all = torch.cat(target_list, dim=0)
     edge_metrics = edge_precision_recall_f1(logits_all, target_all, num_classes=3)
     positive_macro = (edge_metrics.per_class[0]["f1"] + edge_metrics.per_class[1]["f1"]) / 2.0
+    merge_precision = edge_metrics.per_class[0]["precision"]
+    merge_recall = edge_metrics.per_class[0]["recall"]
+    parent_precision = edge_metrics.per_class[1]["precision"]
+    parent_recall = edge_metrics.per_class[1]["recall"]
+    merge_f0_5 = fbeta_score(merge_precision, merge_recall, beta=0.5)
+    parent_f0_5 = fbeta_score(parent_precision, parent_recall, beta=0.5)
     return {
         "loss": total_loss / max(1, batches),
         "macro_f1": edge_metrics.macro_f1,
         "positive_macro_f1": positive_macro,
+        "positive_macro_f0_5": (merge_f0_5 + parent_f0_5) / 2.0,
+        "merge_precision": merge_precision,
+        "merge_recall": merge_recall,
+        "merge_f1": edge_metrics.per_class[0]["f1"],
+        "merge_f0_5": merge_f0_5,
+        "parent_precision": parent_precision,
+        "parent_recall": parent_recall,
+        "parent_f1": edge_metrics.per_class[1]["f1"],
+        "parent_f0_5": parent_f0_5,
         "per_class": edge_metrics.per_class,
         "class_counts": count_labels(target_all, torch=torch),
     }
+
+
+def fbeta_score(precision: float, recall: float, *, beta: float) -> float:
+    beta_sq = float(beta) * float(beta)
+    denominator = beta_sq * float(precision) + float(recall)
+    if denominator <= 0.0:
+        return 0.0
+    return (1.0 + beta_sq) * float(precision) * float(recall) / denominator
 
 
 def empty_metrics() -> dict[str, Any]:
@@ -548,6 +578,15 @@ def empty_metrics() -> dict[str, Any]:
         "loss": 0.0,
         "macro_f1": 0.0,
         "positive_macro_f1": 0.0,
+        "positive_macro_f0_5": 0.0,
+        "merge_precision": 0.0,
+        "merge_recall": 0.0,
+        "merge_f1": 0.0,
+        "merge_f0_5": 0.0,
+        "parent_precision": 0.0,
+        "parent_recall": 0.0,
+        "parent_f1": 0.0,
+        "parent_f0_5": 0.0,
         "per_class": {idx: {"precision": 0.0, "recall": 0.0, "f1": 0.0, "support": 0} for idx in range(3)},
         "class_counts": {name: 0 for name in LABEL_NAMES.values()},
     }
@@ -558,6 +597,15 @@ def flatten_metrics(prefix: str, metrics: dict[str, Any]) -> dict[str, Any]:
         f"{prefix}_loss": metrics["loss"],
         f"{prefix}_macro_f1": metrics["macro_f1"],
         f"{prefix}_positive_macro_f1": metrics["positive_macro_f1"],
+        f"{prefix}_positive_macro_f0_5": metrics["positive_macro_f0_5"],
+        f"{prefix}_merge_precision": metrics["merge_precision"],
+        f"{prefix}_merge_recall": metrics["merge_recall"],
+        f"{prefix}_merge_f1": metrics["merge_f1"],
+        f"{prefix}_merge_f0_5": metrics["merge_f0_5"],
+        f"{prefix}_parent_precision": metrics["parent_precision"],
+        f"{prefix}_parent_recall": metrics["parent_recall"],
+        f"{prefix}_parent_f1": metrics["parent_f1"],
+        f"{prefix}_parent_f0_5": metrics["parent_f0_5"],
         f"{prefix}_per_class": metrics["per_class"],
         f"{prefix}_class_counts": metrics["class_counts"],
     }
@@ -629,6 +677,15 @@ def print_epoch(row: dict[str, Any]) -> None:
         if f"{split}_macro_f1" in row:
             parts.append(f"{split}_f1={row[f'{split}_macro_f1']:.4f}")
             parts.append(f"{split}_pos_f1={row[f'{split}_positive_macro_f1']:.4f}")
+            if f"{split}_positive_macro_f0_5" in row:
+                parts.append(f"{split}_pos_f0.5={row[f'{split}_positive_macro_f0_5']:.4f}")
+            if f"{split}_merge_precision" in row:
+                parts.append(
+                    f"{split}_merge(P/R/F0.5)="
+                    f"{row[f'{split}_merge_precision']:.3f}/"
+                    f"{row[f'{split}_merge_recall']:.3f}/"
+                    f"{row[f'{split}_merge_f0_5']:.3f}"
+                )
     print(" ".join(parts))
 
 

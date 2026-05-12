@@ -131,6 +131,71 @@ def test_calibrated_threshold_priority_predicts_merge_then_parent_then_none():
     assert pred.tolist() == [0, 1, 2]
 
 
+def test_precision_constrained_calibration_prefers_high_precision_merge():
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return
+
+    prob = torch.tensor(
+        [
+            [0.90, 0.05, 0.05],  # true MERGE
+            [0.60, 0.05, 0.35],  # true MERGE caught only by the low threshold
+            [0.70, 0.05, 0.25],  # false MERGE at low threshold
+            [0.20, 0.80, 0.00],  # true PARENT
+            [0.10, 0.20, 0.70],  # true NONE
+        ],
+        dtype=torch.float32,
+    )
+    target = torch.tensor([0, 0, 2, 1, 2], dtype=torch.long)
+
+    unconstrained = calibrate_edge_thresholds.search_thresholds(
+        prob,
+        target,
+        tau_values=[0.50, 0.80],
+        mode="threshold_priority",
+        torch=torch,
+    )
+    constrained = calibrate_edge_thresholds.search_thresholds(
+        prob,
+        target,
+        tau_values=[0.50, 0.80],
+        mode="threshold_priority",
+        min_merge_precision=1.0,
+        torch=torch,
+    )
+
+    assert unconstrained["tau_merge"] == 0.5
+    assert constrained["tau_merge"] == 0.8
+    assert constrained["merge_precision"] == 1.0
+
+
+def test_train_selection_metrics_include_precision_oriented_fields():
+    row = train_edge_gnn_full.flatten_metrics(
+        "val",
+        {
+            "loss": 0.1,
+            "macro_f1": 0.2,
+            "positive_macro_f1": 0.3,
+            "positive_macro_f0_5": 0.4,
+            "merge_precision": 0.5,
+            "merge_recall": 0.6,
+            "merge_f1": 0.7,
+            "merge_f0_5": 0.8,
+            "parent_precision": 0.9,
+            "parent_recall": 0.91,
+            "parent_f1": 0.92,
+            "parent_f0_5": 0.93,
+            "per_class": {},
+            "class_counts": {},
+        },
+    )
+
+    assert row["val_merge_precision"] == 0.5
+    assert row["val_merge_f0_5"] == 0.8
+    assert row["val_positive_macro_f0_5"] == 0.4
+
+
 def test_focal_loss_uses_alpha_after_unweighted_pt():
     try:
         import torch
