@@ -40,6 +40,17 @@ PYG_EXCLUDE_KEYS = [
     "alignment_schema",
     "alignment_quality",
     "candidate_edge_recall_report",
+    "content_filter",
+    "content_schema_version",
+    "document_id",
+    "document_metadata",
+    "edge_refresh_source_graph",
+    "graph_schema_version",
+    "micro_fusion_applied",
+    "micro_fusion_node_count_after",
+    "micro_fusion_node_count_before",
+    "orphan_count",
+    "pipeline_version",
     "source_path",
 ]
 
