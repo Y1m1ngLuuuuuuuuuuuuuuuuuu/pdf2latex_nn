@@ -131,6 +131,33 @@ def test_calibrated_threshold_priority_predicts_merge_then_parent_then_none():
     assert pred.tolist() == [0, 1, 2]
 
 
+def test_merge_gate_blocks_threshold_merge_and_falls_through_to_parent():
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return
+
+    prob = torch.tensor(
+        [
+            [0.90, 0.80, 0.01],
+            [0.90, 0.80, 0.01],
+        ],
+        dtype=torch.float32,
+    )
+    allowed = torch.tensor([True, False], dtype=torch.bool)
+
+    pred = calibrate_edge_thresholds.predict_with_thresholds(
+        prob,
+        tau_merge=0.50,
+        tau_parent=0.50,
+        mode="threshold_priority",
+        merge_allowed=allowed,
+        torch=torch,
+    )
+
+    assert pred.tolist() == [0, 1]
+
+
 def test_precision_constrained_calibration_prefers_high_precision_merge():
     try:
         import torch

@@ -23,6 +23,7 @@ from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.training import edge_precision_recall_f1  # noqa: E402
 from scripts.pipeline.train_edge_gnn_full import split_indices  # noqa: E402
 from scripts.pipeline.step5_generate_tex import checkpoint_compatible_config  # noqa: E402
+from src.reasoning.postprocess import can_contract_merge_records  # noqa: E402
 
 
 LABEL_NAMES = {0: "merge", 1: "parent_child", 2: "none"}
@@ -57,6 +58,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--precision-floors",
         default="0.70,0.75,0.80,0.85,0.90",
         help="Comma-separated MERGE precision floors to report as secondary operating points.",
+    )
+    parser.add_argument(
+        "--apply-merge-gates",
+        action="store_true",
+        help=(
+            "Apply TreeDecoder-compatible hard MERGE gates during calibration/evaluation. "
+            "This measures the deployable constrained decoder rather than raw edge argmax."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -95,15 +104,18 @@ def main() -> int:
     test_logits, test_target = collect_logits(model, loaders["test"], device=device, torch=torch)
     val_prob = torch.softmax(val_logits, dim=-1)
     test_prob = torch.softmax(test_logits, dim=-1)
+    val_merge_allowed = collect_merge_gate_mask(split_samples["val"], torch=torch) if args.apply_merge_gates else None
+    test_merge_allowed = collect_merge_gate_mask(split_samples["test"], torch=torch) if args.apply_merge_gates else None
 
-    argmax_val = metric_payload(val_logits.argmax(dim=-1), val_target)
-    argmax_test = metric_payload(test_logits.argmax(dim=-1), test_target)
+    argmax_val = metric_payload(argmax_with_merge_gates(val_logits, val_merge_allowed, torch=torch), val_target)
+    argmax_test = metric_payload(argmax_with_merge_gates(test_logits, test_merge_allowed, torch=torch), test_target)
     search = search_thresholds(
         val_prob,
         val_target,
         tau_values=tau_grid(args.tau_min, args.tau_max, args.tau_step),
         mode=args.mode,
         min_merge_precision=args.min_merge_precision,
+        merge_allowed=val_merge_allowed,
         torch=torch,
     )
     test_pred = predict_with_thresholds(
@@ -111,6 +123,7 @@ def main() -> int:
         tau_merge=search["tau_merge"],
         tau_parent=search["tau_parent"],
         mode=args.mode,
+        merge_allowed=test_merge_allowed,
         torch=torch,
     )
     val_pred = predict_with_thresholds(
@@ -118,6 +131,7 @@ def main() -> int:
         tau_merge=search["tau_merge"],
         tau_parent=search["tau_parent"],
         mode=args.mode,
+        merge_allowed=val_merge_allowed,
         torch=torch,
     )
     payload = {
@@ -128,6 +142,7 @@ def main() -> int:
         "split_docs": {name: len(samples) for name, samples in split_samples.items()},
         "search_grid": {"tau_min": args.tau_min, "tau_max": args.tau_max, "tau_step": args.tau_step},
         "constraints": {"min_merge_precision": args.min_merge_precision},
+        "apply_merge_gates": bool(args.apply_merge_gates),
         "best_thresholds": {
             "tau_merge": search["tau_merge"],
             "tau_parent": search["tau_parent"],
@@ -150,6 +165,8 @@ def main() -> int:
             tau_values=tau_grid(args.tau_min, args.tau_max, args.tau_step),
             floors=parse_float_list(args.precision_floors),
             mode=args.mode,
+            val_merge_allowed=val_merge_allowed,
+            test_merge_allowed=test_merge_allowed,
             torch=torch,
         ),
         "top_val_candidates": search["top_candidates"][:20],
@@ -177,6 +194,35 @@ def collect_logits(model: Any, loader: Any, *, device: Any, torch: Any) -> tuple
     return merged_logits, merged_targets
 
 
+def collect_merge_gate_mask(samples: list[Any], *, torch: Any) -> Any:
+    """Return a CPU bool tensor indicating which edges may be MERGE-contracted.
+
+    The raw edge classifier is deliberately over-complete: graph construction
+    keeps recall high, then TreeDecoder refuses structurally impossible merges.
+    This mask lets threshold calibration measure that deployable constrained
+    decoder without changing training labels or logits.
+    """
+
+    masks = []
+    for sample in samples:
+        edge_count = int(sample.edge_index.shape[1])
+        records = getattr(sample, "node_records", None)
+        if not isinstance(records, list) or len(records) < int(sample.num_nodes):
+            masks.append(torch.ones(edge_count, dtype=torch.bool))
+            continue
+        allowed = torch.zeros(edge_count, dtype=torch.bool)
+        edge_index = sample.edge_index.detach().cpu().long()
+        for edge_pos in range(edge_count):
+            source = int(edge_index[0, edge_pos].item())
+            target = int(edge_index[1, edge_pos].item())
+            if 0 <= source < len(records) and 0 <= target < len(records):
+                allowed[edge_pos] = bool(can_contract_merge_records(records[source], records[target]))
+        masks.append(allowed)
+    if not masks:
+        return torch.zeros((0,), dtype=torch.bool)
+    return torch.cat(masks, dim=0)
+
+
 def tau_grid(start: float, stop: float, step: float) -> list[float]:
     values = []
     current = float(start)
@@ -193,6 +239,7 @@ def search_thresholds(
     tau_values: list[float],
     mode: str,
     min_merge_precision: float = 0.0,
+    merge_allowed: Any | None = None,
     torch: Any,
 ) -> dict[str, Any]:
     if mode == "threshold_priority":
@@ -201,13 +248,21 @@ def search_thresholds(
             target,
             tau_values=tau_values,
             min_merge_precision=min_merge_precision,
+            merge_allowed=merge_allowed,
         )
 
     best: dict[str, Any] | None = None
     top: list[dict[str, Any]] = []
     for tau_merge in tau_values:
         for tau_parent in tau_values:
-            pred = predict_with_thresholds(prob, tau_merge=tau_merge, tau_parent=tau_parent, mode=mode, torch=torch)
+            pred = predict_with_thresholds(
+                prob,
+                tau_merge=tau_merge,
+                tau_parent=tau_parent,
+                mode=mode,
+                merge_allowed=merge_allowed,
+                torch=torch,
+            )
             metrics = edge_precision_recall_f1(pred, target, num_classes=3)
             positive_macro = (metrics.per_class[0]["f1"] + metrics.per_class[1]["f1"]) / 2.0
             row = {
@@ -239,6 +294,7 @@ def search_thresholds_numpy_priority(
     *,
     tau_values: list[float],
     min_merge_precision: float = 0.0,
+    merge_allowed: Any | None = None,
 ) -> dict[str, Any]:
     """Fast CPU grid search for MERGE-priority thresholding.
 
@@ -254,6 +310,10 @@ def search_thresholds_numpy_priority(
     target_np = target.detach().cpu().numpy()
     p_merge = prob_np[:, 0]
     p_parent = prob_np[:, 1]
+    if merge_allowed is None:
+        merge_allowed_np = np.ones_like(p_merge, dtype=bool)
+    else:
+        merge_allowed_np = merge_allowed.detach().cpu().numpy().astype(bool)
     y_merge = target_np == 0
     y_parent = target_np == 1
     y_none = target_np == 2
@@ -261,7 +321,7 @@ def search_thresholds_numpy_priority(
     best: dict[str, Any] | None = None
 
     for tau_merge in tau_values:
-        merge_mask = p_merge >= tau_merge
+        merge_mask = (p_merge >= tau_merge) & merge_allowed_np
         not_merge = ~merge_mask
         merge_precision, merge_recall, f1_merge = precision_recall_f1_from_masks(merge_mask, y_merge, np=np)
         for tau_parent in tau_values:
@@ -320,6 +380,8 @@ def precision_constrained_payload(
     tau_values: list[float],
     floors: list[float],
     mode: str,
+    val_merge_allowed: Any | None = None,
+    test_merge_allowed: Any | None = None,
     torch: Any,
 ) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
@@ -330,6 +392,7 @@ def precision_constrained_payload(
             tau_values=tau_values,
             mode=mode,
             min_merge_precision=floor,
+            merge_allowed=val_merge_allowed,
             torch=torch,
         )
         test_pred = predict_with_thresholds(
@@ -337,6 +400,7 @@ def precision_constrained_payload(
             tau_merge=search["tau_merge"],
             tau_parent=search["tau_parent"],
             mode=mode,
+            merge_allowed=test_merge_allowed,
             torch=torch,
         )
         val_pred = predict_with_thresholds(
@@ -344,6 +408,7 @@ def precision_constrained_payload(
             tau_merge=search["tau_merge"],
             tau_parent=search["tau_parent"],
             mode=mode,
+            merge_allowed=val_merge_allowed,
             torch=torch,
         )
         payload.append(
@@ -378,21 +443,43 @@ def parse_float_list(value: str) -> list[float]:
     return floors
 
 
-def predict_with_thresholds(prob: Any, *, tau_merge: float, tau_parent: float, mode: str, torch: Any) -> Any:
+def predict_with_thresholds(
+    prob: Any,
+    *,
+    tau_merge: float,
+    tau_parent: float,
+    mode: str,
+    merge_allowed: Any | None = None,
+    torch: Any,
+) -> Any:
+    if merge_allowed is None:
+        allowed = torch.ones((prob.shape[0],), dtype=torch.bool, device=prob.device)
+    else:
+        allowed = merge_allowed.to(device=prob.device, dtype=torch.bool)
     if mode == "scaled_argmax":
         thresholds = torch.tensor([tau_merge, tau_parent, 1.0], dtype=prob.dtype, device=prob.device)
         passes = prob >= thresholds
+        passes[:, 0] = passes[:, 0] & allowed
         scaled = prob / thresholds.clamp_min(1e-12)
         scaled = torch.where(passes, scaled, torch.full_like(scaled, -1.0))
         pred = scaled.argmax(dim=-1)
         return torch.where(scaled.max(dim=-1).values < 0.0, torch.full_like(pred, 2), pred)
 
     pred = torch.full((prob.shape[0],), 2, dtype=torch.long, device=prob.device)
-    merge_mask = prob[:, 0] >= tau_merge
+    merge_mask = (prob[:, 0] >= tau_merge) & allowed
     parent_mask = (~merge_mask) & (prob[:, 1] >= tau_parent)
     pred[parent_mask] = 1
     pred[merge_mask] = 0
     return pred
+
+
+def argmax_with_merge_gates(scores: Any, merge_allowed: Any | None, *, torch: Any) -> Any:
+    if merge_allowed is None:
+        return scores.argmax(dim=-1)
+    gated = scores.clone()
+    allowed = merge_allowed.to(device=gated.device, dtype=torch.bool)
+    gated[~allowed, 0] = -torch.inf
+    return gated.argmax(dim=-1)
 
 
 def metric_payload(pred: Any, target: Any) -> dict[str, Any]:
