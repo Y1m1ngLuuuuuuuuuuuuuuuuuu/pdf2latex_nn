@@ -8,6 +8,7 @@ from src.reasoning.label_generator import (
     build_visual_hierarchy,
     clean_text,
     normalized_heading_keyword,
+    same_tex_node_can_merge,
     visual_parent_pair_is_quality_gate_required,
 )
 from src.reasoning.tex_relation_labeler import TexRelationLabel
@@ -1965,3 +1966,183 @@ def test_alignment_labeler_blocks_same_tex_merge_across_column_gutter_without_ed
     ).run()
 
     assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_recovers_hyphenated_visual_merge_across_tex_alignment_boundary(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "lead-ing to fewer false posi-",
+                        "bbox": [80, 850, 480, 890],
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "tives. Conversely, the threshold increases.",
+                        "bbox": [520, 70, 920, 110],
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Two TeX paragraphs deliberately force the fuzzy aligner away from a
+    # same-TeX-node MERGE.  The visual hyphen stitch should still recover it.
+    tex_path.write_text(
+        "leading to fewer false positives.\n\nConversely, the threshold increases.",
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    data.edge_attr_schema = {
+        "fields": [
+            "semantic_cosine",
+            "delta_y_gap",
+            "delta_x_left",
+            "left_alignment",
+            "center_distance",
+            "font_size_delta",
+            "bold_to_regular",
+            "line_height_ratio",
+            "y_overlap_ratio",
+            "has_x_gutter",
+            "index_delta_bin_adjacent",
+            "index_delta_bin_skip_one",
+            "index_delta_bin_near",
+            "index_delta_bin_far",
+            "index_delta_bin_reverse",
+            "source_ends_with_terminal_punctuation",
+            "source_ends_with_hyphen",
+            "same_layout_layer",
+            "same_layout_band",
+            "same_band_column",
+            "band_order_delta",
+            "crosses_band_boundary",
+        ]
+    }
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(similarity_threshold=90.0),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+
+
+def test_alignment_labeler_does_not_visual_merge_non_hyphen_formula_handoff(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "compare the input vectors and extract the",
+                        "bbox": [80, 850, 480, 890],
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "where \\Delta_{select}(x, e_i) represents the change.",
+                        "bbox": [520, 70, 920, 110],
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        "compare the input vectors and extract the.\n\nwhere Delta select represents the change.",
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    data.edge_attr_schema = {
+        "fields": [
+            "semantic_cosine",
+            "delta_y_gap",
+            "delta_x_left",
+            "left_alignment",
+            "center_distance",
+            "font_size_delta",
+            "bold_to_regular",
+            "line_height_ratio",
+            "y_overlap_ratio",
+            "has_x_gutter",
+            "index_delta_bin_adjacent",
+            "index_delta_bin_skip_one",
+            "index_delta_bin_near",
+            "index_delta_bin_far",
+            "index_delta_bin_reverse",
+            "source_ends_with_terminal_punctuation",
+            "source_ends_with_hyphen",
+            "same_layout_layer",
+            "same_layout_band",
+            "same_band_column",
+            "band_order_delta",
+            "crosses_band_boundary",
+        ]
+    }
+    data.edge_attr[0, 0] = 1.0
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(similarity_threshold=90.0),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
+def test_same_tex_equation_blocks_are_not_merge_training_targets():
+    left = PdfAlignmentNode(
+        node_index=0,
+        text="x = y",
+        clean="xy",
+        item={"type": "equation", "bbox": [100, 100, 500, 130], "layout_layer": "math_layer", "layout_band_id": 1},
+    )
+    right = PdfAlignmentNode(
+        node_index=1,
+        text="z = w",
+        clean="zw",
+        item={"type": "equation", "bbox": [100, 150, 500, 180], "layout_layer": "math_layer", "layout_band_id": 1},
+    )
+
+    assert same_tex_node_can_merge(left, right) is False

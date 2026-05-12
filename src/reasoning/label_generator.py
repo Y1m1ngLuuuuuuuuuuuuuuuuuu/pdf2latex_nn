@@ -265,6 +265,7 @@ SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
 TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?。！？]\s*(?:[])}\"'”’»]+)?\s*$")
 HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 UPPERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[A-Z]")
+LOWERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[a-z]")
 VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
 ALGORITHM_IO_LABEL_RE = re.compile(
     r"^\s*(?:input|output|require|ensure|parameters?|returns?)\s*[:：]\s*$",
@@ -278,7 +279,7 @@ RUN_IN_HEADING_RE = re.compile(
     r"|\d+(?:\.\d+)*[\.\)]"
     r")\s+"
 )
-MERGE_COMPATIBLE_PDF_TYPES = {"text", "equation", "reference"}
+MERGE_COMPATIBLE_PDF_TYPES = {"text", "reference"}
 CAPTION_TEX_NODE_TYPES = {STANDARD_FIGURE_CAPTION_NODE, STANDARD_TABLE_CAPTION_NODE}
 VISUAL_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.+~/-]+)\.(?:png|jpe?g|pdf|eps|svg)", re.IGNORECASE)
 VISUAL_OPTION_RE = re.compile(
@@ -780,7 +781,7 @@ class AlignmentLabeler:
         target_item = self.pdf_nodes[target_index].item if 0 <= target_index < len(self.pdf_nodes) else {}
         if relation_layers_are_incompatible(source_item, target_item):
             return int(TexRelationLabel.NONE)
-        visual_relation = self.infer_visual_relation(source_index, target_index)
+        visual_relation = self.infer_visual_relation(source_index, target_index, edge_pos=edge_pos)
         if visual_relation is not None:
             return visual_relation
         source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
@@ -815,13 +816,64 @@ class AlignmentLabeler:
         self,
         source_index: int,
         target_index: int,
+        *,
+        edge_pos: int | None = None,
     ) -> int | None:
         hierarchy = self.visual_hierarchy
-        if hierarchy is None or not hierarchy.heading_ids:
-            return None
-        if hierarchy.parent_by_node.get(target_index) == source_index:
+        if hierarchy is not None and hierarchy.heading_ids and hierarchy.parent_by_node.get(target_index) == source_index:
             return int(TexRelationLabel.PARENT_CHILD)
+        if self.is_strong_visual_merge_continuation(source_index, target_index, edge_pos=edge_pos):
+            return int(TexRelationLabel.MERGE)
         return None
+
+    def is_strong_visual_merge_continuation(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        edge_pos: int | None = None,
+    ) -> bool:
+        """Recover MERGE labels when TeX alignment misses an obvious line stitch.
+
+        The sliding TeX/PDF aligner can split one physical paragraph across
+        neighboring TeX nodes when OCR drops or mutates words around a column
+        transition.  Hyphenated word breaks such as ``"posi-"`` -> ``"tives"``
+        are stronger evidence than fuzzy alignment, so we label them MERGE
+        even when the two PDF boxes did not map to the same TeX id.
+        """
+
+        if not (0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(self.pdf_nodes)):
+            return False
+        if target_index <= source_index or target_index - source_index > 5:
+            return False
+        source_node = self.pdf_nodes[source_index]
+        target_node = self.pdf_nodes[target_index]
+        source_item = source_node.item
+        target_item = target_node.item
+        if relation_layers_are_incompatible(source_item, target_item):
+            return False
+        if not same_layout_scope_can_merge(source_item, target_item):
+            return False
+        if strict_pdf_merge_type(source_item) != "text" or strict_pdf_merge_type(target_item) != "text":
+            return False
+        if LIST_MARKER_RE.match(target_node.text) or is_run_in_heading_like(target_node):
+            return False
+        if ends_with_terminal_punctuation(source_node.text):
+            return False
+        if starts_with_uppercase_text(target_node.text):
+            return False
+        source_bbox = last_bbox(source_item.get("bbox"))
+        target_bbox = first_bbox(target_item.get("bbox"))
+        if source_bbox is None or target_bbox is None:
+            return False
+        if bbox_y_overlap_ratio(source_bbox, target_bbox) > 0.3 and bbox_x_gap(source_bbox, target_bbox) > 30.0:
+            return False
+
+        source_hyphen = ends_with_hyphen(source_node.text)
+        if source_hyphen:
+            return bool(starts_with_lowercase_text(target_node.text))
+
+        return False
 
     def is_first_pdf_anchor(self, pdf_index: int, tex_id: str | None) -> bool:
         if not tex_id:
@@ -1239,6 +1291,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
     active_list_parent: int | None = None
     active_list_next_number: int | None = None
     active_list_last_pos = -1
+    suspended_ordered_list: tuple[int | None, int, int] | None = None
     recent_list_intro_by_scope: dict[int | None, tuple[int, int]] = {}
     in_author_biography_backmatter = False
     effective_pos = 0
@@ -1257,6 +1310,8 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
         effective_pos += 1
         if node_id in heading_ids:
             in_author_biography_backmatter = False
+            if active_list_parent is not None and active_list_next_number is not None and active_list_last_pos >= 0:
+                suspended_ordered_list = (active_list_parent, active_list_next_number, active_list_last_pos)
             active_list_parent = None
             active_list_next_number = None
             active_list_last_pos = -1
@@ -1293,6 +1348,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             active_list_parent = None
             active_list_next_number = None
             active_list_last_pos = -1
+            suspended_ordered_list = None
         marker_like = LIST_MARKER_RE.match(node.text)
         if list_number is not None:
             if (
@@ -1301,6 +1357,14 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
                 and 0 <= effective_pos - active_list_last_pos <= 18
             ):
                 parent_id = active_list_parent
+            elif (
+                suspended_ordered_list is not None
+                and suspended_ordered_list[1] == list_number
+                and 0 <= effective_pos - suspended_ordered_list[2] <= 18
+            ):
+                parent_id = suspended_ordered_list[0]
+                active_list_parent = parent_id
+                suspended_ordered_list = None
             else:
                 parent_id = visible_list_proxy_parent(
                     recent_list_intro_by_scope,
@@ -1308,6 +1372,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
                     current_effective_pos=effective_pos,
                 ) or parent_id
                 active_list_parent = parent_id
+                suspended_ordered_list = None
             active_list_next_number = list_number + 1
             active_list_last_pos = effective_pos
         elif marker_like:
@@ -1322,16 +1387,19 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
                 active_list_parent = parent_id
             active_list_next_number = None
             active_list_last_pos = effective_pos
+            suspended_ordered_list = None
         elif text_can_anchor_visible_list(node.text):
             recent_list_intro_by_scope[parent_id] = (node_id, effective_pos)
             active_list_parent = None
             active_list_next_number = None
             active_list_last_pos = -1
+            suspended_ordered_list = None
         elif str(node.text or "").strip():
             recent_list_intro_by_scope.pop(parent_id, None)
             active_list_parent = None
             active_list_next_number = None
             active_list_last_pos = -1
+            suspended_ordered_list = None
         parent_by_node[node_id] = parent_id
         children_by_parent.setdefault(parent_id, []).append(node_id)
 
@@ -1831,6 +1899,10 @@ def ends_with_hyphen(text: str) -> bool:
 
 def starts_with_uppercase_text(text: str) -> bool:
     return bool(UPPERCASE_START_RE.match(str(text or "")))
+
+
+def starts_with_lowercase_text(text: str) -> bool:
+    return bool(LOWERCASE_START_RE.match(str(text or "")))
 
 
 def edge_attr_fields_from_graph(graph: Any) -> dict[str, int]:
