@@ -75,6 +75,33 @@ def test_tree_decoder_contracts_merge_nodes_and_repoints_parent_edges():
     assert title.children[0].text == "Cybersecurity, matters."
 
 
+def test_tree_decoder_refuses_author_biography_merge_contraction():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {
+            "type": "paragraph",
+            "layout_role": "author_biography",
+            "text_for_embedding": (
+                "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                "Dr. Hobbs received her Ph.D. from the University of Michigan."
+            ),
+        },
+        {
+            "type": "paragraph",
+            "text_for_embedding": "tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications.",
+        },
+    ]
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    scores = torch.tensor([[0.99, 0.0, 0.01]], dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(merge_threshold=0.5, parent_threshold=0.5)).decode(records, edge_index, scores)
+
+    assert [child.merged_node_ids for child in root.children] == [[0], [1]]
+
+
 def test_tree_decoder_refuses_cross_type_merge_contraction():
     if not has_torch():
         return

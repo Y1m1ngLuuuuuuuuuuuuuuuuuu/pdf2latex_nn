@@ -280,6 +280,7 @@ RUN_IN_HEADING_RE = re.compile(
     r")\s+"
 )
 MERGE_COMPATIBLE_PDF_TYPES = {"text", "reference"}
+AUTHOR_BIOGRAPHY_ROLE_TOKENS = ("author_bio", "authorbiography", "biograph", "backmatter")
 CAPTION_TEX_NODE_TYPES = {STANDARD_FIGURE_CAPTION_NODE, STANDARD_TABLE_CAPTION_NODE}
 VISUAL_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.+~/-]+)\.(?:png|jpe?g|pdf|eps|svg)", re.IGNORECASE)
 VISUAL_OPTION_RE = re.compile(
@@ -852,6 +853,8 @@ class AlignmentLabeler:
         target_item = target_node.item
         if relation_layers_are_incompatible(source_item, target_item):
             return False
+        if item_is_author_biography_or_backmatter(source_item) or item_is_author_biography_or_backmatter(target_item):
+            return False
         if not same_layout_scope_can_merge(source_item, target_item):
             return False
         if strict_pdf_merge_type(source_item) != "text" or strict_pdf_merge_type(target_item) != "text":
@@ -1334,7 +1337,7 @@ def build_visual_hierarchy(nodes: list[PdfAlignmentNode], *, config: AlignmentLa
             continue
         list_number = ordered_list_marker_number(node.text)
         parent_id = stack[-1][0] if stack else None
-        if item_looks_like_author_biography(node.item) or in_author_biography_backmatter:
+        if item_is_author_biography_or_backmatter(node.item) or in_author_biography_backmatter:
             parent_by_node[node_id] = None
             children_by_parent.setdefault(None, []).append(node_id)
             in_author_biography_backmatter = True
@@ -1479,9 +1482,27 @@ def visual_parent_pair_is_quality_gate_required(parent: PdfAlignmentNode, child:
         return child_kind == "reference"
     if child_kind == "reference":
         return parent_kind in {"references", "bibliography"}
-    if item_looks_like_author_biography(child.item):
+    if item_is_author_biography_or_backmatter(child.item):
         return False
     return True
+
+
+def item_is_author_biography_or_backmatter(item: dict[str, Any]) -> bool:
+    """Return whether a PDF node belongs to author bio/backmatter.
+
+    These blocks are visually ordinary paragraphs, but they are not useful
+    MERGE supervision for body-flow paragraph stitching.  They commonly contain
+    many separate author biographies and can create false continuation labels.
+    """
+
+    raw = canonical_pdf_type(item)
+    role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
+    layer = str(item.get("layout_layer") or "").casefold()
+    list_type = str(item.get("list_type") or "").casefold()
+    haystack = " ".join((raw, role, layer, list_type)).replace("-", "_").replace(" ", "_")
+    if any(token in haystack for token in AUTHOR_BIOGRAPHY_ROLE_TOKENS):
+        return True
+    return item_looks_like_author_biography(item)
 
 
 def item_looks_like_author_biography(item: dict[str, Any]) -> bool:
@@ -1866,6 +1887,8 @@ def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> 
 
     left_type = strict_pdf_merge_type(left.item)
     right_type = strict_pdf_merge_type(right.item)
+    if item_is_author_biography_or_backmatter(left.item) or item_is_author_biography_or_backmatter(right.item):
+        return False
     if LIST_MARKER_RE.match(right.text):
         return False
     if not same_layout_scope_can_merge(left.item, right.item):

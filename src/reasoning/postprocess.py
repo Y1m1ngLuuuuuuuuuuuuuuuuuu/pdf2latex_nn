@@ -25,6 +25,7 @@ MERGE_COMPATIBLE_TYPES = {"text", "reference"}
 NON_PARENT_RENDER_TYPES = {"equation", "inline_math", "algorithm", "code"}
 DEFAULT_PREAMBLE_COMMANDS = (r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}",)
 LATEX_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+AUTHOR_BIOGRAPHY_ROLE_TOKENS = ("author_bio", "authorbiography", "biograph", "backmatter")
 INLINE_MATH_COMMANDS = {
     "alpha",
     "beta",
@@ -1971,6 +1972,8 @@ def can_contract_merge_records(
     right_type = canonical_render_type(right)
     if record_starts_with_list_marker(right):
         return False
+    if record_is_author_biography_or_backmatter(left) or record_is_author_biography_or_backmatter(right):
+        return False
     if not same_layout_scope_can_contract_merge(left, right):
         return False
     if left_type != right_type or left_type not in MERGE_COMPATIBLE_TYPES:
@@ -2002,6 +2005,41 @@ def same_layout_scope_can_contract_merge(left: dict[str, Any], right: dict[str, 
 
 def layout_layer_name(record: dict[str, Any]) -> str:
     return str(record.get("layout_layer") or "main_text_flow")
+
+
+def record_is_author_biography_or_backmatter(record: dict[str, Any]) -> bool:
+    raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or "").casefold()
+    role = node_layout_role(record)
+    layer = layout_layer_name(record).casefold()
+    list_type = str(record.get("list_type") or "").casefold()
+    haystack = " ".join((raw, role, layer, list_type)).replace("-", "_").replace(" ", "_")
+    if any(token in haystack for token in AUTHOR_BIOGRAPHY_ROLE_TOKENS):
+        return True
+    return record_text_looks_like_author_biography(node_record_text(record))
+
+
+def record_text_looks_like_author_biography(text: str) -> bool:
+    compact = " ".join(str(text or "").split())
+    if len(compact) < 60:
+        return False
+    first_clause = compact[:140]
+    if not re.match(r"^[A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,4}\s+(?:is|was|received|earned)\b", first_clause):
+        return False
+    lower = compact.casefold()
+    return any(
+        signal in lower
+        for signal in (
+            " is a ",
+            " is the ",
+            " received ",
+            " earned ",
+            " ph.d",
+            " m.s.",
+            " b.s.",
+            " university",
+            " research",
+        )
+    )
 
 
 def layout_band_id(record: dict[str, Any]) -> int | None:

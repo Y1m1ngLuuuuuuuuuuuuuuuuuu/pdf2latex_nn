@@ -667,6 +667,39 @@ def test_visual_parent_quality_gate_ignores_author_biography_blocks():
     assert not visual_parent_pair_is_quality_gate_required(section, biography)
 
 
+def test_same_tex_author_biography_blocks_are_not_merge_training_targets():
+    left = PdfAlignmentNode(
+        node_index=0,
+        text=(
+            "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+            "Dr. Hobbs received her Ph.D. from the University of Michigan."
+        ),
+        clean=clean_text(
+            "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+            "Dr. Hobbs received her Ph.D. from the University of Michigan."
+        ),
+        item={
+            "type": "paragraph",
+            "text_for_embedding": (
+                "Kerianne L. Hobbs is the Safe Autonomy and Space Lead on the Autonomy Capability Team. "
+                "Dr. Hobbs received her Ph.D. from the University of Michigan."
+            ),
+        },
+    )
+    right = PdfAlignmentNode(
+        node_index=1,
+        text="tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications.",
+        clean=clean_text("tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications."),
+        item={
+            "type": "paragraph",
+            "layout_role": "author_biography",
+            "text_for_embedding": "tion research. Dr. Hobbs's research has resulted in authorship of over 60 publications.",
+        },
+    )
+
+    assert same_tex_node_can_merge(left, right) is False
+
+
 def test_visual_hierarchy_moves_author_biography_continuations_out_of_section_scope():
     nodes = [
         PdfAlignmentNode(
