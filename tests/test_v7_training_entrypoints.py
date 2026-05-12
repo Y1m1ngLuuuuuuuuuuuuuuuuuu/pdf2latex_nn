@@ -168,6 +168,18 @@ def test_precision_constrained_calibration_prefers_high_precision_merge():
     assert unconstrained["tau_merge"] == 0.5
     assert constrained["tau_merge"] == 0.8
     assert constrained["merge_precision"] == 1.0
+    assert constrained["constraint_satisfied"] is True
+
+    impossible = calibrate_edge_thresholds.search_thresholds(
+        prob,
+        target,
+        tau_values=[0.50, 0.80],
+        mode="threshold_priority",
+        min_merge_precision=1.1,
+        torch=torch,
+    )
+
+    assert impossible["constraint_satisfied"] is False
 
 
 def test_train_selection_metrics_include_precision_oriented_fields():

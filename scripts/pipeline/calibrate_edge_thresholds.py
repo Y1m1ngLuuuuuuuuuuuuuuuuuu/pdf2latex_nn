@@ -227,7 +227,9 @@ def search_thresholds(
                 best = row
     top.sort(key=sort_key, reverse=True)
     if best is None:
-        best = top[0]
+        best = {**top[0], "constraint_satisfied": False}
+    else:
+        best = {**best, "constraint_satisfied": True}
     return {**best, "top_candidates": top}
 
 
@@ -289,7 +291,9 @@ def search_thresholds_numpy_priority(
 
     top.sort(key=sort_key, reverse=True)
     if best is None:
-        best = top[0]
+        best = {**top[0], "constraint_satisfied": False}
+    else:
+        best = {**best, "constraint_satisfied": True}
     return {**best, "top_candidates": top}
 
 
@@ -345,6 +349,7 @@ def precision_constrained_payload(
         payload.append(
             {
                 "val_precision_floor": float(floor),
+                "constraint_satisfied": bool(search.get("constraint_satisfied", True)),
                 "tau_merge": search["tau_merge"],
                 "tau_parent": search["tau_parent"],
                 "val": metric_payload(val_pred, val_target),
@@ -430,8 +435,9 @@ def print_summary(payload: dict[str, Any]) -> None:
         for row in payload["precision_constrained"]:
             merge = row["test"]["per_class"]["0"] if "0" in row["test"]["per_class"] else row["test"]["per_class"][0]
             parent = row["test"]["per_class"]["1"] if "1" in row["test"]["per_class"] else row["test"]["per_class"][1]
+            status = "ok" if row.get("constraint_satisfied", True) else "unmet"
             print(
-                f"  floor={row['val_precision_floor']:.2f} tau=({row['tau_merge']:.2f},{row['tau_parent']:.2f}) "
+                f"  floor={row['val_precision_floor']:.2f} status={status} tau=({row['tau_merge']:.2f},{row['tau_parent']:.2f}) "
                 f"test_merge P/R/F1={merge['precision']:.4f}/{merge['recall']:.4f}/{merge['f1']:.4f} "
                 f"test_parent_f1={parent['f1']:.4f} pos_f1={row['test']['positive_macro_f1']:.4f}"
             )
