@@ -520,11 +520,7 @@ def fix_columnar_reading_order(
             for local_order, view in enumerate(_sort_visual_row(block)):
                 ordered_entries.append((view, band_id, "float_group", local_order, 2))
             continue
-        left_list = [view for view in block if view.column_label == "LEFT_COL"]
-        right_list = [view for view in block if view.column_label == "RIGHT_COL"]
-        left_list = _sort_columnar_column(left_list)
-        right_list = _sort_columnar_column(right_list)
-        combined = left_list + right_list
+        combined = _sort_double_column_block(block, future_blocks=blocks[band_id + 1 :])
         for local_order, view in enumerate(combined):
             band_column_id = 0 if view.column_label == "LEFT_COL" else 1
             ordered_entries.append((view, band_id, "double_column", local_order, band_column_id))
@@ -881,6 +877,92 @@ def _sort_columnar_column(views: list[ColumnarOrderView]) -> list[ColumnarOrderV
         else:
             ordered.extend(sorted(row, key=_columnar_top_key))
     return ordered
+
+
+def _sort_double_column_block(
+    block: list[ColumnarOrderView],
+    *,
+    future_blocks: list[tuple[str, list[ColumnarOrderView]]],
+) -> list[ColumnarOrderView]:
+    """Sort a local two-column block without letting floats leak past a single-column transition.
+
+    The default contract remains left-column top-to-bottom, then right-column
+    top-to-bottom.  A narrow exception handles mixed layouts where a lower
+    left-column heading starts a full-width/single-column section while a right
+    column table/figure physically above that heading still belongs to the
+    previous section.  In that case, only the right-column float/caption nodes
+    above the transition heading are flushed before the heading.
+    """
+
+    left_list = _sort_columnar_column([view for view in block if view.column_label == "LEFT_COL"])
+    right_list = _sort_columnar_column([view for view in block if view.column_label == "RIGHT_COL"])
+    transition_headings = [
+        view
+        for view in left_list
+        if _starts_single_column_flow_after_double_block(view, future_blocks=future_blocks)
+    ]
+    if not transition_headings:
+        return left_list + right_list
+
+    remaining_right = list(right_list)
+    combined: list[ColumnarOrderView] = []
+    for left_view in left_list:
+        if left_view in transition_headings:
+            flush = [
+                right_view
+                for right_view in remaining_right
+                if _right_float_precedes_transition_heading(right_view, left_view)
+            ]
+            if flush:
+                combined.extend(flush)
+                flushed_ids = {id(view) for view in flush}
+                remaining_right = [view for view in remaining_right if id(view) not in flushed_ids]
+        combined.append(left_view)
+    combined.extend(remaining_right)
+    return combined
+
+
+def _starts_single_column_flow_after_double_block(
+    view: ColumnarOrderView,
+    *,
+    future_blocks: list[tuple[str, list[ColumnarOrderView]]],
+) -> bool:
+    if view.column_label != "LEFT_COL":
+        return False
+    if infer_layout_layer(view.node) != LAYOUT_LAYER_MAIN_TEXT:
+        return False
+    if infer_layout_role(view.node, layer=LAYOUT_LAYER_MAIN_TEXT) != "heading":
+        return False
+
+    for block_type, block in future_blocks[:3]:
+        if not block:
+            continue
+        if block_type == "FLOAT_GROUP_BLOCK":
+            continue
+        first = block[0]
+        if first.y0 < view.y0:
+            continue
+        layer = infer_layout_layer(first.node)
+        role = infer_layout_role(first.node, layer=layer)
+        if block_type == "FULL_SPAN" and layer == LAYOUT_LAYER_MAIN_TEXT and role != "heading":
+            return True
+        if layer != LAYOUT_LAYER_NOISE:
+            return False
+    return False
+
+
+def _right_float_precedes_transition_heading(
+    right_view: ColumnarOrderView,
+    heading_view: ColumnarOrderView,
+) -> bool:
+    if right_view.column_label != "RIGHT_COL":
+        return False
+    if right_view.y0 >= heading_view.y0:
+        return False
+    layer = infer_layout_layer(right_view.node)
+    if layer == LAYOUT_LAYER_FLOAT:
+        return True
+    return bool(_float_caption_text(right_view.node))
 
 
 def _sort_visual_row(row: list[ColumnarOrderView]) -> list[ColumnarOrderView]:

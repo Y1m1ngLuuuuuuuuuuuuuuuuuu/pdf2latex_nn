@@ -223,6 +223,44 @@ def test_fix_columnar_reading_order_groups_same_row_figure_fragments_left_to_rig
     assert [item["text_for_embedding"] for item in fixed[4:]] == ["left body", "right body"]
 
 
+def test_fix_columnar_reading_order_flushes_right_float_before_single_column_heading_transition():
+    nodes = [
+        {"type": "paragraph", "text_for_embedding": "left previous section body", "bbox": [100, 500, 430, 620]},
+        {"type": "table", "text_for_embedding": "table body", "bbox": [520, 590, 850, 680]},
+        {"type": "title", "text_for_embedding": "5 CONCLUSION", "bbox": [100, 735, 260, 755]},
+        {"type": "paragraph", "text_for_embedding": "single column conclusion body", "bbox": [100, 775, 850, 830]},
+    ]
+
+    fixed = fix_columnar_reading_order(nodes)
+
+    assert [item["text_for_embedding"] for item in fixed] == [
+        "left previous section body",
+        "table body",
+        "5 CONCLUSION",
+        "single column conclusion body",
+    ]
+    assert fixed[1]["layout_layer"] == "float_layer"
+    assert fixed[2]["layout_role"] == "heading"
+
+
+def test_fix_columnar_reading_order_keeps_plain_double_column_left_then_right_without_single_column_transition():
+    nodes = [
+        {"type": "paragraph", "text_for_embedding": "left previous section body", "bbox": [100, 500, 430, 620]},
+        {"type": "table", "text_for_embedding": "right table stays in right column", "bbox": [520, 590, 850, 680]},
+        {"type": "title", "text_for_embedding": "left subsection", "bbox": [100, 735, 260, 755]},
+        {"type": "paragraph", "text_for_embedding": "left subsection body", "bbox": [100, 775, 430, 830]},
+    ]
+
+    fixed = fix_columnar_reading_order(nodes)
+
+    assert [item["text_for_embedding"] for item in fixed] == [
+        "left previous section body",
+        "left subsection",
+        "left subsection body",
+        "right table stays in right column",
+    ]
+
+
 def test_content_v7_reorders_each_page_without_merging_or_rewriting_bbox():
     pages = [
         [
