@@ -154,6 +154,7 @@ docs/ground_truth_labeling_v0.md
 docs/ablation_plan_v2.md
 docs/ablation_results_current.md
 docs/v7_training_and_monitoring.md
+docs/interface_audit_2026_05_14.md
 docs/LOCAL_CONFIGURATION.md
 ```
 
