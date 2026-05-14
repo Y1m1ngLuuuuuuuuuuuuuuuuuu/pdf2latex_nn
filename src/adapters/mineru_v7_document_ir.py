@@ -30,6 +30,31 @@ from src.perception.reading_order import annotate_duplicate_contained_continuati
 from src.pipeline.v7_contract import assert_v7_content_json, read_json_payload
 
 
+PAGE_FOOTNOTE_TYPES = {"page_footnote", "footnote", "foot_note", "image_footnote", "table_footnote", "chart_footnote"}
+MARGIN_NOTE_TYPES = {"aside_text", "page_aside_text", "margin_note", "marginnote", "side_note", "sidenote", "sidebar"}
+HEADER_FOOTER_TYPES = {"page_number", "header", "footer", "page_header", "page_footer"}
+TOC_TYPES = {"toc", "index", "table_of_contents"}
+TEXT_TYPES = {"paragraph", "text", "paragraph_text", "phonetic"}
+TITLE_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
+DISPLAY_EQUATION_TYPES = {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}
+INLINE_MATH_TYPES = {"inline_math", "inline_formula", "math_inline", "equation_inline", "inline_equation"}
+TABLE_TYPES = {"table"}
+FIGURE_TYPES = {"figure", "image", "chart", "seal"}
+ALGORITHM_TYPES = {"algorithm"}
+LIST_TYPES = {"list", "item", "itemize", "enumerate"}
+CODE_TYPES = {"code"}
+REFERENCE_TYPES = {"reference", "references", "bibliography", "ref_text"}
+CAPTION_TYPES_BY_BLOCK = {
+    "image_caption": BlockType.FIGURE,
+    "figure_caption": BlockType.FIGURE,
+    "chart_caption": BlockType.FIGURE,
+    "table_caption": BlockType.TABLE,
+    "code_caption": BlockType.CODE,
+    "algorithm_caption": BlockType.ALGORITHM,
+}
+RAW_TYPE_KEYS = ("canonical_type", "type", "raw_type", "category", "block_type")
+
+
 @dataclass(frozen=True)
 class MinerUV7DocumentIRAdapterConfig:
     require_styles: bool = True
@@ -289,36 +314,46 @@ def map_v7_type_to_block_type(item: dict[str, Any]) -> BlockType:
         return BlockType.REFERENCE
     layer = str(item.get("layout_layer") or "").casefold()
     role = str(item.get("layout_role") or "").casefold()
-    raw = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
-    if raw in {"page_footnote", "footnote", "foot_note"} or role in {"footnote", "page_footnote"}:
+    raw = raw_v7_type(item)
+    if raw in CAPTION_TYPES_BY_BLOCK:
+        return CAPTION_TYPES_BY_BLOCK[raw]
+    if raw in PAGE_FOOTNOTE_TYPES or role in {"footnote", "page_footnote", "image_footnote", "table_footnote", "chart_footnote"}:
         return BlockType.FOOTNOTE
-    if raw in {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"} or role in {"margin_note", "marginnote", "side_note", "sidenote"}:
+    if raw in MARGIN_NOTE_TYPES or role in {"margin_note", "marginnote", "side_note", "sidenote", "aside_text", "page_aside_text"}:
         return BlockType.MARGIN_NOTE
-    if layer == "noise_layer" or raw in {"page_number", "header", "footer"} or role == "noise":
+    if layer == "noise_layer" or raw in HEADER_FOOTER_TYPES or role == "noise":
         return BlockType.HEADER_FOOTER
-    if raw in {"toc", "index", "table_of_contents"} or role in {"toc_title", "toc_entry"}:
+    if raw in TOC_TYPES or role in {"toc_title", "toc_entry"}:
         return BlockType.TOC
-    if raw in {"paragraph", "text", "paragraph_text"}:
+    if raw in TEXT_TYPES:
         return BlockType.TEXT
-    if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
+    if raw in TITLE_TYPES:
         return BlockType.TITLE
-    if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
+    if raw in DISPLAY_EQUATION_TYPES:
         return BlockType.EQUATION
-    if raw in {"inline_math", "inline_formula", "math_inline"}:
+    if raw in INLINE_MATH_TYPES:
         return BlockType.INLINE_MATH
-    if raw in {"table"}:
+    if raw in TABLE_TYPES:
         return BlockType.TABLE
-    if raw in {"figure", "image", "chart"}:
+    if raw in FIGURE_TYPES:
         return BlockType.FIGURE
-    if raw in {"algorithm"}:
+    if raw in ALGORITHM_TYPES:
         return BlockType.ALGORITHM
-    if raw in {"list", "item", "itemize", "enumerate"}:
+    if raw in LIST_TYPES:
         return BlockType.LIST
-    if raw in {"code"}:
+    if raw in CODE_TYPES:
         return BlockType.CODE
-    if raw in {"reference", "references", "bibliography"}:
+    if raw in REFERENCE_TYPES:
         return BlockType.REFERENCE
     return BlockType.OTHER if not text_from_v7_item(item) else BlockType.TEXT
+
+
+def raw_v7_type(item: dict[str, Any]) -> str:
+    for key in RAW_TYPE_KEYS:
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            return str(value).casefold().strip()
+    return ""
 
 
 def text_from_v7_item(item: dict[str, Any]) -> str:
@@ -516,6 +551,15 @@ def features_from_v7_item(item: dict[str, Any]) -> dict[str, float | int | bool 
 
 def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, include_raw_item: bool) -> dict[str, Any]:
     metadata_keys = (
+        "type",
+        "raw_type",
+        "canonical_type",
+        "category",
+        "block_type",
+        "text_level",
+        "level",
+        "subtype",
+        "label",
         "original_index",
         "mineru_page_idx",
         "mineru_block_idx",
@@ -563,12 +607,21 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "image_group_render_strategy",
         "figure_caption",
         "image_caption",
+        "chart_caption",
+        "table_caption",
+        "code_caption",
+        "algorithm_caption",
+        "image_footnote",
+        "chart_footnote",
+        "code_footnote",
+        "ref_text",
+        "seal_text",
         "footnote_marker",
         "footnote_label",
         "footnote_anchor",
         "margin_note_side",
+        "aside_text",
         "style_extract_status",
-        "canonical_type",
         "is_main_flow_candidate",
         "run_in_heading",
         "run_in_heading_number",

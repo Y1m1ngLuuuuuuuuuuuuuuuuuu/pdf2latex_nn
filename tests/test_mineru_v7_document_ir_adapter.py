@@ -234,6 +234,67 @@ def test_table_ir_caption_fallback_does_not_cut_inside_latex_command():
     assert len(document.nodes[0].text) <= 360
 
 
+def test_mineru_extended_types_fold_into_existing_ir_without_schema_change():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {"type": "seal", "page_idx": 0, "global_order": 0, "bbox": [10, 10, 90, 90], "text": "Seal", "style_spans": []},
+            {"type": "aside_text", "page_idx": 0, "global_order": 1, "bbox": [900, 100, 990, 180], "text": "Aside", "style_spans": []},
+            {"type": "table_caption", "page_idx": 0, "global_order": 2, "bbox": [100, 200, 900, 230], "text": "Table 7: Caption only.", "style_spans": []},
+            {"type": "image_footnote", "page_idx": 0, "global_order": 3, "bbox": [100, 240, 900, 260], "text": "Image note.", "style_spans": []},
+            {"type": "ref_text", "page_idx": 0, "global_order": 4, "bbox": [100, 300, 900, 330], "text": "[1] Reference.", "style_spans": []},
+            {"type": "phonetic", "page_idx": 0, "global_order": 5, "bbox": [100, 340, 900, 370], "text": "phonetic text", "style_spans": []},
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="extended-types")
+
+    assert [node.node_type for node in document.nodes] == [
+        BlockType.FIGURE,
+        BlockType.MARGIN_NOTE,
+        BlockType.TABLE,
+        BlockType.FOOTNOTE,
+        BlockType.REFERENCE,
+        BlockType.TEXT,
+    ]
+    assert document.nodes[0].metadata["type"] == "seal"
+    assert document.nodes[2].metadata["type"] == "table_caption"
+
+
+def test_mineru_caption_and_level_metadata_are_preserved():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "title",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 900, 140],
+                "text": "2 Method",
+                "level": 1,
+                "text_level": 1,
+                "style_spans": [],
+            },
+            {
+                "type": "chart_caption",
+                "page_idx": 0,
+                "global_order": 1,
+                "bbox": [100, 200, 900, 230],
+                "text": "Figure 2: Chart caption.",
+                "chart_caption": "Figure 2: Chart caption.",
+                "style_spans": [],
+            },
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="caption-level")
+
+    assert document.nodes[0].metadata["level"] == 1
+    assert document.nodes[0].metadata["text_level"] == 1
+    assert document.nodes[1].node_type == BlockType.FIGURE
+    assert document.nodes[1].metadata["chart_caption"] == "Figure 2: Chart caption."
+
+
 def test_duplicate_shadow_nodes_are_not_rendered_in_document_ir():
     payload = {
         "schema_version": "content_v7_columnfix_listmarkers_with_styles",
