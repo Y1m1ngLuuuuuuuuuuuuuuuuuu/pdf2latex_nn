@@ -16,20 +16,12 @@ from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import PARENT_CHILD, node_physical_index  # noqa: E402
 
 
-DEFAULT_CONTENT_JSON = Path(
-    "data/02_mineru_outputs/mineru_output/2501.00050/auto/2501.00050_content_list_v7_styles.json"
-)
-DEFAULT_GRAPH = Path("data/06_graph_features_v7/2501.00050_v7_truthgen_labeled_graph.pt")
-DEFAULT_CHECKPOINT = Path("data/10_checkpoints/overfit_10_docs_ce_big_700_lr5e4.pth")
-DEFAULT_LOGITS = Path("data/07_predicted_ir/2501.00050_logits.pt")
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--content-json", type=Path, default=DEFAULT_CONTENT_JSON)
-    parser.add_argument("--graph", type=Path, default=DEFAULT_GRAPH)
-    parser.add_argument("--logits", type=Path, default=DEFAULT_LOGITS)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--content-json", type=Path, required=True)
+    parser.add_argument("--graph", type=Path, required=True)
+    parser.add_argument("--logits", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="cpu", help="Torch device. Default: cpu")
     parser.add_argument("--max-text", type=int, default=120)
     parser.add_argument("--parent-threshold", type=float, default=0.0)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate LaTeX from a graph checkpoint via TreeDecoder."""
+"""Generate LaTeX from a graph checkpoint through the canonical IR renderer."""
 
 from __future__ import annotations
 
@@ -34,8 +34,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
     parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table union-bbox crops")
+    parser.add_argument("--source-tex", type=Path, help="Optional source TeX used for citation/float style sidecars")
     parser.add_argument("--asset-dir", type=Path, help="Directory for generated table crop assets")
     parser.add_argument("--asset-latex-prefix", default="assets", help="LaTeX path prefix for generated assets")
+    parser.add_argument(
+        "--renderer",
+        choices=["ir", "tree"],
+        default="ir",
+        help=(
+            "ir is the canonical v7 generation surface. tree keeps the legacy "
+            "TreeDecoder renderer for regression debugging only."
+        ),
+    )
     parser.add_argument(
         "--render-table-crops",
         action="store_true",
@@ -91,7 +101,26 @@ def main() -> int:
     )
     root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
     document_title = args.title or infer_document_title(node_records)
-    tex = decoder.render_document(root, title=document_title, document_metadata=getattr(data, "document_metadata", None))
+    if args.renderer == "ir":
+        if args.content_json is None:
+            raise ValueError("--renderer ir requires --content-json so graph predictions can map back to the full v7 IR")
+        from scripts.pipeline.batch_visual_qa_inference import render_decoded_tree_with_ir_backend  # noqa: PLC0415
+
+        tex = render_decoded_tree_with_ir_backend(
+            root,
+            node_records=node_records,
+            content_json=args.content_json,
+            pdf_path=args.source_pdf or source_pdf_from_content_json(args.content_json),
+            source_tex_path=args.source_tex,
+            document_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem),
+            title=document_title,
+            document_metadata=getattr(data, "document_metadata", None),
+            table_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
+            figure_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
+            asset_latex_prefix=args.asset_latex_prefix,
+        )
+    else:
+        tex = decoder.render_document(root, title=document_title, document_metadata=getattr(data, "document_metadata", None))
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
     pred_counts = torch.bincount(torch.clamp(logits.argmax(dim=-1), max=2), minlength=3).tolist()
@@ -260,6 +289,26 @@ def infer_document_title(records: list[dict[str, Any]]) -> str | None:
             continue
         return text
     return None
+
+
+def source_pdf_from_content_json(content_json: Path) -> Path | None:
+    payload = json.loads(content_json.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        for key in ("style_source_pdf", "source_pdf", "pdf_path"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return Path(value)
+    return None
+
+
+def document_id_from_content_json(content_json: Path, *, fallback: str) -> str:
+    payload = json.loads(content_json.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        for key in ("document_id", "doc_id", "paper_id", "arxiv_id"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return fallback
 
 
 def normalized_title_key(text: str) -> str:

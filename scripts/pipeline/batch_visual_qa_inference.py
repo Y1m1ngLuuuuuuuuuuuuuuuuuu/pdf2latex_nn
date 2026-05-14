@@ -324,7 +324,7 @@ def render_decoded_tree_with_ir_backend(
     *,
     node_records: list[dict[str, Any]],
     content_json: Path,
-    pdf_path: Path,
+    pdf_path: Path | None,
     source_tex_path: Path | None,
     document_id: str,
     title: str | None,
@@ -372,7 +372,7 @@ def render_decoded_tree_with_ir_backend(
 def build_document_ir_from_full_v7(
     *,
     content_json: Path,
-    pdf_path: Path,
+    pdf_path: Path | None,
     document_id: str,
 ) -> DocumentIR:
     payload = json.loads(content_json.read_text(encoding="utf-8"))

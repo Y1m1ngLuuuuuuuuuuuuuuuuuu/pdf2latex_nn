@@ -85,7 +85,12 @@ E2E inference and visual QA:
 ```text
 scripts/pipeline/batch_visual_qa_inference.py --renderer ir
 scripts/pipeline/run_e2e_inference.py --renderer ir
+scripts/pipeline/step5_generate_tex.py --renderer ir
 ```
+
+`--renderer ir` is the production surface. `--renderer tree` is kept only for
+debugging the legacy TreeDecoder renderer and must not be used for current
+quality reports.
 
 ## Current Manifest Families
 
