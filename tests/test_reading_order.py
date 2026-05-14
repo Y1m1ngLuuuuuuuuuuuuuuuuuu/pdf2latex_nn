@@ -363,6 +363,111 @@ def test_refresh_content_v7_marks_repeated_header_footer_as_noise():
     assert "Journal of Examples" not in " ".join(item["text_for_embedding"] for item in filter_graph_content_items(refreshed["items"]))
 
 
+def test_refresh_content_v7_preserves_repeated_first_page_title_and_rescues_top_author_blocks():
+    payload = {
+        "items": [
+            {
+                "type": "title",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [104, 113, 892, 155],
+                "text_for_embedding": "Elastic Representation: Mitigating Spurious Correlations for Group Robustness",
+                "style_baseline_size": 18.0,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [160, 210, 430, 250],
+                "text_for_embedding": "Zihan Wang New York University zw3508@nyu.edu",
+                "style_baseline_size": 10.0,
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [104, 300, 180, 322],
+                "text_for_embedding": "Abstract",
+                "style_baseline_size": 10.0,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [104, 332, 470, 650],
+                "text_for_embedding": "We study group robustness.",
+                "style_baseline_size": 9.5,
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [104, 771, 340, 805],
+                "text_for_embedding": "1 INTRODUCTION",
+                "style_baseline_size": 12.0,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [104, 820, 470, 920],
+                "text_for_embedding": "The introduction starts here.",
+                "style_baseline_size": 9.5,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [566, 214, 846, 250],
+                "text_for_embedding": "Qi Lei New York University ql518@nyu.edu",
+                "style_baseline_size": 10.0,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "page_height": 1000,
+                "bbox": [566, 255, 880, 292],
+                "text_for_embedding": "Quan Zhang Michigan State University quan.zhang@broad.msu.edu",
+                "style_baseline_size": 10.0,
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 1,
+                "page_height": 1000,
+                "bbox": [104, 20, 892, 45],
+                "text_for_embedding": "Elastic Representation: Mitigating Spurious Correlations for Group Robustness",
+                "style_baseline_size": 8.0,
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    title_records = [
+        item
+        for item in refreshed["items"]
+        if item["text_for_embedding"] == "Elastic Representation: Mitigating Spurious Correlations for Group Robustness"
+    ]
+    by_text = {item["text_for_embedding"]: item for item in refreshed["items"]}
+
+    first_page_title = next(item for item in title_records if item["page_idx"] == 0)
+    running_header = next(item for item in title_records if item["page_idx"] == 1)
+    assert first_page_title["layout_layer"] == "metadata_layer"
+    assert first_page_title["layout_role"] == "document_title"
+    assert running_header["layout_layer"] == "noise_layer"
+    assert running_header["layout_role"] == "header"
+
+    for text in [
+        "Zihan Wang New York University zw3508@nyu.edu",
+        "Qi Lei New York University ql518@nyu.edu",
+        "Quan Zhang Michigan State University quan.zhang@broad.msu.edu",
+    ]:
+        assert by_text[text]["layout_layer"] == "metadata_layer"
+        assert by_text[text]["layout_role"] == "affiliation"
+
+    assert by_text["1 INTRODUCTION"]["layout_layer"] == "main_text_flow"
+    assert by_text["1 INTRODUCTION"]["layout_role"] == "heading"
+
+
 def test_refresh_content_v7_marks_bottom_marker_notes_as_annotation_layer():
     payload = {
         "items": [

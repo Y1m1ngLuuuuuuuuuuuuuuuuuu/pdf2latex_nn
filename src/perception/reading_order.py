@@ -1346,6 +1346,7 @@ def annotate_repeated_header_footer_layers(
 
     page_heights = _page_heights(items)
     page_count = max(1, len(page_heights))
+    protected_title_indexes = _first_page_document_title_indexes(items)
     candidates: dict[tuple[str, str], list[int]] = {}
     for index, item in enumerate(items):
         text = _layout_text(item)
@@ -1373,6 +1374,8 @@ def annotate_repeated_header_footer_layers(
         if len(pages) < threshold:
             continue
         for index in indexes:
+            if index in protected_title_indexes:
+                continue
             _mark_noise_item(items[index], role=zone, reason="repeated_page_furniture", normalized=normalized)
 
 
@@ -1420,6 +1423,17 @@ def _mark_noise_item(item: dict[str, Any], *, role: str, reason: str, normalized
     item["layout_noise_reason"] = reason
     if normalized is not None:
         item["layout_noise_normalized_text"] = normalized
+    item["layout_probes"] = layout_probe_payloads(item)
+
+
+def _mark_metadata_item(item: dict[str, Any], *, role: str, reason: str | None = None) -> None:
+    item["layout_layer"] = LAYOUT_LAYER_METADATA
+    item["layout_role"] = role
+    item["is_main_flow_candidate"] = False
+    item.pop("layout_noise_reason", None)
+    item.pop("layout_noise_normalized_text", None)
+    if reason:
+        item["front_matter_reason"] = reason
     item["layout_probes"] = layout_probe_payloads(item)
 
 
@@ -1504,6 +1518,53 @@ def _looks_like_page_number_text(text: str) -> bool:
     return bool(re.fullmatch(r"(?:\d{1,4}|[ivxlcdm]{1,8})", value, flags=re.IGNORECASE))
 
 
+def _first_page_document_title_indexes(items: list[dict[str, Any]]) -> set[int]:
+    """Protect the real first-page paper title from repeated-header cleanup.
+
+    Some conference templates repeat the paper title as a running header on
+    later pages.  The repeated-header detector must remove those later running
+    headers, but the original first-page title is still front matter and must
+    survive as ``document_title``.
+    """
+
+    page_heights = _page_heights(items)
+    candidates: list[tuple[float, float, int]] = []
+    for index, item in enumerate(items):
+        if item.get("page_idx") not in {0, None}:
+            continue
+        raw = _layout_raw_type(item)
+        if raw not in {"title", "section", "heading"}:
+            continue
+        text = _layout_text(item).strip()
+        if not text:
+            continue
+        normalized = " ".join(text.casefold().split())
+        if _front_matter_text_marker(text) or is_toc_title_text(text) or _is_body_heading_candidate(item):
+            continue
+        if normalized.startswith(("fig", "figure", "table", "algorithm", "appendix", "references", "bibliography")):
+            continue
+        bbox = _parse_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        page_height = page_heights.get(0) or max(float(bbox[3]), 1.0)
+        if bbox[1] > page_height * 0.38:
+            continue
+        width = max(0.0, bbox[2] - bbox[0])
+        height = max(0.0, bbox[3] - bbox[1])
+        font_size = _node_font_size(item)
+        score = width + height * 18.0 + font_size * 45.0 + min(len(text), 180)
+        candidates.append((score, bbox[1], index))
+    if not candidates:
+        return set()
+    candidates.sort(reverse=True)
+    best_score, best_y0, best_index = candidates[0]
+    protected = {best_index}
+    for score, y0, index in candidates[1:]:
+        if abs(y0 - best_y0) <= 80.0 and score >= best_score * 0.45:
+            protected.add(index)
+    return protected
+
+
 def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
     """Mark title/author/abstract material before the first body heading.
 
@@ -1525,17 +1586,21 @@ def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
         break
     if first_body_heading_order is None:
         return
+    protected_title_indexes = _first_page_document_title_indexes(items)
+    for index in protected_title_indexes:
+        if 0 <= index < len(items):
+            _mark_metadata_item(items[index], role="document_title", reason="first_page_document_title")
     for index, item in enumerate(items[:first_body_heading_order]):
         raw = _layout_raw_type(item)
         text = _layout_text(item)
         if raw in NOISE_LAYOUT_TYPES or not text:
             continue
+        if index in protected_title_indexes:
+            continue
         if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}:
             continue
         if raw in {"title", "paragraph", "text", "author", "affiliation"} or _front_matter_text_marker(text):
-            item["layout_layer"] = LAYOUT_LAYER_METADATA
-            item["layout_role"] = "abstract" if _front_matter_text_marker(text) else "front_matter"
-            item["is_main_flow_candidate"] = False
+            _mark_metadata_item(item, role=_front_matter_role(item))
     for index, item in enumerate(items):
         if _looks_like_top_page_author_block(
             item,
@@ -1543,9 +1608,7 @@ def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
             item_order=index,
             first_body_heading_order=first_body_heading_order,
         ):
-            item["layout_layer"] = LAYOUT_LAYER_METADATA
-            item["layout_role"] = _front_matter_role(item)
-            item["is_main_flow_candidate"] = False
+            _mark_metadata_item(item, role=_front_matter_role(item))
     _mark_pre_heading_epigraph_sources(
         items,
         first_body_heading_y0=first_body_heading_y0,
@@ -1602,12 +1665,6 @@ def _looks_like_top_page_author_block(
         return False
     if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}:
         return False
-    if item_order is not None and first_body_heading_order is not None and item_order >= first_body_heading_order:
-        # Once the ordered stream has entered the body, do not use physical
-        # y-position alone to pull right-column body text back into metadata.
-        # Two-column first pages often place the right-column continuation
-        # above the left-column Introduction baseline.
-        return False
     bbox = _parse_bbox(item.get("bbox"))
     if bbox is None:
         return False
@@ -1615,6 +1672,18 @@ def _looks_like_top_page_author_block(
     if first_body_heading_y0 is not None and y0 >= first_body_heading_y0:
         return False
     normalized = " ".join(text.lower().split())
+    after_body_order = (
+        item_order is not None and first_body_heading_order is not None and item_order >= first_body_heading_order
+    )
+    strong_author_signal = (
+        "@" in text
+        or has_strong_layout_probe(item, text=text, roles={"affiliation"})
+        or (y0 <= 320 and _looks_like_author_name(text))
+    )
+    if after_body_order and not strong_author_signal:
+        # Keep right-column body text out of metadata, but still rescue author
+        # and affiliation blocks that are physically above the first section.
+        return False
     if _front_matter_text_marker(text):
         return True
     if has_strong_layout_probe(item, text=text, roles={"front_matter", "affiliation"}):
@@ -1673,6 +1742,9 @@ def _mark_pre_heading_epigraph_sources(
         if bbox[1] >= first_body_heading_y0:
             continue
         text = _layout_text(item).strip()
+        current_role = str(item.get("layout_role") or "").casefold()
+        if "@" in text or current_role in {"author", "affiliation", "email", "correspondence"}:
+            continue
         if not _looks_like_epigraph_source_line(text):
             continue
         item["layout_layer"] = LAYOUT_LAYER_METADATA
@@ -1712,10 +1784,12 @@ def _front_matter_role(item: dict[str, Any]) -> str:
         return TOC_TITLE_ROLE
     if is_front_matter_date_text(text):
         return "front_matter"
-    if _front_matter_text_marker(text):
-        return "abstract" if text.strip().lower().startswith("abstract") else "front_matter"
+    if "@" in text:
+        return "affiliation"
     if probe is not None and probe.role == "affiliation" and probe.confidence >= 0.80:
         return "affiliation"
+    if _front_matter_text_marker(text):
+        return "abstract" if text.strip().lower().startswith("abstract") else "front_matter"
     if _looks_like_author_name(text):
         return "author"
     return "front_matter"
