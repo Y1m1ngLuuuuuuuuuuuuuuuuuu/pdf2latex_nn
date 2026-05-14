@@ -64,6 +64,11 @@ The alignment engine uses ordered sliding windows instead of global O(N^2) match
 5. apply blind/weak alignment for formulas, floats, references, and captions
 ```
 
+PDF nodes are the same graph-visible nodes produced by `GNNViewAdapter`.
+The labeler does not align against the complete v7 fact layer directly, because
+that would desynchronize graph indexes and labels. Excluded full-v7 nodes remain
+available to the generator through the graph-to-v7 mapping.
+
 Expected non-main-flow nodes such as headers, footers, TOC entries, and some metadata are excluded or exempted from the effective orphan ratio.
 
 ## Labels

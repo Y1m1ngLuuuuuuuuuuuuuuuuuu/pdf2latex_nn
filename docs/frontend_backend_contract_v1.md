@@ -10,6 +10,7 @@ This contract fixes the boundary between PDF extraction, TeX truth generation, G
 PDF Frontend
   -> content_v7_styles.json
   -> DocumentIR
+  -> GNNViewAdapter
   -> GraphInput.pt
 
 TeX Label Backend
@@ -60,6 +61,29 @@ footnote/margin-note candidates
 ```
 
 Frontend must not write edge labels or model predictions.
+
+## GNN View Adapter
+
+The full v7 JSON is the complete fact layer for rendering. The graph model uses
+a narrower view produced by:
+
+```text
+src/perception/gnn_view_adapter.py
+```
+
+The adapter may exclude metadata, annotations, true page furniture, TOC entries,
+or duplicate shadows from the graph view, but it must preserve a reversible map:
+
+```text
+gnn_to_v7_id
+gnn_to_v7_ids
+v7_id_to_gnn_idx
+excluded_items_summary
+```
+
+This means "not sent to the GNN" never means "deleted from the document".
+Generator code must render from full v7 / DocumentIR plus bridged predicted
+relations, not from the filtered graph view alone.
 
 ## GraphInput
 

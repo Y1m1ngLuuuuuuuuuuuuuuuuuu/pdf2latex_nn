@@ -38,6 +38,17 @@ flow_context      band/column/reading-flow context
 
 The model may project and normalize semantic features internally. The `.pt` graph stores the full raw feature contract so ablations can mask feature groups at runtime without rewriting data.
 
+Node tensors are built from the `GNNViewAdapter` output, not directly from the
+full v7 item list. The graph stores mapping sidecars so predictions can be
+bridged back to the complete v7 fact layer:
+
+```text
+gnn_to_v7_id
+gnn_to_v7_ids
+v7_id_to_gnn_idx
+gnn_view_summary
+```
+
 ## Edge Feature Layout
 
 Edge features are directional. For edge `u -> v`, deltas are computed from source to target.

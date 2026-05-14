@@ -23,6 +23,9 @@ The target is not plain OCR and not a single end-to-end language model. The syst
 PDF Frontend
   MinerU + PyMuPDF + v7 reading/layout cleanup
 
+GNN View Adapter
+  full v7 fact layer -> graph-visible node view + reversible v7 mapping
+
 Graph Builder
   SciBERT + geometry + style + layout-flow features
 
@@ -58,6 +61,11 @@ footnote and margin-note candidates
 ```
 
 Cross-page and cross-paragraph logical merging belongs in the decoder/generator layer, not in v7 JSON preprocessing.
+
+The complete v7 JSON is never reduced just because a node is not useful for
+GNN training. Metadata, floats, annotations, headers/footers, and references
+remain in the fact layer. `GNNViewAdapter` builds the narrower graph-visible
+view and records the mapping back to full v7 node ids.
 
 ## 4. GNN Task
 

@@ -79,6 +79,7 @@ docs/ground_truth_labeling_v0.md     TeX-to-PDF truth-label generation
 docs/ablation_plan_v2.md             current ablation protocol
 docs/ablation_results_current.md     latest locked ablation results
 docs/v7_training_and_monitoring.md   production data/training runbook
+docs/interface_audit_2026_05_14.md   current interface audit and stale-path check
 docs/LOCAL_CONFIGURATION.md          private local configuration notes
 ```
 
