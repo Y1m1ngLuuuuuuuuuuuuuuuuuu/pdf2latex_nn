@@ -28,7 +28,7 @@ from scripts.pipeline.step5_generate_tex import (  # noqa: E402
 from scripts.pipeline.train_edge_gnn_full import split_indices  # noqa: E402
 from src.adapters import MinerUV7DocumentIRAdapterConfig, convert_v7_payload_to_document_ir  # noqa: E402
 from src.generation.render_surface import render_original_like_document  # noqa: E402
-from src.ir import RenderRole, RenderTreeIR, RenderTreeNode  # noqa: E402
+from src.ir import DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import (  # noqa: E402
@@ -335,30 +335,30 @@ def render_decoded_tree_with_ir_backend(
 ) -> str:
     """Render a TreeDecoder result through the canonical decoupled IR backend."""
 
-    body_root = root_without_redundant_document_title(root, title) if title else root
-    body_root = root_with_document_toc(body_root, document_metadata)
-    apply_heading_render_policy(body_root)
-
-    document = build_document_ir_from_graph_records(
-        node_records,
+    document = build_document_ir_from_full_v7(
         content_json=content_json,
         pdf_path=pdf_path,
         document_id=document_id,
     )
-    graph_index_to_node_id = {
-        index: stable_node_id(record, fallback_position=index)
+    document_title = infer_document_title_from_document(document) or title
+    body_root = root_without_redundant_document_title(root, document_title) if document_title else root
+    body_root = root_with_document_toc(body_root, document_metadata)
+    apply_heading_render_policy(body_root)
+    graph_index_to_node_ids = {
+        index: v7_source_node_ids_for_graph_record(record, fallback_position=index)
         for index, record in enumerate(node_records)
     }
     tree = render_tree_from_resolved_root(
         body_root,
         document_ir_path=str(content_json),
         document_id=document.doc_id,
-        graph_index_to_node_id=graph_index_to_node_id,
+        graph_index_to_node_ids=graph_index_to_node_ids,
     )
+    tree = inject_full_v7_front_matter(tree, document)
     from src.generation.ir_renderer import IRLatexRenderConfig
 
     config = IRLatexRenderConfig(
-        title=title,
+        title=document_title,
         front_matter_mode="original_like",
         include_maketitle=False,
         table_asset_output_dir=table_asset_output_dir,
@@ -367,6 +367,24 @@ def render_decoded_tree_with_ir_backend(
         figure_asset_latex_prefix=asset_latex_prefix,
     )
     return render_original_like_document(document, tree, config=config, source_tex_path=source_tex_path)
+
+
+def build_document_ir_from_full_v7(
+    *,
+    content_json: Path,
+    pdf_path: Path,
+    document_id: str,
+) -> DocumentIR:
+    payload = json.loads(content_json.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected v7 content object: {content_json}")
+    return convert_v7_payload_to_document_ir(
+        payload,
+        source_path=content_json,
+        pdf_path=pdf_path,
+        doc_id=document_id,
+        config=MinerUV7DocumentIRAdapterConfig(require_styles=False),
+    )
 
 
 def build_document_ir_from_graph_records(
@@ -404,7 +422,7 @@ def render_tree_from_resolved_root(
     *,
     document_ir_path: str,
     document_id: str,
-    graph_index_to_node_id: dict[int, str],
+    graph_index_to_node_ids: dict[int, list[str]],
 ) -> RenderTreeIR:
     nodes: list[RenderTreeNode] = []
     hoisted_front_matter_ids: list[str] = []
@@ -423,10 +441,11 @@ def render_tree_from_resolved_root(
         if is_noise_resolved_node(node):
             return None
         source_node_ids = [
-            graph_index_to_node_id[index]
+            node_id
             for index in source_indexes_for_resolved_node(node)
-            if index in graph_index_to_node_id
+            for node_id in graph_index_to_node_ids.get(index, [])
         ]
+        source_node_ids = list(dict.fromkeys(source_node_ids))
         role = render_role_for_resolved_node(node, parent_role=parent_role)
         children = [
             child_id
@@ -481,6 +500,175 @@ def render_tree_from_resolved_root(
     )
 
 
+def v7_source_node_ids_for_graph_record(record: dict[str, Any], *, fallback_position: int) -> list[str]:
+    values = record.get("_v7_source_node_ids")
+    if isinstance(values, list):
+        ids = [value for value in values if isinstance(value, str) and value]
+        if ids:
+            return list(dict.fromkeys(ids))
+    value = record.get("_v7_node_id")
+    if isinstance(value, str) and value:
+        return [value]
+    return [stable_node_id(record, fallback_position=fallback_position)]
+
+
+def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> RenderTreeIR:
+    """Prepend complete v7 front matter that is intentionally absent from GNN view."""
+
+    render_nodes = list(tree.nodes)
+    existing_source_ids = {
+        source_id
+        for node in render_nodes
+        for source_id in node.source_node_ids
+    }
+    metadata_nodes = [
+        node
+        for node in sorted(document.nodes, key=lambda item: item.reading_index)
+        if str(node.metadata.get("layout_layer") or "").casefold() == "metadata_layer"
+        and node.node_id not in existing_source_ids
+    ]
+    if not metadata_nodes:
+        return tree
+
+    title_nodes = [node for node in metadata_nodes if _document_node_is_title(node)]
+    author_nodes = [node for node in metadata_nodes if _document_node_is_author_like(node)]
+    abstract_label = next((node for node in metadata_nodes if _document_node_is_abstract_label(node)), None)
+    abstract_body_nodes = _front_matter_abstract_body_nodes(metadata_nodes, abstract_label=abstract_label)
+
+    injected: list[RenderTreeNode] = []
+    if title_nodes and not _render_tree_has_role(tree, RenderRole.DOCUMENT_TITLE):
+        injected.append(
+            RenderTreeNode(
+                render_id="full_v7_document_title",
+                role=RenderRole.DOCUMENT_TITLE,
+                source_node_ids=[node.node_id for node in title_nodes],
+            )
+        )
+    if author_nodes:
+        # Keep the complete visual author/affiliation grid as one render node.
+        # If we inject one RenderTree node per author box, the IR renderer may
+        # sort those nodes by their full-v7 reading indexes and split a right
+        # column author block into the body.  One source-id bundle preserves the
+        # front-matter atomicity while still letting the author renderer recover
+        # rows/columns from each source node's bbox.
+        injected.append(
+            RenderTreeNode(
+                render_id="full_v7_author_block",
+                role=RenderRole.AUTHOR_BLOCK,
+                source_node_ids=[
+                    node.node_id
+                    for node in sorted(author_nodes, key=_document_node_visual_key)
+                ],
+            )
+        )
+    if abstract_label is not None or abstract_body_nodes:
+        child_ids: list[str] = []
+        for index, node in enumerate(abstract_body_nodes):
+            render_id = f"full_v7_abstract_body_{index}"
+            child_ids.append(render_id)
+            injected.append(
+                RenderTreeNode(
+                    render_id=render_id,
+                    role=RenderRole.PARAGRAPH,
+                    source_node_ids=[node.node_id],
+                )
+            )
+        injected.append(
+            RenderTreeNode(
+                render_id="full_v7_abstract",
+                role=RenderRole.ABSTRACT,
+                source_node_ids=[abstract_label.node_id] if abstract_label is not None else [],
+                children=child_ids,
+            )
+        )
+    if not injected:
+        return tree
+
+    injected_ids = [node.render_id for node in injected if node.role != RenderRole.PARAGRAPH]
+    new_nodes = [*render_nodes, *injected]
+    updated_nodes: list[RenderTreeNode] = []
+    for node in new_nodes:
+        if node.render_id != tree.root_id:
+            updated_nodes.append(node)
+            continue
+        updated_nodes.append(
+            RenderTreeNode(
+                render_id=node.render_id,
+                role=node.role,
+                source_node_ids=node.source_node_ids,
+                text=node.text,
+                latex=node.latex,
+                children=list(dict.fromkeys([*injected_ids, *node.children])),
+                attributes=node.attributes,
+            )
+        )
+    return RenderTreeIR(
+        doc_id=tree.doc_id,
+        root_id=tree.root_id,
+        nodes=updated_nodes,
+        document_ir_path=tree.document_ir_path,
+        predicted_relations_path=tree.predicted_relations_path,
+        style_profile_path=tree.style_profile_path,
+        metadata={**tree.metadata, "front_matter_source": "full_v7_ir"},
+    )
+
+
+def infer_document_title_from_document(document: DocumentIR) -> str | None:
+    for node in sorted(document.nodes, key=lambda item: item.reading_index):
+        if _document_node_is_title(node) and node.text:
+            return node.text
+    for node in sorted(document.nodes, key=lambda item: item.reading_index):
+        if str(node.metadata.get("layout_layer") or "").casefold() == "metadata_layer" and node.text:
+            return node.text
+    return None
+
+
+def _render_tree_has_role(tree: RenderTreeIR, role: RenderRole) -> bool:
+    return any(node.role == role for node in tree.nodes)
+
+
+def _document_node_is_title(node: DocumentNode) -> bool:
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    return role in {"document_title", "front_matter_title"}
+
+
+def _document_node_is_author_like(node: DocumentNode) -> bool:
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    return role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
+
+
+def _document_node_is_abstract_label(node: DocumentNode) -> bool:
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    text = normalize_render_text(node.text)
+    return role in {"abstract", "abstract_title"} or text == "abstract"
+
+
+def _front_matter_abstract_body_nodes(
+    metadata_nodes: list[DocumentNode],
+    *,
+    abstract_label: DocumentNode | None,
+) -> list[DocumentNode]:
+    if abstract_label is None:
+        return []
+    body: list[DocumentNode] = []
+    for node in metadata_nodes:
+        if node.reading_index <= abstract_label.reading_index:
+            continue
+        if _document_node_is_title(node) or _document_node_is_author_like(node) or _document_node_is_abstract_label(node):
+            continue
+        role = str(node.metadata.get("layout_role") or "").casefold()
+        if role in {"front_matter", "abstract_body", ""} and node.text:
+            body.append(node)
+    return sorted(body, key=lambda item: item.reading_index)
+
+
+def _document_node_visual_key(node: DocumentNode) -> tuple[int, float, float, int]:
+    if node.bboxes:
+        bbox = node.bboxes[0]
+        return (node.page_idx, bbox.y0, bbox.x0, node.reading_index)
+    return (node.page_idx, 0.0, 0.0, node.reading_index)
+
+
 def source_indexes_for_resolved_node(node: ResolvedNode) -> list[int]:
     indexes: list[int] = []
     for key in (
@@ -502,9 +690,25 @@ def source_indexes_for_resolved_node(node: ResolvedNode) -> list[int]:
     for record in node.record.get("merged_records", []):
         if not isinstance(record, dict):
             continue
-        value = record.get("global_order")
-        if isinstance(value, int) and value >= 0:
-            indexes.append(value)
+        gnn_index = record.get("_gnn_view_index")
+        if isinstance(gnn_index, int) and gnn_index >= 0:
+            indexes.append(gnn_index)
+            continue
+
+        # Legacy graph records used ``global_order`` as the graph node index.
+        # In the decoupled v7 architecture, however, ``global_order`` belongs
+        # to the complete fact layer and can point at metadata/front-matter
+        # nodes that are intentionally absent from the GNN view.  Falling back
+        # to it only for records that do not carry v7 mapping metadata keeps old
+        # debug artifacts readable without corrupting the new relation bridge.
+        has_v7_mapping = any(
+            key in record
+            for key in ("_v7_source_index", "_v7_node_id", "_v7_source_indexes", "_v7_source_node_ids")
+        )
+        if not has_v7_mapping:
+            value = record.get("global_order")
+            if isinstance(value, int) and value >= 0:
+                indexes.append(value)
     return list(dict.fromkeys(indexes))
 
 

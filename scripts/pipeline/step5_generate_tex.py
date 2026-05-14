@@ -14,6 +14,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.perception.gnn_view_adapter import GNNViewAdapterConfig, build_gnn_view  # noqa: E402
 from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.generation.table_assets import annotate_table_group_records  # noqa: E402
@@ -183,6 +184,18 @@ def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[d
     """Match content JSON records to graph nodes, trying micro-fusion when needed."""
 
     expected = int(data.num_nodes)
+    view = build_gnn_view(
+        records,
+        config=GNNViewAdapterConfig(fuse_micro_nodes=bool(getattr(data, "micro_fusion_applied", False))),
+    )
+    if len(view.gnn_items) == expected:
+        return view.gnn_items
+    fallback_view = build_gnn_view(
+        records,
+        config=GNNViewAdapterConfig(fuse_micro_nodes=not bool(getattr(data, "micro_fusion_applied", False))),
+    )
+    if len(fallback_view.gnn_items) == expected:
+        return fallback_view.gnn_items
     filtered_records = filter_graph_content_items(records)
     if len(filtered_records) == expected:
         return filtered_records

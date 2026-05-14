@@ -29,10 +29,9 @@ from src.perception.schema import (
 from src.perception.reading_order import (
     LAYOUT_LAYER_MAIN_TEXT,
     document_toc_metadata,
-    filter_graph_content_items,
-    fuse_micro_nodes,
     style_spans_text,
 )
+from src.perception.gnn_view_adapter import GNNViewAdapterConfig, build_gnn_view
 from src.perception.xy_cut import reading_order_ranks as regime_reading_order_ranks
 from src.perception.xy_cut import sort_node_indices_by_reading_order
 from src.perception.title_features import title_numbering_level, title_numbering_path, title_pattern_flags
@@ -195,8 +194,11 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     payload = _load_content_v7_payload(input_path)
     raw_items = load_content_v7(input_path)
     document_metadata = document_toc_metadata(raw_items)
-    graph_items = filter_graph_content_items(raw_items)
-    items = fuse_micro_nodes(graph_items) if config.fuse_micro_nodes else graph_items
+    gnn_view = build_gnn_view(
+        raw_items,
+        config=GNNViewAdapterConfig(fuse_micro_nodes=bool(config.fuse_micro_nodes)),
+    )
+    items = gnn_view.gnn_items
     texts = [text_for_embedding(item) for item in items]
     regime_order = v7_reading_order_indices(items)
     regime_ranks = _ranks_from_order(regime_order, len(items))
@@ -275,11 +277,13 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
     data.source_path = str(input_path)
     data.model_path = str(config.model_path)
     data.document_metadata = document_metadata
-    data.content_filter = {
-        "excluded_roles": ["toc_title", "toc_entry"],
-        "node_count_before_filter": len(raw_items),
-        "node_count_after_filter": len(graph_items),
-    }
+    data.gnn_to_v7_index = gnn_view.gnn_to_v7_index
+    data.gnn_to_v7_id = gnn_view.gnn_to_v7_id
+    data.gnn_to_v7_ids = gnn_view.gnn_to_v7_ids
+    data.v7_index_to_gnn_idx = gnn_view.v7_index_to_gnn_idx
+    data.v7_id_to_gnn_idx = gnn_view.v7_id_to_gnn_idx
+    data.gnn_view_summary = gnn_view.excluded_items_summary
+    data.content_filter = gnn_view.excluded_items_summary
     data.pipeline_version = V7_PIPELINE_VERSION
     data.graph_schema_version = V7_GRAPH_SCHEMA_VERSION
     data.content_schema_version = str(payload.get("schema_version") or "")
@@ -1437,6 +1441,11 @@ def make_node_records(
         records.append(
             {
                 "global_order": item.get("global_order"),
+                "_gnn_view_index": item.get("_gnn_view_index"),
+                "_v7_source_index": item.get("_v7_source_index"),
+                "_v7_node_id": item.get("_v7_node_id"),
+                "_v7_source_indexes": item.get("_v7_source_indexes"),
+                "_v7_source_node_ids": item.get("_v7_source_node_ids"),
                 "type": item.get("type"),
                 "raw_type": item.get("raw_type"),
                 "list_type": item.get("list_type"),

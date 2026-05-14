@@ -9,7 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes, is_toc_record, style_spans_text
+from src.perception.gnn_view_adapter import GNNViewAdapterConfig, build_gnn_view
+from src.perception.reading_order import is_toc_record, style_spans_text
 from src.perception.title_features import title_numbering_level, title_numbering_path
 from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_file
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
@@ -382,6 +383,7 @@ class AlignmentLabeler:
         self.visual_hierarchy: VisualHierarchy | None = None
         self.flattener_summary: dict[str, Any] | None = None
         self.alignment_quality: dict[str, Any] = {}
+        self.gnn_view_summary: dict[str, Any] | None = None
         self._edge_attr: Any | None = None
         self._edge_attr_fields: dict[str, int] = {}
 
@@ -407,6 +409,7 @@ class AlignmentLabeler:
         graph.alignment_schema = {
             "strategy": "v7_texsoup_ast_sliding_window_v1",
             "pipeline_version": "v7",
+            "pdf_node_view": "gnn_view_adapter_v1",
             "similarity_threshold": self.config.similarity_threshold,
             "max_window_nodes": self.config.max_window_nodes,
             "tail_absorption_nodes": self.config.tail_absorption_nodes,
@@ -415,6 +418,7 @@ class AlignmentLabeler:
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
+            "gnn_view": self.gnn_view_summary,
         }
         self.assert_alignment_quality(graph=graph, labels=labels)
         graph.alignment_quality = self.alignment_quality
@@ -444,17 +448,19 @@ class AlignmentLabeler:
         if not isinstance(items, list):
             raise ValueError(f"Expected {self.content_json_path} to contain an items list")
         items = [item if isinstance(item, dict) else {"text_for_embedding": str(item)} for item in items]
-        filtered_items = filter_graph_content_items(items)
-        if expected_node_count is not None and len(filtered_items) == expected_node_count:
-            items = filtered_items
-        if force_micro_fusion:
-            fused_items = fuse_micro_nodes(items)
-            if expected_node_count is None or len(fused_items) == expected_node_count:
-                items = fused_items
-        elif expected_node_count is not None and len(items) != expected_node_count:
-            fused_items = fuse_micro_nodes(items)
-            if len(fused_items) == expected_node_count:
-                items = fused_items
+        view = build_gnn_view(
+            items,
+            config=GNNViewAdapterConfig(fuse_micro_nodes=bool(force_micro_fusion)),
+        )
+        if expected_node_count is not None and len(view.gnn_items) != expected_node_count:
+            fallback_view = build_gnn_view(
+                items,
+                config=GNNViewAdapterConfig(fuse_micro_nodes=not bool(force_micro_fusion)),
+            )
+            if len(fallback_view.gnn_items) == expected_node_count:
+                view = fallback_view
+        items = view.gnn_items
+        self.gnn_view_summary = view.excluded_items_summary
         nodes = []
         for index, item in enumerate(items):
             text = pdf_item_text(item)
@@ -1202,6 +1208,7 @@ class AlignmentLabeler:
             "similarity_threshold": self.config.similarity_threshold,
             "flattener": self.flattener_summary,
             "quality": self.alignment_quality,
+            "gnn_view": self.gnn_view_summary,
             "matches": [asdict(match) for match in self.matches],
             "tex_to_pdf_indices": self.tex_to_pdf_indices,
             "expected_orphan_exemptions": expected_orphan_exemptions,
