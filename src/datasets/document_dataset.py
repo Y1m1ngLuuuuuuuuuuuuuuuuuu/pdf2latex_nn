@@ -51,12 +51,20 @@ PYG_EXCLUDE_KEYS = [
     "document_metadata",
     "edge_refresh_source_graph",
     "graph_schema_version",
+    "gnn_to_v7_id",
+    "gnn_to_v7_ids",
+    "gnn_to_v7_index",
+    "gnn_view_summary",
     "micro_fusion_applied",
     "micro_fusion_node_count_after",
     "micro_fusion_node_count_before",
     "orphan_count",
     "pipeline_version",
     "source_path",
+    "v7_id_to_gnn_idx",
+    "v7_index_to_gnn_idx",
+    "candidate_edge_missing",
+    "candidate_edge_recall",
 ]
 
 
