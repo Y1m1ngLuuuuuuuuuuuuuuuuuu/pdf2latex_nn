@@ -1,0 +1,144 @@
+{
+  "schema_version": "ablation_matrix_v7_adapteraware_20260514_2109",
+  "description": "Adapter-aware v7 ablations on the 1851-document clean labeled set. The main line matches the locked M05 training interface: Y-network, type-aware propagation, hard MERGE gate, CE + OHEM, and the v7 GNNViewAdapter graph contract.",
+  "common": {
+    "python_bin": "/root/miniconda3/envs/pdf2latex/bin/python",
+    "root": "data/07_training_cache/ablations_v7_adapteraware_20260514_2109",
+    "manifest": "data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json",
+    "output_root": "data/09_eval_reports/ablations_v7_adapteraware_20260514_2109",
+    "epochs": 30,
+    "batch_size": 8,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "hidden_dim": 128,
+    "heads": 4,
+    "num_layers": 2,
+    "predictor_hidden_dims": "512,128",
+    "predictor_layer_norm": true,
+    "edge_feature_mode": "full",
+    "message_edge_mode": "type_aware",
+    "prediction_architecture": "y_network",
+    "merge_gate_mode": "hard",
+    "merge_gate_logit": -20.0,
+    "semantic_hidden_dim": 96,
+    "layout_hidden_dim": 64,
+    "dropout": 0.1,
+    "loss": "cross_entropy",
+    "class_weights": "custom",
+    "class_weight_values": "8,3,1",
+    "ohem_negative_ratio": 5.0,
+    "ohem_min_negatives": 256,
+    "train_negative_dropout": 0.0,
+    "device": "auto",
+    "num_workers": 2,
+    "seed": 7,
+    "repeat_seeds": [
+      7
+    ],
+    "selection_metric": "val_positive_macro_f0_5"
+  },
+  "calibration": {
+    "enabled": true,
+    "tau_min": 0.05,
+    "tau_max": 0.95,
+    "tau_step": 0.01,
+    "mode": "threshold_priority",
+    "apply_merge_gates": true,
+    "precision_floors": "0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"
+  },
+  "experiments": [
+    {
+      "name": "M05_current_y_network",
+      "family": "main",
+      "hypothesis": "The locked main model should retain MERGE precision while preserving strong PARENT_CHILD through type-aware propagation.",
+      "purpose": "Y-network + type-aware message mask + hard MERGE gate.",
+      "args": {}
+    },
+    {
+      "name": "A00_old_shared_gat",
+      "family": "architecture",
+      "hypothesis": "The old shared-head GAT should underperform the Y-network because MERGE and PARENT_CHILD need different information paths.",
+      "purpose": "Shared predictor head with ordinary GAT propagation, keeping all other training settings fixed.",
+      "args": {
+        "prediction_architecture": "shared",
+        "message_edge_mode": "all"
+      }
+    },
+    {
+      "name": "A01_no_message_passing",
+      "family": "architecture",
+      "hypothesis": "Removing message passing should help local MERGE cleanliness but hurt hierarchy attachment.",
+      "purpose": "No GNN layers; classify edges from projected node and edge features only.",
+      "args": {
+        "num_layers": 0,
+        "message_edge_mode": "all"
+      }
+    },
+    {
+      "name": "A02_no_type_aware_message_mask",
+      "family": "architecture",
+      "hypothesis": "If float/table/noise propagation pollutes edge decisions, using all edges for message passing should degrade MERGE or stability.",
+      "purpose": "Same Y-network, but all candidate edges participate in GAT propagation.",
+      "args": {
+        "message_edge_mode": "all"
+      }
+    },
+    {
+      "name": "F00_no_scibert",
+      "family": "node_features",
+      "hypothesis": "Without SciBERT, paragraph continuation and semantic attachment should become weaker.",
+      "purpose": "Zero only the 768-dimensional semantic segment.",
+      "args": {
+        "ablate_node_groups": "semantic"
+      }
+    },
+    {
+      "name": "F01_no_geometry_layout",
+      "family": "node_features",
+      "hypothesis": "Without geometry and layout features, the model should lose physical hierarchy and column/float awareness.",
+      "purpose": "Keep semantic/type cues, zero bbox, scroll, derived, style, sequence, column, title, layer and flow-context features.",
+      "args": {
+        "ablate_node_groups": "geometry,scroll,derived,style,sequence,column,title,layout_layer,flow_context",
+        "ablate_edge_groups": "spatial,typography,overlap_gutter,index_bins,layout_flow"
+      }
+    },
+    {
+      "name": "F02_no_v7_reading_flow",
+      "family": "node_features",
+      "hypothesis": "Removing repaired reading-flow cues should expose the value of v7 band/column flow reconstruction.",
+      "purpose": "Zero sequence, scroll, column, layout-layer and flow-context cues plus edge index/layout-flow bins.",
+      "args": {
+        "ablate_node_groups": "scroll,sequence,column,layout_layer,flow_context",
+        "ablate_edge_groups": "index_bins,layout_flow"
+      }
+    },
+    {
+      "name": "E00_no_punctuation",
+      "family": "edge_features",
+      "hypothesis": "Terminal punctuation and hyphen probes are critical MERGE boundary signals.",
+      "purpose": "Remove source punctuation and hyphen edge probes.",
+      "args": {
+        "ablate_edge_groups": "punctuation"
+      }
+    },
+    {
+      "name": "E01_no_gutter_overlap",
+      "family": "edge_features",
+      "hypothesis": "Gutter and Y-overlap features suppress cross-column false merge.",
+      "purpose": "Remove y-overlap and x-gutter edge features.",
+      "args": {
+        "ablate_edge_groups": "overlap_gutter"
+      }
+    },
+    {
+      "name": "M07_y_network_gaussian_edge_feature",
+      "family": "architecture",
+      "hypothesis": "A Gaussian proximity cue should improve stability by making physical distance easier for the edge heads and GAT edge MLP to use.",
+      "purpose": "Append runtime gaussian_proximity derived from center_distance; graph tensors stay immutable.",
+      "args": {
+        "gaussian_edge_feature_mode": "center",
+        "gaussian_sigma": 0.1
+      }
+    }
+  ]
+}

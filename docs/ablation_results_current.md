@@ -2,7 +2,23 @@
 
 **Last updated**: 2026-05-14
 
-This file records the current locked GNN ablation state. Raw machine-readable results are stored in:
+This file records the current locked GNN ablation state. The old epigraph
+ablation remains below as historical evidence; the active adapter-aware matrix is
+now:
+
+```text
+configs/ablation_matrix_v7_adapteraware_20260514_2109.json
+data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
+data/09_eval_reports/ablations_v7_adapteraware_20260514_2109
+```
+
+The latest single M05 training run on the adapter-aware relabel is stored in:
+
+```text
+data/09_eval_reports/train_v7_adapteraware_20260514_2109_m05
+```
+
+Previous raw machine-readable ablation results are stored in:
 
 ```text
 data/09_eval_reports/gnn_y_network_compare_20260514/summary.csv
@@ -11,29 +27,46 @@ data/09_eval_reports/gnn_m07_gaussian_20260514/summary.csv
 data/09_eval_reports/gnn_m07_gaussian_20260514/summary.json
 ```
 
-## Dataset
+## Active Dataset
 
 ```text
-manifest: data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
-graph root: data/06_graph_features_v7_ablation_epigraph_20260514_0238
-documents: 1857
-split: document-level 1486 / 186 / 185
-labels: MERGE=1816, PARENT_CHILD=194300, NONE=6243086
+manifest: data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
+graph root: data/06_graph_features/v7_adapteraware_20260514_2109_labeled_graphs
+documents: 1851
+labels: MERGE=1769, PARENT_CHILD=193827, NONE=5887048
 edge_attr_dim: 22
 node_feature_dim: 832
 ```
 
-The dataset includes `message_edge_mask` and `merge_candidate_mask` in graph tensors. Candidate MERGE gating was verified over all 1857 documents:
+The dataset includes `message_edge_mask`, `merge_candidate_mask`, and the
+GNN-view to full-v7 mapping sidecars. Mapping sidecars are excluded from PyG
+batching and used only by inference/generation bridges.
+
+Quality gate summary:
 
 ```text
-total edges: 6,439,202
-gate allowed: 529,465 (8.22%)
-true MERGE: 1,816
-true MERGE allowed: 1,816
-MERGE gate oracle recall: 1.0000
+candidate edge recall: min=0.9887, median=1.0000, mean≈1.0000
+orphan ratio: median=0.0909, p90=0.2364, max=0.3000
 ```
 
-## Locked Comparison
+## Current M05 Adapter-Aware Smoke Result
+
+```text
+best_epoch: 60
+selection_metric: val_positive_macro_f0_5 = 0.8046
+test_f1: 0.8557
+test_positive_macro_f1: 0.7840
+test_positive_macro_f0.5: 0.7915
+test_merge_precision: 0.6250
+test_merge_recall: 0.5700
+test_merge_f0.5: 0.6130
+```
+
+This result is the sanity check that the new adapter-aware label set trains
+cleanly. The full adapter-aware ablation matrix is queued under
+`data/09_eval_reports/ablations_v7_adapteraware_20260514_2109`.
+
+## Previous Locked Comparison
 
 | experiment | MERGE precision | MERGE recall | MERGE F1 | PARENT_CHILD F1 | positive macro F1 | tau_merge | tau_parent |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -47,11 +80,13 @@ MERGE gate oracle recall: 1.0000
 ## Decision
 
 ```text
-Primary model: M05_y_network_dual_head
-Conservative model: M06_y_network_plus_merge_gate
+Primary model family: M05 Y-network with type-aware propagation and hard MERGE gate
+Historical conservative model: M06_y_network_plus_merge_gate
 ```
 
-M05 is the current main architecture because it removes the old tradeoff: MERGE recovers beyond the no-message-passing model while PARENT_CHILD stays near the full GAT model. M06 is useful when downstream rendering needs stricter merge precision and can tolerate slightly lower merge recall.
+M05 remains the current main architecture because it removes the old tradeoff:
+MERGE uses unpolluted local edge-pair features, while PARENT_CHILD still uses
+propagated section/layout context.
 
 M07 adds a runtime Gaussian proximity feature derived from `center_distance`. It improves PARENT_CHILD substantially (`0.9715`) but reduces MERGE recall enough that positive macro F1 stays slightly below M05. Keep M07 as evidence that proximity hints are useful for hierarchy, but do not promote it over M05 unless the downstream priority is PARENT_CHILD stability.
 

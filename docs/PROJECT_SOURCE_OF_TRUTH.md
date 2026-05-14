@@ -75,9 +75,9 @@ scripts/pipeline/train_edge_gnn_full.py
 Ablation:
 
 ```text
-configs/ablation_matrix_v3.json
+configs/ablation_matrix_v7_adapteraware_20260514_2109.json
 scripts/pipeline/prepare_ablation_suite.py
-data/08_runs/run_ablation_matrix_v3.sh
+data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
 ```
 
 E2E inference and visual QA:
@@ -97,23 +97,26 @@ quality reports.
 Current active trainable clean set:
 
 ```text
-data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
-data/06_graph_features_v7_ablation_epigraph_20260514_0238
+data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
+data/06_graph_features/v7_adapteraware_20260514_2109_labeled_graphs
 ```
 
 Current ablation matrix expects:
 
 ```text
-data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
+data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
 ```
 
 Current locked relation model direction:
 
 ```text
-M05_y_network_dual_head
+M05_current_y_network
 ```
 
-M05 keeps GAT message passing for PARENT_CHILD while bypassing it for MERGE, using raw projected edge-pair features for the MERGE logit. M06 adds a hard MERGE gate and is retained as a high-precision conservative variant.
+M05 keeps type-aware GAT message passing for PARENT_CHILD while bypassing it
+for MERGE, using raw projected edge-pair features for the MERGE logit.  The
+hard MERGE gate is part of the current main path, not a separate post-hoc
+cleanup.
 
 ## Runtime Boundaries
 

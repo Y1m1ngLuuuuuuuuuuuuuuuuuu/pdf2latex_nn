@@ -2,7 +2,7 @@
 
 **Last updated**: 2026-05-14
 
-This is the current ablation protocol for the v7 graph-relation model. The filename remains `ablation_plan_v2.md`, but the executable matrix is `configs/ablation_matrix_v3.json`.
+This is the current ablation protocol for the v7 graph-relation model. The filename remains `ablation_plan_v2.md`, but the executable matrix for the adapter-aware run is `configs/ablation_matrix_v7_adapteraware_20260514_2109.json`.
 
 ## Controls
 
@@ -22,51 +22,79 @@ Feature removal is runtime-only. Ablations zero node/edge feature groups during 
 ## Current Matrix
 
 ```text
-configs/ablation_matrix_v3.json
+configs/ablation_matrix_v7_adapteraware_20260514_2109.json
 ```
 
 Current expected manifest:
 
 ```text
-data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
+data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
 ```
 
 Generate commands:
 
 ```bash
-python scripts/pipeline/prepare_ablation_suite.py
+python scripts/pipeline/prepare_ablation_suite.py \
+  --matrix configs/ablation_matrix_v7_adapteraware_20260514_2109.json \
+  --output-sh data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh \
+  --output-json data/09_eval_reports/ablation_matrix_v7_adapteraware_20260514_2109_commands.json
 ```
 
 Generated AutoDL script:
 
 ```text
-data/08_runs/run_ablation_matrix_v3.sh
+data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
 ```
 
 ## Experiment Families
 
 ```text
-M00_full_ce_ohem          full current model
-M01_no_message_passing   remove GAT propagation
-M02_no_symmetry_terms    remove Hu-Hv and Hu*Hv directional terms
-M03_shallow_predictor    replace deep head with a shallow predictor
-M04_type_aware_message_mask
-                          restrict GAT propagation with type/layout mask
-M05_y_network_dual_head  MERGE bypasses GNN; PARENT/NONE use GAT states
-M06_y_network_plus_merge_gate
-                          M05 plus hard physical MERGE gate
-M07_y_network_plus_gaussian_edge_feature
-                          M05 plus runtime gaussian proximity edge feature
-F00_no_scibert           zero semantic node features
-F01_semantic_only        keep semantic features only
-F02_no_reading_flow      remove scroll/sequence/column/flow cues
-F03_raw_mineru_flow      keep flow features but derive them from MinerU order
-E00_no_punctuation       remove terminal punctuation and hyphen probes
-E01_no_gutter_overlap    remove overlap/gutter features
-T00_no_ohem              train without online hard negative mining
+M05_current_y_network              current main model
+A00_old_shared_gat                 old shared-head GAT baseline
+A01_no_message_passing             remove GAT propagation
+A02_no_type_aware_message_mask     let all candidate edges propagate
+F00_no_scibert                     zero semantic node features
+F01_no_geometry_layout             remove geometry/layout/style/flow signals
+F02_no_v7_reading_flow             remove repaired v7 flow cues
+E00_no_punctuation                 remove terminal punctuation and hyphen probes
+E01_no_gutter_overlap              remove overlap/gutter features
+M07_y_network_gaussian_edge_feature runtime gaussian proximity edge feature
 ```
 
-## Latest Locked Results
+## Current Adapter-Aware Relabel Snapshot
+
+Run:
+
+```text
+data/09_eval_reports/train_v7_adapteraware_20260514_2109_m05
+```
+
+Clean dataset:
+
+```text
+documents: 1851
+labels: MERGE=1769, PARENT_CHILD=193827, NONE=5887048
+node_feature_dim: 832
+edge_attr_dim: 22
+candidate_recall_min: 0.9887
+candidate_recall_median: 1.0000
+orphan_ratio_median: 0.0909
+orphan_ratio_max: 0.3000
+```
+
+Locked M05 smoke result on the adapter-aware set:
+
+```text
+best_epoch: 60
+test_f1: 0.8557
+test_positive_macro_f1: 0.7840
+test_positive_macro_f0.5: 0.7915
+test_merge_precision: 0.6250
+test_merge_recall: 0.5700
+test_merge_f0.5: 0.6130
+```
+
+## Previous Locked Results
 
 Run:
 
@@ -94,9 +122,8 @@ labels: MERGE=1816, PARENT_CHILD=194300, NONE=6243086
 Decision:
 
 ```text
-M05_y_network_dual_head is the current main model.
-M06_y_network_plus_merge_gate is retained as a conservative high-precision mode.
-M07_y_network_plus_gaussian_edge_feature is retained as a hierarchy-stability variant, not the default.
+The older epigraph run remains useful as a historical architecture comparison,
+but new tables should be generated from the adapter-aware matrix above.
 ```
 
 ## Metrics
@@ -138,8 +165,8 @@ Only launch after the labeled manifest exists:
 
 ```bash
 cd /root/autodl-tmp/pdf2latex_nn
-nohup bash data/08_runs/run_ablation_matrix_v3.sh \
-  > logs/ablation_matrix_v3_20260514.log 2>&1 &
+nohup bash data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh \
+  > logs/ablation_matrix_v7_adapteraware_20260514_2109.log 2>&1 &
 ```
 
 The generated script sets tokenizer and BLAS thread guards to reduce CPU contention.

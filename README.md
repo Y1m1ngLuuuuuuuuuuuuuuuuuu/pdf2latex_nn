@@ -62,7 +62,9 @@ bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 python scripts/pipeline/train_edge_gnn_full.py ...
 
 # Generate ablation commands
-python scripts/pipeline/prepare_ablation_suite.py
+python scripts/pipeline/prepare_ablation_suite.py \
+  --matrix configs/ablation_matrix_v7_adapteraware_20260514_2109.json \
+  --output-sh data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
 
 # Batch visual QA / E2E inference with the current IR renderer
 python scripts/pipeline/batch_visual_qa_inference.py --renderer ir ...
