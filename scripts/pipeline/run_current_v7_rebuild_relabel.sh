@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-INPUT_MANIFEST="${INPUT_MANIFEST:-data/00_manifests/v7_scope320_floatfix_mergeclean_biofilter_recall98_1976_20260512.json}"
+INPUT_MANIFEST="${INPUT_MANIFEST:-data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json}"
 TAG="${TAG:-v7_current_$(date +%Y%m%d_%H%M%S)}"
 WORKERS="${WORKERS:-4}"
 MAX_DOCS="${MAX_DOCS:-0}"
