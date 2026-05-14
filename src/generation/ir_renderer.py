@@ -117,6 +117,7 @@ class OriginalLikeIRLatexRenderer:
         style: StyleProfile,
         citations: CitationResolution | None = None,
     ) -> str:
+        tree = self._tree_with_missing_referenced_float_nodes(document, tree)
         document_nodes = {node.node_id: node for node in document.nodes}
         render_nodes = {node.render_id: node for node in tree.nodes}
         root = render_nodes[tree.root_id]
@@ -143,6 +144,99 @@ class OriginalLikeIRLatexRenderer:
             lines.append("")
         lines.append(r"\end{document}")
         return "\n".join(lines).rstrip() + "\n"
+
+    def _tree_with_missing_referenced_float_nodes(self, document: DocumentIR, tree: RenderTreeIR) -> RenderTreeIR:
+        registry = self._active_cross_refs
+        if registry is None:
+            return tree
+        referenced_labels = registry.referenced_labels(document)
+        if not referenced_labels:
+            return tree
+
+        used_source_ids = {source_id for node in tree.nodes for source_id in node.source_node_ids}
+        document_nodes = {node.node_id: node for node in document.nodes}
+        used_figure_groups = {
+            group_id
+            for source_id in used_source_ids
+            for source in [document_nodes.get(source_id)]
+            if source is not None and source.node_type == BlockType.FIGURE
+            for group_id in [_figure_group_id(source)]
+            if group_id
+        }
+        used_table_groups = {
+            str(source.metadata.get("table_group_id"))
+            for source_id in used_source_ids
+            for source in [document_nodes.get(source_id)]
+            if source is not None
+            and source.node_type == BlockType.TABLE
+            and source.metadata.get("table_group_id") is not None
+        }
+
+        additions: list[RenderTreeNode] = []
+        for source in sorted(document.nodes, key=lambda item: item.reading_index):
+            kind = _document_node_cross_ref_kind(source)
+            if kind is None:
+                continue
+            label = registry.label_for_node(source.node_id, kind=kind)
+            if not label or label not in referenced_labels or source.node_id in used_source_ids:
+                continue
+            if source.node_type == BlockType.FIGURE:
+                group_id = _figure_group_id(source)
+                if group_id and group_id in used_figure_groups:
+                    continue
+                if _is_nonprimary_figure_group_member(source):
+                    continue
+                if group_id:
+                    used_figure_groups.add(group_id)
+            if source.node_type == BlockType.TABLE:
+                group_id = source.metadata.get("table_group_id")
+                if group_id is not None and str(group_id) in used_table_groups:
+                    continue
+                if source.metadata.get("table_group_primary") is False:
+                    continue
+                if group_id is not None:
+                    used_table_groups.add(str(group_id))
+            role = _render_role_for_cross_ref_kind(kind)
+            if role is None:
+                continue
+            additions.append(
+                RenderTreeNode(
+                    render_id=f"full_v7_ref_float_{_safe_render_id(source.node_id)}",
+                    role=role,
+                    source_node_ids=[source.node_id],
+                    attributes={"injected_reason": "referenced_float_missing_from_tree"},
+                )
+            )
+            used_source_ids.add(source.node_id)
+        if not additions:
+            return tree
+
+        addition_ids = [node.render_id for node in additions]
+        updated_nodes: list[RenderTreeNode] = []
+        for node in tree.nodes:
+            if node.render_id != tree.root_id:
+                updated_nodes.append(node)
+                continue
+            updated_nodes.append(
+                RenderTreeNode(
+                    render_id=node.render_id,
+                    role=node.role,
+                    source_node_ids=node.source_node_ids,
+                    text=node.text,
+                    latex=node.latex,
+                    children=list(dict.fromkeys([*node.children, *addition_ids])),
+                    attributes=node.attributes,
+                )
+            )
+        return RenderTreeIR(
+            doc_id=tree.doc_id,
+            root_id=tree.root_id,
+            nodes=[*updated_nodes, *additions],
+            document_ir_path=tree.document_ir_path,
+            predicted_relations_path=tree.predicted_relations_path,
+            style_profile_path=tree.style_profile_path,
+            metadata={**tree.metadata, "referenced_float_fallback_count": len(additions)},
+        )
 
     def _render_preamble(self, style: StyleProfile, citations: CitationResolution | None = None) -> list[str]:
         options = f"[{','.join(style.documentclass_options)}]" if style.documentclass_options else ""
@@ -1395,6 +1489,22 @@ class _CrossReferenceRegistry:
 
         return _CROSS_REF_TEXT_RE.sub(replacer, value)
 
+    def referenced_labels(self, document: DocumentIR) -> set[str]:
+        labels: set[str] = set()
+        if not self.labels_by_kind_number:
+            return labels
+        for node in document.nodes:
+            if node.node_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.EQUATION, BlockType.ALGORITHM, BlockType.REFERENCE}:
+                continue
+            value = str(node.text or "")
+            for match in _CROSS_REF_TEXT_RE.finditer(value):
+                kind = _cross_ref_kind_from_name(match.group("name"))
+                number = _normalize_cross_ref_number(match.group("number"))
+                label = self.labels_by_kind_number.get((kind, number.casefold()))
+                if label:
+                    labels.add(label)
+        return labels
+
 
 def _document_node_cross_ref_kind(node: DocumentNode) -> str | None:
     if node.node_type == BlockType.FIGURE:
@@ -1417,6 +1527,18 @@ def _render_role_cross_ref_kind(role: RenderRole) -> str | None:
         return "equation"
     if role == RenderRole.ALGORITHM:
         return "algorithm"
+    return None
+
+
+def _render_role_for_cross_ref_kind(kind: str) -> RenderRole | None:
+    if kind == "figure":
+        return RenderRole.FIGURE
+    if kind == "table":
+        return RenderRole.TABLE
+    if kind == "equation":
+        return RenderRole.DISPLAY_EQUATION
+    if kind == "algorithm":
+        return RenderRole.ALGORITHM
     return None
 
 
@@ -1522,6 +1644,10 @@ def _sanitize_cross_ref_number(value: str) -> str:
 
 def _sanitize_cross_ref_label(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z:._-]+", "_", str(value or "").strip()).strip("_")
+
+
+def _safe_render_id(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_.-]+", "_", str(value or "").strip()).strip("_") or "unknown"
 
 
 NOTE_MARKER_RE = re.compile(

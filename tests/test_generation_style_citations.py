@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from src.generation.citations import CitationResolver, expand_citation_labels, strip_reference_label
+from src.generation.citations import CitationResolver, expand_citation_labels, sanitize_bbl_bibitem_keys, strip_reference_label
 from src.generation.ir_renderer import IRLatexRenderConfig, OriginalLikeIRLatexRenderer
 from src.generation.latex_renderer import render_equation, render_inline_math, render_text_with_inline_latex
 from src.generation.render_surface import render_original_like_document
@@ -1268,6 +1268,64 @@ def test_original_like_ir_renderer_emits_float_equation_algorithm_labels_and_rew
     assert r"\label{tab:2}" in tex
     assert r"\label{eq:4}" in tex
     assert r"\label{alg:1}" in tex
+
+
+def test_source_bbl_keys_are_sanitized_to_match_repaired_cites():
+    raw = r"""
+\begin{thebibliography}{1}
+\bibitem[Demo, 2024]{10.5555/3618408.3619982}
+Demo reference.
+\end{thebibliography}
+"""
+
+    repaired = sanitize_bbl_bibitem_keys(raw)
+
+    assert r"\bibitem[Demo, 2024]{ref_10.5555_3618408.3619982}" in repaired
+    assert r"\bibitem[Demo, 2024]{10.5555/3618408.3619982}" not in repaired
+
+
+def test_original_like_ir_renderer_injects_referenced_float_missing_from_tree():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="See Figure 1 for details.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="fig",
+            node_type=BlockType.FIGURE,
+            text="Figure 1: Missing from decoder tree.",
+            page_idx=0,
+            bboxes=[BBox(100, 200, 500, 400)],
+            reading_index=1,
+            metadata={"figure_caption": "Figure 1: Missing from decoder tree."},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="missing_ref_float",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="missing_ref_float",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["body"]),
+            RenderTreeNode(render_id="body", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"Figure \ref{fig:1}" in tex
+    assert r"\caption{Missing from decoder tree}" in tex
+    assert r"\label{fig:1}" in tex
 
 
 def test_original_like_ir_renderer_groups_list_siblings_and_keeps_equation_inside_item():

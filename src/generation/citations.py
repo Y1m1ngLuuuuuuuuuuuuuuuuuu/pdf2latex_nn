@@ -144,10 +144,11 @@ class CitationResolver:
         if bbl_path is None:
             return None
         raw_latex = bbl_path.read_text(encoding="utf-8", errors="replace")
+        raw_latex = sanitize_bbl_bibitem_keys(normalize_bbl_latex(raw_latex))
         entries = parse_bbl_entries(raw_latex)
         if not entries:
             return None
-        return _SourceBibliography(path=bbl_path, raw_latex=normalize_bbl_latex(raw_latex), entries=entries)
+        return _SourceBibliography(path=bbl_path, raw_latex=raw_latex, entries=entries)
 
     def _extract_bibliography_entries(self, document: DocumentIR) -> list[BibliographyEntry]:
         entries: list[BibliographyEntry] = []
@@ -308,6 +309,27 @@ def parse_bbl_entries(raw_latex: str) -> list[BibliographyEntry]:
             )
         )
     return entries
+
+
+def sanitize_bbl_bibitem_keys(raw_latex: str) -> str:
+    r"""Rewrite source ``.bbl`` item keys with the same sanitizer used by cites.
+
+    BibTeX allows keys such as DOI strings containing ``/``.  LaTeX accepts
+    them in many contexts, but our OCR citation repair emits sanitized cite
+    keys.  If we render the raw ``.bbl`` unchanged, the generated document
+    contains ``\cite{ref_10.5555_...}`` pointing at ``\bibitem{10.5555/...}``.
+    Sanitizing the raw bibliography command keeps hyperlinks and references
+    connected while preserving the entry body verbatim.
+    """
+
+    value = normalize_bbl_latex(raw_latex)
+
+    def replacer(match: re.Match[str]) -> str:
+        display = match.group("display")
+        optional = f"[{display}]" if display is not None else ""
+        return rf"\bibitem{optional}{{{sanitize_citation_key(match.group('key'))}}}"
+
+    return BBL_BIBITEM_RE.sub(replacer, value)
 
 
 def _bibliography_end_start(value: str, fallback: int) -> int:
