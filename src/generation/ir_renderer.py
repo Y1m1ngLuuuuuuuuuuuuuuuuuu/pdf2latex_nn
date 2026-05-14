@@ -170,6 +170,18 @@ class OriginalLikeIRLatexRenderer:
             and source.metadata.get("table_group_id") is not None
         }
 
+        source_to_render_id = {
+            source_id: node.render_id
+            for node in tree.nodes
+            for source_id in node.source_node_ids
+        }
+        parent_by_child_id = {
+            child_id: node.render_id
+            for node in tree.nodes
+            for child_id in node.children
+        }
+        insert_after: dict[str, list[tuple[str, str]]] = {}
+        root_addition_ids: list[str] = []
         additions: list[RenderTreeNode] = []
         for source in sorted(document.nodes, key=lambda item: item.reading_index):
             kind = _document_node_cross_ref_kind(source)
@@ -201,30 +213,53 @@ class OriginalLikeIRLatexRenderer:
             role = _render_role_for_cross_ref_kind(kind)
             if role is None:
                 continue
+            attributes: dict[str, Any] = {
+                "injected_reason": (
+                    "referenced_float_missing_from_tree"
+                    if is_referenced_structural
+                    else "full_v7_float_missing_from_tree"
+                )
+            }
+            render_id = f"full_v7_ref_float_{_safe_render_id(source.node_id)}"
+            if is_referenced_structural and label:
+                anchor = registry.first_referencing_node(document, label)
+                anchor_render_id = source_to_render_id.get(anchor.node_id) if anchor is not None else None
+                if anchor is not None and anchor_render_id:
+                    attributes["render_order_bias"] = float(anchor.reading_index) + 0.01 + (len(additions) * 0.001)
+                    parent_id = parent_by_child_id.get(anchor_render_id, tree.root_id)
+                    insert_after.setdefault(parent_id, []).append((anchor_render_id, render_id))
+                else:
+                    root_addition_ids.append(render_id)
+            else:
+                root_addition_ids.append(render_id)
             additions.append(
                 RenderTreeNode(
-                    render_id=f"full_v7_ref_float_{_safe_render_id(source.node_id)}",
+                    render_id=render_id,
                     role=role,
                     source_node_ids=[source.node_id],
-                    attributes={
-                        "injected_reason": (
-                            "referenced_float_missing_from_tree"
-                            if is_referenced_structural
-                            else "full_v7_float_missing_from_tree"
-                        )
-                    },
+                    attributes=attributes,
                 )
             )
             used_source_ids.add(source.node_id)
         if not additions:
             return tree
 
-        addition_ids = [node.render_id for node in additions]
         updated_nodes: list[RenderTreeNode] = []
         for node in tree.nodes:
-            if node.render_id != tree.root_id:
-                updated_nodes.append(node)
-                continue
+            children = list(node.children)
+            if node.render_id in insert_after:
+                pending = list(insert_after[node.render_id])
+                rebuilt: list[str] = []
+                for child_id in children:
+                    rebuilt.append(child_id)
+                    for anchor_id, addition_id in pending:
+                        if anchor_id == child_id:
+                            rebuilt.append(addition_id)
+                consumed = {addition_id for anchor_id, addition_id in pending if anchor_id in set(children)}
+                rebuilt.extend(addition_id for _, addition_id in pending if addition_id not in consumed)
+                children = rebuilt
+            if node.render_id == tree.root_id and root_addition_ids:
+                children.extend(root_addition_ids)
             updated_nodes.append(
                 RenderTreeNode(
                     render_id=node.render_id,
@@ -232,7 +267,7 @@ class OriginalLikeIRLatexRenderer:
                     source_node_ids=node.source_node_ids,
                     text=node.text,
                     latex=node.latex,
-                    children=list(dict.fromkeys([*node.children, *addition_ids])),
+                    children=list(dict.fromkeys(children)),
                     attributes=node.attributes,
                 )
             )
@@ -1513,6 +1548,20 @@ class _CrossReferenceRegistry:
                     labels.add(label)
         return labels
 
+    def first_referencing_node(self, document: DocumentIR, label: str) -> DocumentNode | None:
+        if not label:
+            return None
+        for node in sorted(document.nodes, key=lambda item: item.reading_index):
+            if node.node_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.EQUATION, BlockType.ALGORITHM, BlockType.REFERENCE}:
+                continue
+            value = str(node.text or "")
+            for match in _CROSS_REF_TEXT_RE.finditer(value):
+                kind = _cross_ref_kind_from_name(match.group("name"))
+                number = _normalize_cross_ref_number(match.group("number"))
+                if self.labels_by_kind_number.get((kind, number.casefold())) == label:
+                    return node
+        return None
+
 
 def _document_node_cross_ref_kind(node: DocumentNode) -> str | None:
     if node.node_type == BlockType.FIGURE:
@@ -2096,7 +2145,7 @@ def _render_node_order_key(
 ) -> tuple[int, float, str]:
     bias = _numeric_value(node.attributes.get("render_order_bias"))
     if bias is not None:
-        return (-1, bias, node.render_id)
+        return (0, bias, node.render_id)
     indexes = [
         document_nodes[node_id].reading_index
         for node_id in node.source_node_ids

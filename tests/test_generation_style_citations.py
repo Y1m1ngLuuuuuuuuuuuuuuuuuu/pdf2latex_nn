@@ -1328,6 +1328,58 @@ def test_original_like_ir_renderer_injects_referenced_float_missing_from_tree():
     assert r"\label{fig:1}" in tex
 
 
+def test_original_like_ir_renderer_places_referenced_missing_table_after_first_reference():
+    nodes = [
+        DocumentNode(
+            node_id="p1",
+            node_type=BlockType.TEXT,
+            text="The first result is shown in Table 1.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="p2",
+            node_type=BlockType.TEXT,
+            text="The second paragraph should stay after the table.",
+            page_idx=0,
+            bboxes=[BBox(80, 150, 900, 180)],
+            reading_index=1,
+        ),
+        DocumentNode(
+            node_id="tab",
+            node_type=BlockType.TABLE,
+            text="Table 1: Deferred table.",
+            page_idx=0,
+            bboxes=[BBox(100, 500, 700, 700)],
+            reading_index=99,
+            metadata={"table_caption": "Table 1: Deferred table."},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="referenced_table_anchor",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="referenced_table_anchor",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p1", "p2"]),
+            RenderTreeNode(render_id="p1", role=RenderRole.PARAGRAPH, source_node_ids=["p1"]),
+            RenderTreeNode(render_id="p2", role=RenderRole.PARAGRAPH, source_node_ids=["p2"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert tex.index(r"Table \ref{tab:1}") < tex.index(r"\caption{Deferred table}")
+    assert tex.index(r"\caption{Deferred table}") < tex.index("The second paragraph should stay after the table")
+
+
 def test_original_like_ir_renderer_injects_missing_table_even_without_reference():
     nodes = [
         DocumentNode(
