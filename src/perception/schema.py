@@ -80,6 +80,7 @@ LAYOUT_LAYER_VOCAB = [
     "main_text_flow",
     "math_layer",
     "float_layer",
+    "annotation_layer",
     "metadata_layer",
     "noise_layer",
     "other_layer",

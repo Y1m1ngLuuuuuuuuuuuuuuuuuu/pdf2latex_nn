@@ -249,6 +249,8 @@ def build_graph_from_content_v7(input_path: Path, output_path: Path, config: Gra
         scroll_layout=scroll_layout,
     )
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    data.message_edge_mask = build_message_edge_mask(items, edge_pairs=edge_pairs)
+    data.merge_candidate_mask = build_merge_candidate_mask(items, edge_pairs=edge_pairs)
     data.edge_source_types = [source_type for _, _, source_type in edge_pairs]
     data.node_records = make_node_records(
         items,
@@ -754,6 +756,33 @@ def v7_reading_order_indices(items: list[dict[str, Any]]) -> list[int]:
     return sort_node_indices_by_reading_order(items)
 
 
+def original_index_reading_order_indices(items: list[dict[str, Any]]) -> list[int]:
+    """Return the order closest to MinerU's original per-page extraction order.
+
+    This is intentionally different from :func:`v7_reading_order_indices`: it
+    ignores the repaired ``layout_flow_order`` and only uses the raw source
+    order preserved by the v7 adapter.  It is used for the Raw-MinerU-Flow
+    ablation, where we want to keep reading-flow features but derive them from
+    MinerU's uncorrected order.
+    """
+
+    def key(pair: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        idx, item = pair
+        page_idx = int_value(item.get("page_idx"), default=0)
+        original = item.get("original_index")
+        if not isinstance(original, int):
+            original = item.get("original_order")
+        if not isinstance(original, int):
+            original = item.get("block_idx")
+        if not isinstance(original, int):
+            original = item.get("global_order")
+        if not isinstance(original, int):
+            original = idx
+        return page_idx, int(original), idx
+
+    return [idx for idx, _ in sorted(enumerate(items), key=key)]
+
+
 def idx_fallback(pair: tuple[int, dict[str, Any]]) -> int:
     return pair[0]
 
@@ -779,6 +808,152 @@ def build_edge_index_from_pairs(edge_pairs: list[tuple[int, int, str]]) -> Any:
     if not edge_pairs:
         return torch.empty((2, 0), dtype=torch.long)
     return torch.tensor([(source, target) for source, target, _ in edge_pairs], dtype=torch.long).t().contiguous()
+
+
+def build_message_edge_mask(
+    items: list[dict[str, Any]],
+    *,
+    edge_pairs: list[tuple[int, int, str]] | None = None,
+    edge_index: Any | None = None,
+    edge_source_types: list[str] | tuple[str, ...] | None = None,
+) -> Any:
+    """Return a boolean propagation mask for type-aware message passing.
+
+    Candidate edges still define the classifier's full decision surface. This
+    mask only controls which edges participate in GAT node-state updates, so
+    float/table/equation/noise objects can remain classifiable without pouring
+    their visual/OCR semantics into ordinary text paragraphs.
+    """
+
+    import torch
+
+    if edge_pairs is None:
+        if edge_index is None:
+            edge_pairs = build_candidate_edge_pairs(items)
+        else:
+            edge_index_cpu = edge_index.detach().cpu() if hasattr(edge_index, "detach") else edge_index
+            edge_count = int(edge_index_cpu.shape[1]) if getattr(edge_index_cpu, "ndim", 0) == 2 else 0
+            edge_pairs = []
+            for edge_pos in range(edge_count):
+                source_type = ""
+                if edge_source_types is not None and edge_pos < len(edge_source_types):
+                    source_type = str(edge_source_types[edge_pos])
+                edge_pairs.append((int(edge_index_cpu[0, edge_pos]), int(edge_index_cpu[1, edge_pos]), source_type))
+
+    rows = [
+        allow_message_passing_edge(items[source_idx], items[target_idx], source_type=source_type)
+        for source_idx, target_idx, source_type in edge_pairs
+    ]
+    return torch.tensor(rows, dtype=torch.bool)
+
+
+def build_merge_candidate_mask(
+    items: list[dict[str, Any]],
+    *,
+    edge_pairs: list[tuple[int, int, str]] | None = None,
+    edge_index: Any | None = None,
+) -> Any:
+    """Return a boolean class-specific gate for MERGE predictions.
+
+    Candidate edges are intentionally over-complete so PARENT_CHILD recall
+    stays high. MERGE is much more fragile: many graph edges are useful
+    structural candidates but physically impossible paragraph contractions.
+    This mask lets the model suppress only the MERGE logit while preserving the
+    same edge for PARENT_CHILD/NONE classification.
+    """
+
+    import torch
+
+    if edge_pairs is None:
+        if edge_index is None:
+            edge_pairs = build_candidate_edge_pairs(items)
+        else:
+            edge_index_cpu = edge_index.detach().cpu() if hasattr(edge_index, "detach") else edge_index
+            edge_count = int(edge_index_cpu.shape[1]) if getattr(edge_index_cpu, "ndim", 0) == 2 else 0
+            edge_pairs = [
+                (int(edge_index_cpu[0, edge_pos]), int(edge_index_cpu[1, edge_pos]), "")
+                for edge_pos in range(edge_count)
+            ]
+
+    rows = [allow_merge_candidate_edge(items[source_idx], items[target_idx]) for source_idx, target_idx, _ in edge_pairs]
+    return torch.tensor(rows, dtype=torch.bool)
+
+
+def allow_merge_candidate_edge(source: dict[str, Any], target: dict[str, Any]) -> bool:
+    """TreeDecoder-compatible MERGE gate used during model training/inference."""
+
+    try:
+        from src.reasoning.postprocess import can_contract_merge_records
+
+        return bool(can_contract_merge_records(source, target))
+    except Exception:
+        return _fallback_allow_merge_candidate_edge(source, target)
+
+
+def _fallback_allow_merge_candidate_edge(source: dict[str, Any], target: dict[str, Any]) -> bool:
+    source_type = canonical_type(source)
+    target_type = canonical_type(target)
+    if source_type not in {"text", "reference"} or target_type not in {"text", "reference"}:
+        return False
+    if layout_layer_name(source) != layout_layer_name(target):
+        return False
+    if layout_layer_name(source) not in {"main_text_flow", "math_layer"} and source_type != "reference":
+        return False
+    if LIST_MARKER_RE.match(_item_text(target)):
+        return False
+    return not (
+        bbox_y_overlap_ratio(_last_bbox(source.get("bbox")) or (0.0, 0.0, 0.0, 0.0), _first_bbox(target.get("bbox")) or (0.0, 0.0, 0.0, 0.0)) > 0.10
+        and bbox_x_gap(_last_bbox(source.get("bbox")) or (0.0, 0.0, 0.0, 0.0), _first_bbox(target.get("bbox")) or (0.0, 0.0, 0.0, 0.0)) > 0.05 * PAGE_SIZE
+    )
+
+
+def allow_message_passing_edge(source: dict[str, Any], target: dict[str, Any], *, source_type: str = "") -> bool:
+    """Heuristic type/layer gate for clean propagation edges."""
+
+    source_layer = layout_layer_name(source)
+    target_layer = layout_layer_name(target)
+    if source_layer == "noise_layer" or target_layer == "noise_layer":
+        return False
+
+    source_type_name = canonical_type(source)
+    target_type_name = canonical_type(target)
+    source_role = str(source.get("layout_role") or "").casefold()
+    target_role = str(target.get("layout_role") or "").casefold()
+    source_is_title = source_type_name == "title"
+    target_is_title = target_type_name == "title"
+    source_is_caption = source_role.endswith("_caption")
+    target_is_caption = target_role.endswith("_caption")
+    source_is_text = source_type_name in {"text", "list", "reference"}
+    target_is_text = target_type_name in {"text", "list", "reference"}
+    source_is_float = source_type_name in {"figure", "table", "algorithm", "code"} or source_layer == "float_layer"
+    target_is_float = target_type_name in {"figure", "table", "algorithm", "code"} or target_layer == "float_layer"
+    source_is_math = source_type_name == "equation" or source_layer == "math_layer"
+    target_is_math = target_type_name == "equation" or target_layer == "math_layer"
+
+    if source_layer == "annotation_layer" or target_layer == "annotation_layer":
+        return source_layer == target_layer
+    if source_layer == "metadata_layer" or target_layer == "metadata_layer":
+        return source_layer == target_layer
+
+    if source_is_caption and target_is_float:
+        return True
+    if source_is_float and target_is_caption:
+        return True
+    if source_is_float or target_is_float:
+        return source_is_float and target_is_float
+
+    if source_is_title:
+        return target_is_title or target_is_text or target_is_math
+    if target_is_title:
+        return source_is_title
+
+    if source_is_math or target_is_math:
+        return (source_is_math and target_is_math) or (source_is_text and target_is_math)
+
+    if source_is_text and target_is_text:
+        return True
+
+    return source_layer == target_layer and source_layer == LAYOUT_LAYER_MAIN_TEXT
 
 
 def build_node_feature_schema() -> dict[str, dict[str, Any]]:
@@ -2033,6 +2208,8 @@ def _is_algorithm_io_label(text: str) -> bool:
 
 
 def _item_text(item: dict[str, Any]) -> str:
+    if canonical_type(item) == "table":
+        return _table_caption_text(item)
     for key in ("text_for_embedding", "text", "content", "latex"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
@@ -2040,6 +2217,26 @@ def _item_text(item: dict[str, Any]) -> str:
     span_text = style_spans_text(item.get("style_spans"))
     if span_text:
         return span_text
+    return ""
+
+
+def _table_caption_text(item: dict[str, Any]) -> str:
+    """Return only table caption text for semantic features.
+
+    Table cell OCR/HTML is intentionally excluded from SciBERT and edge text
+    probes.  The table body is visually reconstructed from crops downstream;
+    passing it through the relation model makes table-heavy pages look like
+    ordinary prose and pollutes MERGE/PARENT supervision.
+    """
+
+    for key in ("table_group_caption", "table_caption", "caption"):
+        value = item.get(key)
+        if isinstance(value, list):
+            text = " ".join(str(part).strip() for part in value if str(part).strip()).strip()
+        else:
+            text = str(value or "").strip()
+        if text:
+            return text
     return ""
 
 
@@ -2103,6 +2300,8 @@ def text_for_embedding(item: dict[str, Any]) -> str:
     type_name = canonical_type(item)
     if type_name == "reference":
         return PLACEHOLDER_TEXT[type_name]
+    if type_name == "table":
+        return _table_caption_text(item) or PLACEHOLDER_TEXT[type_name]
     text = _item_text(item).strip()
     if text:
         return text

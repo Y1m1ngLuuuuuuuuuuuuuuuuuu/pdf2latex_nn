@@ -120,6 +120,10 @@ class EdgeGATConfig:
     predictor_hidden_dims: tuple[int, ...] = (1024, 512, 128)
     predictor_layer_norm: bool = True
     edge_feature_mode: str = "full"
+    prediction_architecture: str = "shared"
+    message_edge_mode: str = "all"
+    merge_gate_mode: str = "none"
+    merge_gate_logit: float = -20.0
     disabled_node_feature_ranges: tuple[tuple[int, int], ...] = ()
     disabled_edge_attr_indices: tuple[int, ...] = ()
 
@@ -153,34 +157,108 @@ class EdgeRelationGAT(_MODULE_BASE):
             )
             in_dim = self.config.hidden_dim * self.config.heads
         self.convs = nn.ModuleList(convs)
-        self.edge_feature_dim = self._edge_feature_dim(in_dim)
-        self.edge_head = build_edge_predictor_head(
-            input_dim=self.edge_feature_dim,
-            hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
-            num_classes=self.config.num_classes,
-            dropout=self.config.dropout,
-            layer_norm=getattr(self.config, "predictor_layer_norm", True),
-        )
+        self.gnn_node_dim = in_dim
+        self.raw_node_dim = self.config.projected_node_dim
+        architecture = getattr(self.config, "prediction_architecture", "shared")
+        if architecture == "shared":
+            self.edge_feature_dim = self._edge_feature_dim(self.gnn_node_dim)
+            self.edge_head = build_edge_predictor_head(
+                input_dim=self.edge_feature_dim,
+                hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
+                num_classes=self.config.num_classes,
+                dropout=self.config.dropout,
+                layer_norm=getattr(self.config, "predictor_layer_norm", True),
+            )
+        elif architecture == "y_network":
+            self.merge_edge_feature_dim = self._edge_feature_dim(self.raw_node_dim)
+            self.parent_edge_feature_dim = self._edge_feature_dim(self.gnn_node_dim)
+            self.merge_head = build_edge_predictor_head(
+                input_dim=self.merge_edge_feature_dim,
+                hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
+                num_classes=1,
+                dropout=self.config.dropout,
+                layer_norm=getattr(self.config, "predictor_layer_norm", True),
+            )
+            self.parent_none_head = build_edge_predictor_head(
+                input_dim=self.parent_edge_feature_dim,
+                hidden_dims=getattr(self.config, "predictor_hidden_dims", (1024, 512, 128)),
+                num_classes=max(1, self.config.num_classes - 1),
+                dropout=self.config.dropout,
+                layer_norm=getattr(self.config, "predictor_layer_norm", True),
+            )
+            # Keep this attribute for tooling/tests that inspect the relation
+            # feature width. It refers to the propagated parent/none tower.
+            self.edge_feature_dim = self.parent_edge_feature_dim
+        else:
+            raise ValueError(f"Unknown prediction_architecture: {architecture}")
 
-    def forward(self, data=None, *, x=None, edge_index=None, edge_attr=None):  # type: ignore[no-untyped-def]
+    def forward(
+        self,
+        data=None,
+        *,
+        x=None,
+        edge_index=None,
+        edge_attr=None,
+        message_edge_mask=None,
+        merge_candidate_mask=None,
+    ):  # type: ignore[no-untyped-def]
         if data is not None:
             x = data.x
             edge_index = data.edge_index
             edge_attr = data.edge_attr
+            message_edge_mask = getattr(data, "message_edge_mask", message_edge_mask)
+            merge_candidate_mask = getattr(data, "merge_candidate_mask", merge_candidate_mask)
         if x is None or edge_index is None or edge_attr is None:
             raise ValueError("EdgeRelationGAT.forward requires data or x/edge_index/edge_attr")
 
         x, edge_attr = self._mask_inputs(x, edge_attr)
         edge_attr = self._align_edge_attr(edge_attr)
-        h = self.projector(x)
+        h_raw = self.projector(x)
+        h = h_raw
+        conv_edge_index, conv_edge_attr = self._message_passing_edges(edge_index, edge_attr, message_edge_mask)
         for conv in self.convs:
-            h = conv(h, edge_index, edge_attr=edge_attr)
+            h = conv(h, conv_edge_index, edge_attr=conv_edge_attr)
             h = F.relu(h)
             h = F.dropout(h, p=self.config.dropout, training=self.training)
 
         source, target = edge_index
-        edge_features = self._build_edge_features(h, source, target, edge_attr)
-        return self.edge_head(edge_features)
+        architecture = getattr(self.config, "prediction_architecture", "shared")
+        if architecture == "shared":
+            edge_features = self._build_edge_features(h, source, target, edge_attr)
+            logits = self.edge_head(edge_features)
+        elif architecture == "y_network":
+            merge_features = self._build_edge_features(h_raw, source, target, edge_attr)
+            parent_features = self._build_edge_features(h, source, target, edge_attr)
+            merge_logit = self.merge_head(merge_features)
+            parent_none_logits = self.parent_none_head(parent_features)
+            logits = torch.cat([merge_logit, parent_none_logits], dim=-1)
+        else:  # pragma: no cover - guarded during initialization.
+            raise ValueError(f"Unknown prediction_architecture: {architecture}")
+        return self._apply_merge_gate(logits, merge_candidate_mask)
+
+    def _message_passing_edges(self, edge_index, edge_attr, message_edge_mask):  # type: ignore[no-untyped-def]
+        """Return the propagation-only graph.
+
+        Edge classification still uses the full candidate graph.  When
+        ``message_edge_mode=type_aware``, GAT node updates are restricted to
+        ``data.message_edge_mask`` so structural/float/noise nodes do not
+        pollute ordinary text states.
+        """
+
+        mode = getattr(self.config, "message_edge_mode", "all")
+        if mode == "all":
+            return edge_index, edge_attr
+        if mode != "type_aware":
+            raise ValueError(f"Unknown message_edge_mode: {mode}")
+        if message_edge_mask is None:
+            return edge_index, edge_attr
+        mask = message_edge_mask.to(device=edge_index.device, dtype=torch.bool).flatten()
+        edge_count = int(edge_index.shape[1])
+        if int(mask.numel()) != edge_count:
+            raise ValueError(f"message_edge_mask length {int(mask.numel())} does not match edge_count {edge_count}")
+        if int(mask.sum().item()) == 0:
+            return edge_index[:, :0], edge_attr[:0]
+        return edge_index[:, mask], edge_attr[mask]
 
     def _mask_inputs(self, x, edge_attr):  # type: ignore[no-untyped-def]
         """Apply checkpoint-stored feature ablations without mutating graph data."""
@@ -230,6 +308,34 @@ class EdgeRelationGAT(_MODULE_BASE):
         if mode == "simple_concat":
             return int(node_dim) * 2 + self.config.edge_dim
         raise ValueError(f"Unknown edge_feature_mode: {mode}")
+
+    def _apply_merge_gate(self, logits, merge_candidate_mask):  # type: ignore[no-untyped-def]
+        """Optionally suppress MERGE for physically impossible candidate edges.
+
+        This is class-specific gating, not edge pruning: the edge remains
+        available for PARENT_CHILD/NONE classification, but the MERGE logit is
+        clamped to a very low value when the upstream layout gate says this pair
+        cannot be safely contracted.
+        """
+
+        mode = getattr(self.config, "merge_gate_mode", "none")
+        if mode == "none" or merge_candidate_mask is None or int(logits.shape[1]) == 0:
+            return logits
+        if mode != "hard":
+            raise ValueError(f"Unknown merge_gate_mode: {mode}")
+        mask = merge_candidate_mask.to(device=logits.device, dtype=torch.bool).flatten()
+        edge_count = int(logits.shape[0])
+        if int(mask.numel()) != edge_count:
+            raise ValueError(f"merge_candidate_mask length {int(mask.numel())} does not match edge_count {edge_count}")
+        if int(logits.shape[1]) < 1:
+            return logits
+        gated = logits.clone()
+        gated[:, 0] = torch.where(
+            mask,
+            gated[:, 0],
+            torch.full_like(gated[:, 0], float(getattr(self.config, "merge_gate_logit", -20.0))),
+        )
+        return gated
 
     def _align_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
         """Pad or truncate runtime edge attributes to the checkpoint config."""

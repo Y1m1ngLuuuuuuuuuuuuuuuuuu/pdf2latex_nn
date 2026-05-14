@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges
+from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges, pdf_item_text
 from src.reasoning.tex_ast_builder import build_tex_ast, tex_nodes_by_id
 
 
@@ -13,6 +13,17 @@ def has_torch_and_pyg():
     except ModuleNotFoundError:
         return False
     return True
+
+
+def test_pdf_item_text_uses_table_caption_not_cell_body():
+    item = {
+        "type": "table",
+        "text_for_embedding": "Table 2: Results\nA B C 1 2 3",
+        "table_caption": "Table 2: Results",
+        "table_body": "A B C 1 2 3",
+    }
+
+    assert pdf_item_text(item) == "Table 2: Results"
 
 
 def test_label_graph_edges_falls_back_to_none_for_low_similarity_orphans(tmp_path):

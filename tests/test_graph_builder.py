@@ -101,3 +101,107 @@ def test_edge_relation_gat_edge_head_uses_symmetry_breaking_features():
     assert model.edge_head[0].in_features == config.hidden_dim * config.heads * 4 + config.edge_dim
     assert model.edge_head[0].out_features == 1024
     assert features.tolist() == [[1.0, 2.0, 3.0, 5.0, -2.0, -3.0, 3.0, 10.0, 0.25, 0.5]]
+
+
+def test_edge_relation_gat_uses_message_edge_mask_only_for_propagation():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    from src.perception.schema import FeatureTensorSchema
+    from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig
+
+    config = EdgeGATConfig(
+        node_projector=FeatureProjectorConfig(semantic_hidden_dim=16, layout_hidden_dim=8, dropout=0.0),
+        hidden_dim=8,
+        heads=2,
+        num_layers=1,
+        dropout=0.0,
+        message_edge_mode="type_aware",
+    )
+    model = EdgeRelationGAT(config)
+    data = Data(
+        x=torch.randn(3, FeatureTensorSchema().node_feature_dim),
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
+        edge_attr=torch.randn(3, config.edge_dim),
+        message_edge_mask=torch.tensor([True, False, True], dtype=torch.bool),
+    )
+
+    conv_edge_index, conv_edge_attr = model._message_passing_edges(
+        data.edge_index,
+        data.edge_attr,
+        data.message_edge_mask,
+    )
+    logits = model(data)
+
+    assert conv_edge_index.tolist() == [[0, 2], [1, 0]]
+    assert tuple(conv_edge_attr.shape) == (2, config.edge_dim)
+    assert tuple(logits.shape) == (3, 3)
+
+
+def test_edge_relation_gat_y_network_bypasses_gnn_for_merge_and_keeps_shape():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    from src.perception.schema import FeatureTensorSchema
+    from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig
+
+    config = EdgeGATConfig(
+        node_projector=FeatureProjectorConfig(semantic_hidden_dim=16, layout_hidden_dim=8, dropout=0.0),
+        hidden_dim=8,
+        heads=2,
+        num_layers=1,
+        dropout=0.0,
+        prediction_architecture="y_network",
+    )
+    model = EdgeRelationGAT(config)
+    data = Data(
+        x=torch.randn(3, FeatureTensorSchema().node_feature_dim),
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
+        edge_attr=torch.randn(3, config.edge_dim),
+    )
+
+    logits = model(data)
+
+    assert hasattr(model, "merge_head")
+    assert hasattr(model, "parent_none_head")
+    assert tuple(logits.shape) == (3, 3)
+
+
+def test_edge_relation_gat_hard_merge_gate_only_suppresses_merge_logit():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    from src.perception.schema import FeatureTensorSchema
+    from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig
+
+    config = EdgeGATConfig(
+        node_projector=FeatureProjectorConfig(semantic_hidden_dim=16, layout_hidden_dim=8, dropout=0.0),
+        hidden_dim=8,
+        heads=2,
+        num_layers=0,
+        dropout=0.0,
+        prediction_architecture="y_network",
+        merge_gate_mode="hard",
+        merge_gate_logit=-123.0,
+    )
+    model = EdgeRelationGAT(config)
+    data = Data(
+        x=torch.randn(3, FeatureTensorSchema().node_feature_dim),
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        edge_attr=torch.randn(2, config.edge_dim),
+        merge_candidate_mask=torch.tensor([True, False], dtype=torch.bool),
+    )
+
+    logits = model(data)
+
+    assert float(logits[1, 0].detach()) == -123.0
+    assert torch.isfinite(logits[:, 1:]).all()

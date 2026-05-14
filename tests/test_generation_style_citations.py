@@ -547,6 +547,89 @@ def test_original_like_ir_renderer_anchors_footnotes_and_margin_notes():
     assert tex.count(r"\footnote{") == 1
 
 
+def test_original_like_ir_renderer_replaces_superscript_marker_with_matching_footnote():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Claim1",
+            page_idx=0,
+            bboxes=[BBox(100, 100, 700, 120)],
+            reading_index=0,
+            spans=[
+                StyleSpan(text="Claim", font_name="Times-Roman", font_size=10, bbox=BBox(100, 100, 150, 120)),
+                StyleSpan(text="1", font_name="Times-Roman", font_size=6, bbox=BBox(151, 95, 157, 103)),
+            ],
+            features={"style_baseline_size": 10.0},
+        ),
+        DocumentNode(
+            node_id="fn",
+            node_type=BlockType.FOOTNOTE,
+            text="1 Footnote body.",
+            page_idx=0,
+            bboxes=[BBox(100, 910, 700, 930)],
+            reading_index=1,
+            metadata={"footnote_marker": "1"},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="marker_note",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["body", "fn"])],
+        nodes=nodes,
+        reading_order=["body", "fn"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="marker_note",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p", "fn"]),
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+            RenderTreeNode(render_id="fn", role=RenderRole.FOOTNOTE, source_node_ids=["fn"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert r"Claim\footnote{Footnote body.}" in tex
+    assert r"\raisebox{0.55ex}{\scriptsize 1}" not in tex
+    assert r"\footnotetext" not in tex
+
+
+def test_original_like_ir_renderer_keeps_unanchored_footnote_as_footnotetext():
+    nodes = [
+        DocumentNode(
+            node_id="fn",
+            node_type=BlockType.FOOTNOTE,
+            text="* Orphan note.",
+            page_idx=0,
+            bboxes=[BBox(100, 900, 700, 920)],
+            reading_index=0,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="orphan_note",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fn"])],
+        nodes=nodes,
+        reading_order=["fn"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="orphan_note",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["fn"]),
+            RenderTreeNode(render_id="fn", role=RenderRole.FOOTNOTE, source_node_ids=["fn"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert r"\footnotetext{Orphan note.}" in tex
+
+
 def test_original_like_ir_renderer_preserves_span_font_family_and_scripts_from_features():
     nodes = [
         DocumentNode(
@@ -967,6 +1050,224 @@ def test_original_like_ir_renderer_infers_mixed_columns_from_bbox_when_band_meta
     assert r"\begin{multicols}{2}" in tex
     assert tex.index("Wide Title") < tex.index(r"\begin{multicols}{2}") < tex.index("Left column text.")
     assert tex.index(r"\end{multicols}") < tex.index(r"\[")
+
+
+def test_original_like_ir_renderer_defers_float_that_interrupts_open_sentence():
+    nodes = [
+        DocumentNode(
+            node_id="p1",
+            node_type=BlockType.TEXT,
+            text="All experiments were conducted on a single NVIDIA RTX 8000 GPU",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 450, 150)],
+            reading_index=0,
+            spans=[StyleSpan(text="All experiments were conducted on a single NVIDIA RTX 8000 GPU", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="tbl",
+            node_type=BlockType.TABLE,
+            text="Table 1: Results.",
+            page_idx=0,
+            bboxes=[BBox(80, 160, 920, 360)],
+            reading_index=1,
+            metadata={"table_caption": "Table 1: Results."},
+        ),
+        DocumentNode(
+            node_id="p2",
+            node_type=BlockType.TEXT,
+            text="with 48GB memory.",
+            page_idx=1,
+            bboxes=[BBox(80, 100, 450, 140)],
+            reading_index=2,
+            spans=[StyleSpan(text="with 48GB memory.", font_name="Times-Roman", font_size=10)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="float_interrupt",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["p1", "tbl"]), PageIR(page_idx=1, width=1000, height=1000, node_ids=["p2"])],
+        nodes=nodes,
+        reading_order=["p1", "tbl", "p2"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="float_interrupt",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p1", "tbl", "p2"]),
+            RenderTreeNode(render_id="p1", role=RenderRole.PARAGRAPH, source_node_ids=["p1"]),
+            RenderTreeNode(render_id="tbl", role=RenderRole.TABLE, source_node_ids=["tbl"]),
+            RenderTreeNode(render_id="p2", role=RenderRole.PARAGRAPH, source_node_ids=["p2"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert tex.index("NVIDIA RTX 8000 GPU") < tex.index("with 48GB memory.") < tex.index(r"\begin{table}")
+
+
+def test_original_like_ir_renderer_uses_mixed_bands_for_appendix_tail_after_references():
+    nodes = [
+        DocumentNode(
+            node_id="refs",
+            node_type=BlockType.REFERENCE,
+            text="[1] Ref.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+            metadata={"reference_items": ["[1] Ref."]},
+        ),
+        DocumentNode(
+            node_id="app_title",
+            node_type=BlockType.TITLE,
+            text="Appendix A Extra Proofs",
+            page_idx=1,
+            bboxes=[BBox(80, 50, 920, 80)],
+            reading_index=1,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 10, "_appendix_heading": True},
+        ),
+        DocumentNode(
+            node_id="app_left",
+            node_type=BlockType.TEXT,
+            text="Left appendix column.",
+            page_idx=1,
+            bboxes=[BBox(80, 120, 450, 145)],
+            reading_index=2,
+            metadata={"layout_band_type": "double_column", "layout_band_global_id": 11, "layout_band_column": "left"},
+        ),
+        DocumentNode(
+            node_id="app_right",
+            node_type=BlockType.TEXT,
+            text="Right appendix column.",
+            page_idx=1,
+            bboxes=[BBox(550, 120, 920, 145)],
+            reading_index=3,
+            metadata={"layout_band_type": "double_column", "layout_band_global_id": 11, "layout_band_column": "right"},
+        ),
+        DocumentNode(
+            node_id="app_eq",
+            node_type=BlockType.EQUATION,
+            text=r"a=b",
+            page_idx=1,
+            bboxes=[BBox(250, 220, 750, 250)],
+            reading_index=4,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 12},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="appendix_tail",
+        pages=[
+            PageIR(page_idx=0, width=1000, height=1000, node_ids=["refs"]),
+            PageIR(page_idx=1, width=1000, height=1000, node_ids=["app_title", "app_left", "app_right", "app_eq"]),
+        ],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    profile = replace(
+        profile,
+        page_layout={**profile.page_layout, "column_mode": "mixed"},
+        renderer_options={**profile.renderer_options, "column_mode": "mixed"},
+    )
+    tree = RenderTreeIR(
+        doc_id="appendix_tail",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["refs"]),
+            RenderTreeNode(render_id="refs", role=RenderRole.REFERENCES, source_node_ids=["refs"], children=["app_title", "app_left", "app_right", "app_eq"]),
+            RenderTreeNode(render_id="app_title", role=RenderRole.SECTION, source_node_ids=["app_title"], attributes={"appendix_heading": True}),
+            RenderTreeNode(render_id="app_left", role=RenderRole.PARAGRAPH, source_node_ids=["app_left"]),
+            RenderTreeNode(render_id="app_right", role=RenderRole.PARAGRAPH, source_node_ids=["app_right"]),
+            RenderTreeNode(render_id="app_eq", role=RenderRole.DISPLAY_EQUATION, source_node_ids=["app_eq"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\appendix" in tex
+    assert tex.index(r"\appendix") < tex.index(r"\section{Extra Proofs}") < tex.index(r"\begin{multicols}{2}")
+    assert tex.index(r"\begin{multicols}{2}") < tex.index("Left appendix column.") < tex.index("Right appendix column.")
+    assert tex.index(r"\end{multicols}") < tex.index(r"\[")
+
+
+def test_original_like_ir_renderer_emits_float_equation_algorithm_labels_and_rewrites_cross_refs():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="See Figure 3, Fig. 3, Table 2, Equation (4), and Algorithm 1 for details.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="fig",
+            node_type=BlockType.FIGURE,
+            text="Figure 3: Qualitative examples.",
+            page_idx=0,
+            bboxes=[BBox(100, 200, 500, 400)],
+            reading_index=1,
+            metadata={"figure_caption": "Figure 3: Qualitative examples."},
+        ),
+        DocumentNode(
+            node_id="tab",
+            node_type=BlockType.TABLE,
+            text="Table 2: Results.",
+            page_idx=0,
+            bboxes=[BBox(100, 430, 900, 600)],
+            reading_index=2,
+            metadata={"table_caption": "Table 2: Results."},
+        ),
+        DocumentNode(
+            node_id="eq",
+            node_type=BlockType.EQUATION,
+            text=r"y=x \tag{4}",
+            page_idx=0,
+            bboxes=[BBox(250, 630, 750, 660)],
+            reading_index=3,
+        ),
+        DocumentNode(
+            node_id="alg",
+            node_type=BlockType.ALGORITHM,
+            text="Algorithm 1: Demo\nInput: x\nreturn x",
+            page_idx=0,
+            bboxes=[BBox(100, 700, 900, 850)],
+            reading_index=4,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="cross_refs",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="cross_refs",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["body", "fig", "tab", "eq", "alg"]),
+            RenderTreeNode(render_id="body", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+            RenderTreeNode(render_id="fig", role=RenderRole.FIGURE, source_node_ids=["fig"]),
+            RenderTreeNode(render_id="tab", role=RenderRole.TABLE, source_node_ids=["tab"]),
+            RenderTreeNode(render_id="eq", role=RenderRole.DISPLAY_EQUATION, source_node_ids=["eq"]),
+            RenderTreeNode(render_id="alg", role=RenderRole.ALGORITHM, source_node_ids=["alg"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"Figure \ref{fig:3}" in tex
+    assert r"Fig. \ref{fig:3}" in tex
+    assert r"Table \ref{tab:2}" in tex
+    assert r"Equation \ref{eq:4}" in tex
+    assert r"Algorithm \ref{alg:1}" in tex
+    assert r"\label{fig:3}" in tex
+    assert r"\label{tab:2}" in tex
+    assert r"\label{eq:4}" in tex
+    assert r"\label{alg:1}" in tex
 
 
 def test_original_like_ir_renderer_groups_list_siblings_and_keeps_equation_inside_item():

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Refresh graph candidate edges without recomputing node embeddings.
+"""Refresh graph order-dependent features and candidate edges.
 
 Use this after changing PDF-only graph topology rules.  The existing graph
-already contains the expensive node tensor ``x`` with SciBERT features, so this
-entrypoint only rebuilds ``edge_index`` / ``edge_attr`` from the current v7 JSON
-and current ``graph_builder`` candidate-edge logic.
+already contains the expensive node tensor ``x`` with SciBERT features.  This
+entrypoint therefore preserves semantic embeddings and rebuilds only
+order-dependent layout features, ``edge_index`` and ``edge_attr`` from the
+current v7 JSON and current ``graph_builder`` candidate-edge logic.
 """
 
 from __future__ import annotations
@@ -24,11 +25,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes  # noqa: E402
 from src.perception.schema import EDGE_ATTR_FIELDS, SCIBERT_DIM  # noqa: E402
 from src.reasoning.graph_builder import (  # noqa: E402
+    build_derived_stats_matrix,
     build_candidate_edge_pairs,
     build_edge_attr_matrix,
     build_edge_index_from_pairs,
+    build_message_edge_mask,
+    build_flow_context_matrix,
+    build_scroll_geometry_matrix,
     build_scroll_layout,
+    build_sequence_position_matrix,
     infer_column_ids,
+    layout_layer_name,
+    make_node_records,
+    original_index_reading_order_indices,
     v7_reading_order_indices,
     _ranks_from_order,
 )
@@ -47,6 +56,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--long-sight-window", type=int, default=40)
     parser.add_argument("--scope-anchor-window", type=int, default=160)
     parser.add_argument("--float-skip-window", type=int, default=40)
+    parser.add_argument(
+        "--reading-order-source",
+        choices=("v7", "original_index"),
+        default="v7",
+        help=(
+            "Which one-dimensional order should drive scroll/index features and candidate edges. "
+            "'original_index' ignores repaired layout_flow_order for Raw-MinerU-Flow ablations."
+        ),
+    )
     parser.add_argument("--directed", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser
@@ -77,6 +95,7 @@ def main() -> int:
                 "long_sight_window": int(args.long_sight_window),
                 "scope_anchor_window": int(args.scope_anchor_window),
                 "float_skip_window": int(args.float_skip_window),
+                "reading_order_source": str(args.reading_order_source),
             },
         }
         for record in records
@@ -124,34 +143,58 @@ def refresh_one(job: dict[str, Any]) -> dict[str, Any]:
         if not hasattr(graph, "x") or graph.x is None or int(graph.x.shape[1]) < SCIBERT_DIM:
             raise ValueError("existing graph.x does not contain SciBERT semantic features")
 
-        regime_order = v7_reading_order_indices(items)
+        reading_order_source = str(job["config"].pop("reading_order_source", "v7"))
+        regime_order = select_reading_order(items, source=reading_order_source)
         regime_ranks = _ranks_from_order(regime_order, len(items))
         column_ids = infer_column_ids(items)
+        feature_items = (
+            with_original_index_flow_metadata(items, regime_order, column_ids)
+            if reading_order_source == "original_index"
+            else items
+        )
         scroll_layout = build_scroll_layout(items, reading_order_indices=regime_order, column_ids=column_ids)
         edge_pairs = build_candidate_edge_pairs(
-            items,
+            feature_items,
             reading_order_indices=regime_order,
             column_ids=column_ids,
             **dict(job["config"]),
         )
         semantic = graph.x[:, :SCIBERT_DIM].detach().cpu().float()
+        graph.x = refresh_order_dependent_node_features(
+            graph,
+            feature_items,
+            regime_order=regime_order,
+            regime_ranks=regime_ranks,
+            column_ids=column_ids,
+            scroll_layout=scroll_layout,
+            reading_order_source=reading_order_source,
+        )
         graph.edge_index = build_edge_index_from_pairs(edge_pairs)
         graph.edge_attr = build_edge_attr_matrix(
-            items,
+            feature_items,
             semantic,
             edge_pairs=edge_pairs,
             reading_order_ranks=regime_ranks,
             scroll_layout=scroll_layout,
         )
+        graph.message_edge_mask = build_message_edge_mask(feature_items, edge_pairs=edge_pairs)
         graph.edge_source_types = [source_type for _, _, source_type in edge_pairs]
         graph.edge_attr_schema = {
             "dim": len(EDGE_ATTR_FIELDS),
             "fields": EDGE_ATTR_FIELDS,
             "topology": {
                 "strategy": "edge_refresh_current_graph_builder",
+                "reading_order_source": reading_order_source,
                 **dict(job["config"]),
             },
         }
+        graph.node_records = make_node_records(
+            feature_items,
+            column_ids=column_ids,
+            reading_order_ranks=regime_ranks,
+            scroll_layout=scroll_layout,
+        )
+        graph.reading_order_source = reading_order_source
         clear_stale_labels(graph)
         graph.edge_refresh_source_graph = str(record["graph_path"])
         output_graph.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +210,7 @@ def refresh_one(job: dict[str, Any]) -> dict[str, Any]:
                     "edge_index": list(graph.edge_index.shape),
                     "edge_attr": list(graph.edge_attr.shape),
                 },
+                reading_order_source=reading_order_source,
             ),
         }
     except Exception as exc:  # pragma: no cover - batch data path.
@@ -190,6 +234,118 @@ def load_graph_items(content_json: Path, graph: Any) -> list[dict[str, Any]]:
     if bool(getattr(graph, "micro_fusion_applied", False)):
         graph_items = fuse_micro_nodes(graph_items)
     return graph_items
+
+
+def select_reading_order(items: list[dict[str, Any]], *, source: str) -> list[int]:
+    if source == "v7":
+        return v7_reading_order_indices(items)
+    if source == "original_index":
+        return original_index_reading_order_indices(items)
+    raise ValueError(f"Unsupported reading order source: {source}")
+
+
+def with_original_index_flow_metadata(
+    items: list[dict[str, Any]],
+    order: list[int],
+    column_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Return item copies whose flow metadata is derived from raw MinerU order.
+
+    The Raw-MinerU-Flow ablation should not leak repaired v7 band/order values
+    through ``flow_context`` or edge layout-flow attributes.  We keep coarse
+    layout-layer/type probes, but replace band-local fields with page-local raw
+    order fields.
+    """
+
+    output = [dict(item) for item in items]
+    page_counts: dict[int, int] = {}
+    page_seen: dict[int, int] = {}
+    page_order: dict[int, int] = {}
+    for item_idx in order:
+        page_idx = int_or_default(output[item_idx].get("page_idx"), 0)
+        if page_idx not in page_order:
+            page_order[page_idx] = len(page_order)
+        page_counts[page_idx] = page_counts.get(page_idx, 0) + 1
+    for rank, item_idx in enumerate(order):
+        item = output[item_idx]
+        page_idx = int_or_default(item.get("page_idx"), 0)
+        local = page_seen.get(page_idx, 0)
+        page_seen[page_idx] = local + 1
+        column_id = column_ids[item_idx] if item_idx < len(column_ids) else 2
+        item["layout_flow_order"] = rank
+        item["layout_band_id"] = f"raw_page_{page_idx}"
+        item["layout_band_global_id"] = page_idx
+        item["layout_band_global_order"] = page_order[page_idx]
+        item["layout_band_type"] = "raw_mineru_page"
+        item["layout_band_column_id"] = column_id
+        item["layout_band_column"] = {0: "left", 1: "right"}.get(column_id, "full")
+        item["layout_band_local_order"] = local
+        item["layout_is_band_boundary"] = local == 0
+        item["is_main_flow_candidate"] = bool(item.get("is_main_flow_candidate", layout_layer_name(item) == "main_text_flow"))
+    return output
+
+
+def refresh_order_dependent_node_features(
+    graph: Any,
+    items: list[dict[str, Any]],
+    *,
+    regime_order: list[int],
+    regime_ranks: list[int],
+    column_ids: list[int],
+    scroll_layout: Any,
+    reading_order_source: str,
+) -> Any:
+    """Rewrite node feature slices that encode reading flow."""
+
+    import torch
+
+    x = graph.x.detach().cpu().float().clone()
+    schema = getattr(graph, "feature_schema", None)
+    if not isinstance(schema, dict):
+        raise ValueError("graph.feature_schema is required to refresh order-dependent features")
+
+    replace_feature_slice(
+        x,
+        schema,
+        "scroll_geometry",
+        build_scroll_geometry_matrix(items, scroll_layout=scroll_layout),
+    )
+    replace_feature_slice(
+        x,
+        schema,
+        "derived_stats",
+        build_derived_stats_matrix(items, reading_order_ranks=regime_ranks),
+    )
+    replace_feature_slice(
+        x,
+        schema,
+        "sequence_position",
+        build_sequence_position_matrix(items, reading_order_ranks=regime_ranks),
+    )
+    replace_feature_slice(
+        x,
+        schema,
+        "flow_context",
+        build_flow_context_matrix(items),
+    )
+    return torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+
+
+def replace_feature_slice(x: Any, schema: dict[str, Any], group_name: str, values: Any) -> None:
+    entry = schema.get(group_name)
+    if not isinstance(entry, dict):
+        raise ValueError(f"feature_schema lacks group {group_name!r}")
+    start = int(entry["start"])
+    end = int(entry["end"])
+    if int(values.shape[0]) != int(x.shape[0]) or int(values.shape[1]) != end - start:
+        raise ValueError(
+            f"bad refreshed feature shape for {group_name}: {tuple(values.shape)} expected {(int(x.shape[0]), end - start)}"
+        )
+    x[:, start:end] = values.to(dtype=x.dtype)
+
+
+def int_or_default(value: Any, default: int) -> int:
+    return value if isinstance(value, int) else default
 
 
 def clear_stale_labels(graph: Any) -> None:
@@ -220,12 +376,15 @@ def build_output_record(
     *,
     reused: bool,
     shape: dict[str, Any] | None = None,
+    reading_order_source: str | None = None,
 ) -> dict[str, Any]:
     output = dict(record)
     output["source_graph_path"] = record.get("graph_path")
     output["graph_path"] = str(graph_path)
     output["edge_refreshed_graph_reused"] = bool(reused)
     output["edge_attr_dim"] = len(EDGE_ATTR_FIELDS)
+    if reading_order_source is not None:
+        output["reading_order_source"] = reading_order_source
     if shape:
         output["graph_shape"] = shape
     return output

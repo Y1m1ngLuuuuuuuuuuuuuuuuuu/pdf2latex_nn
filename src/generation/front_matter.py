@@ -67,6 +67,10 @@ def render_author_block_original_like(
     source_nodes: list[DocumentNode],
     style: StyleProfile | None = None,
 ) -> str:
+    grid = _render_author_grid(source_nodes, style)
+    if grid:
+        return grid
+
     lines = author_lines_from_nodes(source_nodes)
     if not lines:
         lines = author_lines_from_text(text)
@@ -84,17 +88,84 @@ def render_author_block_original_like(
     return "\n".join(body)
 
 
+def _render_author_grid(source_nodes: list[DocumentNode], style: StyleProfile | None) -> str:
+    boxes = [(node, node.bboxes[0]) for node in source_nodes if node.bboxes and _classify_node_as_author_box(node)]
+    if len(boxes) < 2:
+        return ""
+    rows = _cluster_author_boxes_into_rows(boxes)
+    if not rows:
+        return ""
+    body: list[str] = [r"\begin{center}"]
+    for row in rows:
+        columns = len(row)
+        column_width = min(0.94 / max(columns, 1), 0.30)
+        body.append(r"\noindent")
+        cells: list[str] = []
+        for node, _box in row:
+            cell_lines = author_lines_from_nodes([node]) or author_lines_from_text(node.text)
+            cell_body = r"\\".join(_render_front_matter_line(line, style) for line in cell_lines if line.text.strip())
+            if not cell_body:
+                continue
+            cells.append(
+                rf"\begin{{minipage}}[t]{{{column_width:.3f}\textwidth}}\centering {cell_body}\end{{minipage}}"
+            )
+        if cells:
+            body.append(r"\hfill ".join(cells))
+            body.append(r"\par\vspace{4pt}")
+    body.append(r"\end{center}")
+    return "\n".join(body)
+
+
+def _classify_node_as_author_box(node: DocumentNode) -> bool:
+    layer = str(node.metadata.get("layout_layer") or "").casefold()
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    if layer == "metadata_layer" and role in {"affiliation", "author", "authors", "date", "email", "correspondence"}:
+        return True
+    return _classify_author_line(node.text) in {"author", "affiliation", "email", "correspondence"}
+
+
+def _cluster_author_boxes_into_rows(
+    boxes: list[tuple[DocumentNode, BBox]],
+) -> list[list[tuple[DocumentNode, BBox]]]:
+    ordered = sorted(boxes, key=lambda item: (((item[1].y0 + item[1].y1) / 2.0), item[1].x0))
+    rows: list[list[tuple[DocumentNode, BBox]]] = []
+    for item in ordered:
+        _node, box = item
+        y_center = (box.y0 + box.y1) / 2.0
+        height = max(box.y1 - box.y0, 1.0)
+        target: list[tuple[DocumentNode, BBox]] | None = None
+        for row in rows:
+            row_center = sum((candidate_box.y0 + candidate_box.y1) / 2.0 for _candidate, candidate_box in row) / len(row)
+            row_height = max(candidate_box.y1 - candidate_box.y0 for _candidate, candidate_box in row)
+            if abs(row_center - y_center) <= max(8.0, 0.8 * max(row_height, height)):
+                target = row
+                break
+        if target is None:
+            rows.append([item])
+        else:
+            target.append(item)
+    return [sorted(row, key=lambda item: item[1].x0) for row in rows]
+
+
 def author_lines_from_nodes(nodes: list[DocumentNode]) -> list[FrontMatterLine]:
-    spans = [span for node in nodes for span in node.spans if span.bbox is not None and (span.text or "").strip()]
-    if not spans:
-        return []
-    buckets = _cluster_spans_into_visual_lines(spans)
-    lines: list[FrontMatterLine] = []
-    for bucket in buckets:
-        text = _join_spans_on_line(bucket.spans)
-        if text:
-            lines.append(FrontMatterLine(text=text, role=_classify_author_line(text), font_size=_median_font_size(bucket.spans)))
-    return _dedupe_lines(lines)
+    positioned_spans = [span for node in nodes for span in node.spans if span.bbox is not None and (span.text or "").strip()]
+    if positioned_spans:
+        buckets = _cluster_spans_into_visual_lines(positioned_spans)
+        lines: list[FrontMatterLine] = []
+        for bucket in buckets:
+            text = _join_spans_on_line(bucket.spans)
+            if text:
+                lines.append(FrontMatterLine(text=text, role=_classify_author_line(text), font_size=_median_font_size(bucket.spans)))
+        return _dedupe_lines(lines)
+
+    # Some MinerU/PyMuPDF paths preserve font/style but not per-span bbox.  This
+    # is common in author blocks: bold spans are names, while the following
+    # roman span contains affiliation and email.  Using the raw node text would
+    # split "Dartmouth College" at "College" and pollute the author name.
+    styled_lines: list[FrontMatterLine] = []
+    for node in nodes:
+        styled_lines.extend(_author_lines_from_style_spans(node.spans, fallback_text=node.text))
+    return _dedupe_lines(styled_lines)
 
 
 def author_lines_from_text(text: str) -> list[FrontMatterLine]:
@@ -162,6 +233,9 @@ def _soft_split_author_block(text: str) -> list[str]:
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value:
         return []
+    structured = _split_author_affiliation_email_text(value)
+    if len(structured) > 1:
+        return [line.text for line in structured]
     protected = AUTHOR_BREAK_RE.sub("\n", value)
     protected = re.sub(r"\s+(?=(?:e-?mail|email|emails?)\s*:)", "\n", protected, flags=re.IGNORECASE)
     protected = re.sub(r"\s+(?=\*?\s*Corresponding\b)", "\n", protected, flags=re.IGNORECASE)
@@ -169,6 +243,125 @@ def _soft_split_author_block(text: str) -> list[str]:
     if len(lines) > 1:
         return lines
     return [value]
+
+
+def _author_lines_from_style_spans(spans: list[StyleSpan], *, fallback_text: str = "") -> list[FrontMatterLine]:
+    usable = [span for span in spans if (span.text or "").strip()]
+    if not usable:
+        return []
+    author_spans: list[StyleSpan] = []
+    remainder: list[str] = []
+    seen_remainder = False
+    for span in usable:
+        text = _clean_inline_space(span.text)
+        if not text:
+            continue
+        if not seen_remainder and _span_looks_like_author_name(span, text):
+            author_spans.append(span)
+            continue
+        seen_remainder = True
+        remainder.append(text)
+
+    lines: list[FrontMatterLine] = []
+    author_text = _clean_inline_space(" ".join(span.text for span in author_spans))
+    if author_text:
+        lines.append(FrontMatterLine(text=author_text, role="author", font_size=_median_font_size(author_spans)))
+
+    remainder_text = _clean_inline_space(" ".join(remainder))
+    if remainder_text:
+        lines.extend(_split_affiliation_email_text(remainder_text))
+
+    if lines:
+        return lines
+    return _split_author_affiliation_email_text(fallback_text)
+
+
+def _span_looks_like_author_name(span: StyleSpan, text: str) -> bool:
+    if EMAIL_RE.search(text) or AFFILIATION_RE.search(text):
+        return False
+    font_name = str(span.font_name or "").casefold()
+    return bool(span.is_bold or "bold" in font_name or "cmbx" in font_name or font_name.endswith("bd"))
+
+
+def _split_author_affiliation_email_text(text: str) -> list[FrontMatterLine]:
+    value = _clean_inline_space(text)
+    if not value:
+        return []
+    before_email, email_text = _split_email_tail(value)
+    author_text, affiliation_text = _split_author_affiliation_prefix(before_email)
+    lines: list[FrontMatterLine] = []
+    if author_text:
+        lines.append(FrontMatterLine(text=author_text, role="author"))
+    if affiliation_text:
+        lines.append(FrontMatterLine(text=affiliation_text, role="affiliation"))
+    if email_text:
+        lines.append(FrontMatterLine(text=email_text, role="email"))
+    return lines
+
+
+def _split_affiliation_email_text(text: str) -> list[FrontMatterLine]:
+    affiliation, email_text = _split_email_tail(text)
+    lines: list[FrontMatterLine] = []
+    if affiliation:
+        lines.append(FrontMatterLine(text=affiliation, role="affiliation"))
+    if email_text:
+        lines.append(FrontMatterLine(text=email_text, role="email"))
+    return lines
+
+
+def _split_email_tail(text: str) -> tuple[str, str]:
+    value = _clean_inline_space(text)
+    matches = list(EMAIL_RE.finditer(value))
+    if not matches:
+        return value, ""
+    first = matches[0]
+    prefix = value[: first.start()].strip(" ,;")
+    emails = " ".join(match.group(0) for match in matches)
+    return prefix, emails
+
+
+def _split_author_affiliation_prefix(text: str) -> tuple[str, str]:
+    value = _clean_inline_space(text)
+    if not value:
+        return "", ""
+    tokens = value.split()
+    lower_tokens = [token.strip(",.;:").casefold() for token in tokens]
+    institution_keywords = {
+        "university",
+        "college",
+        "institute",
+        "department",
+        "school",
+        "faculty",
+        "laboratory",
+        "lab",
+        "center",
+        "centre",
+        "academy",
+        "hospital",
+    }
+    keyword_index = next((index for index, token in enumerate(lower_tokens) if token in institution_keywords), None)
+    if keyword_index is None:
+        return value, ""
+    if keyword_index == 0:
+        return "", value
+    # For suffix-style institutions ("New York University", "Michigan State
+    # University", "Dartmouth College"), include the capitalized institution
+    # prefix instead of leaving it attached to the author name.  Two-token
+    # author names are by far the dominant case, so never steal below index 2.
+    start = keyword_index
+    if keyword_index >= 4:
+        start = keyword_index - 2
+    elif keyword_index >= 3:
+        start = keyword_index - 1
+    elif keyword_index >= 2:
+        start = keyword_index - 1
+    start = max(start, 0)
+    author = " ".join(tokens[:start]).strip(" ,;")
+    affiliation = " ".join(tokens[start:]).strip(" ,;")
+    if not author:
+        return "", value
+    return author, affiliation
 
 
 def _classify_author_line(text: str) -> str:

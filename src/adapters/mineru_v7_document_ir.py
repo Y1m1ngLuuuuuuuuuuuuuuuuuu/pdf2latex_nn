@@ -25,6 +25,7 @@ from src.ir import (
 from src.ir.serialization import write_json
 from src.ir.validators import validate_document_ir
 from src.generation.table_assets import annotate_table_group_records
+from src.perception.reading_order import annotate_duplicate_contained_continuations, is_duplicate_shadow_record
 from src.pipeline.v7_contract import assert_v7_content_json, read_json_payload
 
 
@@ -68,7 +69,9 @@ class MinerUV7DocumentIRAdapter:
         pdf_path: Path | None = None,
         doc_id: str | None = None,
     ) -> DocumentIR:
-        items = annotate_table_group_records([item for item in payload.get("items", []) if isinstance(item, dict)])
+        items = annotate_duplicate_contained_continuations([item for item in payload.get("items", []) if isinstance(item, dict)])
+        items = [item for item in items if not is_duplicate_shadow_record(item)]
+        items = annotate_table_group_records(items)
         stable_doc_id = doc_id or infer_doc_id(payload, source_path, pdf_path)
         node_id_map: dict[int, str] = {}
         used_node_ids: set[str] = set()
@@ -324,8 +327,10 @@ def text_from_v7_item(item: dict[str, Any]) -> str:
             caption_text = " ".join(str(part).strip() for part in caption if str(part).strip()).strip()
         else:
             caption_text = str(caption or "").strip()
-        body = str(item.get("table_body") or "").strip()
-        return "\n".join(part for part in (caption_text, body) if part)
+        # Keep table cell OCR out of the semantic text surface.  The raw body is
+        # still preserved in metadata for crop/table reconstruction, but the IR
+        # node text should represent the table as a visual object plus caption.
+        return caption_text
     for key in ("text", "text_for_embedding", "text_preview"):
         value = item.get(key)
         if isinstance(value, str) and value:
@@ -460,6 +465,11 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "list_item_id",
         "reference_items",
         "img_path",
+        "figure_asset_path",
+        "image_asset_path",
+        "image_path",
+        "figure_path",
+        "asset_path",
         "table_caption",
         "table_footnote",
         "table_body",
@@ -471,6 +481,24 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "table_group_bbox",
         "table_group_caption",
         "table_group_render_strategy",
+        "figure_group_id",
+        "image_group_id",
+        "figure_group_member_ids",
+        "image_group_member_ids",
+        "figure_group_member_index",
+        "image_group_member_index",
+        "figure_group_size",
+        "image_group_size",
+        "figure_group_primary",
+        "image_group_primary",
+        "figure_group_bbox",
+        "image_group_bbox",
+        "figure_group_caption",
+        "image_group_caption",
+        "figure_group_render_strategy",
+        "image_group_render_strategy",
+        "figure_caption",
+        "image_caption",
         "footnote_marker",
         "footnote_label",
         "footnote_anchor",
@@ -493,7 +521,7 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
 
 
 def annotate_table_group_nodes(nodes: list[DocumentNode]) -> list[DocumentNode]:
-    """Replace table group member ids with stable DocumentNode ids."""
+    """Replace visual group member ids with stable DocumentNode ids."""
 
     by_raw_identifier: dict[str, str] = {}
     for node in nodes:
@@ -507,7 +535,10 @@ def annotate_table_group_nodes(nodes: list[DocumentNode]) -> list[DocumentNode]:
                 by_raw_identifier[str(value)] = node.node_id
     updated: list[DocumentNode] = []
     for node in nodes:
-        if node.node_type != BlockType.TABLE or "table_group_id" not in node.metadata:
+        if node.node_type not in {BlockType.TABLE, BlockType.FIGURE}:
+            updated.append(node)
+            continue
+        if "table_group_id" not in node.metadata and "figure_group_id" not in node.metadata and "image_group_id" not in node.metadata:
             updated.append(node)
             continue
         metadata = dict(node.metadata)
@@ -515,6 +546,11 @@ def annotate_table_group_nodes(nodes: list[DocumentNode]) -> list[DocumentNode]:
         if isinstance(members, list):
             metadata["table_group_member_node_ids"] = [
                 by_raw_identifier.get(str(value), str(value)) for value in members
+            ]
+        figure_members = metadata.get("figure_group_member_ids") or metadata.get("image_group_member_ids")
+        if isinstance(figure_members, list):
+            metadata["figure_group_member_node_ids"] = [
+                by_raw_identifier.get(str(value), str(value)) for value in figure_members
             ]
         metadata["source_pdf"] = node.source_refs[0].metadata.get("pdf_path") if node.source_refs else None
         updated.append(replace(node, metadata=metadata))

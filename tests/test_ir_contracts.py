@@ -94,7 +94,7 @@ def test_graph_input_and_labels_contracts():
         graph_path="graph.pt",
         node_ids=["n0", "n1"],
         edge_ids=["e0", "e1"],
-        x=GraphTensorRef(path="graph.pt", tensor_name="x", shape=[2, 831], dtype="float32"),
+        x=GraphTensorRef(path="graph.pt", tensor_name="x", shape=[2, 832], dtype="float32"),
         edge_index=GraphTensorRef(path="graph.pt", tensor_name="edge_index", shape=[2, 2], dtype="int64"),
         edge_attr=GraphTensorRef(path="graph.pt", tensor_name="edge_attr", shape=[2, 22], dtype="float32"),
     )

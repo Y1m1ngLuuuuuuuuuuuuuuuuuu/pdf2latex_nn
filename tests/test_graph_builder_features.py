@@ -1,5 +1,6 @@
 from src.reasoning.graph_builder import (
     TYPE_VOCAB,
+    allow_message_passing_edge,
     build_candidate_edge_pairs,
     build_column_onehot_matrix,
     build_derived_stats_matrix,
@@ -8,6 +9,8 @@ from src.reasoning.graph_builder import (
     build_geometry_matrix,
     build_layout_layer_matrix,
     build_logical_center_pairs,
+    build_merge_candidate_mask,
+    build_message_edge_mask,
     build_scroll_geometry_matrix,
     build_scroll_layout,
     build_sequence_position_matrix,
@@ -568,6 +571,64 @@ def test_empty_non_text_gets_placeholder_for_bert():
     assert text_for_embedding({"type": "algorithm", "text_for_embedding": ""}) == "[ALGORITHM]"
     assert text_for_embedding({"type": "reference", "text_for_embedding": "Author A. Paper."}) == "[REFERENCE]"
     assert text_for_embedding({"type": "list", "list_type": "reference_list", "text_for_embedding": "Author A. Paper."}) == "[REFERENCE]"
+
+
+def test_table_embedding_uses_caption_not_cell_body():
+    table = {
+        "type": "table",
+        "text_for_embedding": "Table 3: Accuracy results\nmodel a 99 model b 98",
+        "table_group_caption": "Table 3: Accuracy results",
+        "table_body": "model a 99 model b 98",
+    }
+
+    assert text_for_embedding(table) == "Table 3: Accuracy results"
+
+
+def test_type_aware_message_mask_blocks_float_noise_and_reverse_title_pollution():
+    if not has_torch():
+        return
+    nodes = [
+        {**item("Intro", [0, 0, 100, 20]), "type": "title", "layout_layer": "main_text_flow"},
+        {**item("body", [0, 30, 100, 50]), "type": "paragraph", "layout_layer": "main_text_flow"},
+        {**item("Table 1", [0, 60, 100, 120]), "type": "table", "layout_layer": "float_layer"},
+        {**item("1", [0, 980, 20, 995]), "type": "page_number", "layout_layer": "noise_layer"},
+        {**item("x+y", [0, 130, 100, 160]), "type": "equation_interline", "layout_layer": "math_layer"},
+    ]
+    edge_pairs = [
+        (0, 1, "scope_anchor"),
+        (1, 0, "sequential_forced"),
+        (2, 1, "spatial_down"),
+        (1, 2, "spatial_down"),
+        (3, 1, "spatial_down"),
+        (1, 4, "sequential_forced"),
+        (4, 1, "sequential_forced"),
+    ]
+
+    mask = build_message_edge_mask(nodes, edge_pairs=edge_pairs)
+
+    assert mask.tolist() == [True, False, False, False, False, True, False]
+    assert allow_message_passing_edge(nodes[0], nodes[1])
+    assert not allow_message_passing_edge(nodes[1], nodes[0])
+
+
+def test_merge_candidate_mask_is_class_specific_and_blocks_structural_edges():
+    if not has_torch():
+        return
+    nodes = [
+        {**item("body continues", [0, 0, 100, 20]), "type": "paragraph", "layout_layer": "main_text_flow"},
+        {**item("with more text", [0, 25, 100, 45]), "type": "paragraph", "layout_layer": "main_text_flow"},
+        {**item("Table 1", [0, 50, 100, 100]), "type": "table", "layout_layer": "float_layer"},
+        {**item("1. New item", [0, 110, 100, 130]), "type": "paragraph", "layout_layer": "main_text_flow"},
+    ]
+    edge_pairs = [
+        (0, 1, "sequential_forced"),
+        (0, 2, "spatial_down"),
+        (0, 3, "sequential_forced"),
+    ]
+
+    mask = build_merge_candidate_mask(nodes, edge_pairs=edge_pairs)
+
+    assert mask.tolist() == [True, False, False]
 
 
 def test_derived_stats_masks_density_for_non_text_types_and_uses_area_sum():

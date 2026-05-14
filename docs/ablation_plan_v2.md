@@ -1,230 +1,141 @@
-# Ablation Plan v2
+# Ablation Plan
 
-This is the fine-grained ablation protocol for the v7 graph-relation model.  The purpose is to answer precise questions, not merely produce many runs.
+**Last updated**: 2026-05-14
 
-## Non-Negotiable Controls
+This is the current ablation protocol for the v7 graph-relation model. The filename remains `ablation_plan_v2.md`, but the executable matrix is `configs/ablation_matrix_v3.json`.
 
-All experiments must share:
+## Controls
+
+All ablations must share:
 
 ```text
-same clean v7 manifest
+same labeled manifest
 same graph .pt files
-same document-level train/val/test split rule
-same threshold-calibration grid
-same random seeds
-same visual-QA sample set
+same document-level split rule
+same random seed unless explicitly repeated
+same calibration grid
+same metric definitions
 ```
 
-Feature ablation is runtime-only.  We zero feature ranges during model forward and never rewrite source graph tensors.
+Feature removal is runtime-only. Ablations zero node/edge feature groups during training/evaluation and never rewrite `.pt` graph tensors.
 
-The executable matrix is:
+## Current Matrix
 
 ```text
-configs/ablation_matrix_v2.json
+configs/ablation_matrix_v3.json
 ```
 
-Each experiment is repeated with:
+Current expected manifest:
 
 ```text
-seed = 7, 13, 29
+data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
 ```
 
-The repeated-seed result is summarized by mean and population standard deviation.
+Generate commands:
+
+```bash
+python scripts/pipeline/prepare_ablation_suite.py
+```
+
+Generated AutoDL script:
+
+```text
+data/08_runs/run_ablation_matrix_v3.sh
+```
+
+## Experiment Families
+
+```text
+M00_full_ce_ohem          full current model
+M01_no_message_passing   remove GAT propagation
+M02_no_symmetry_terms    remove Hu-Hv and Hu*Hv directional terms
+M03_shallow_predictor    replace deep head with a shallow predictor
+M04_type_aware_message_mask
+                          restrict GAT propagation with type/layout mask
+M05_y_network_dual_head  MERGE bypasses GNN; PARENT/NONE use GAT states
+M06_y_network_plus_merge_gate
+                          M05 plus hard physical MERGE gate
+F00_no_scibert           zero semantic node features
+F01_semantic_only        keep semantic features only
+F02_no_reading_flow      remove scroll/sequence/column/flow cues
+F03_raw_mineru_flow      keep flow features but derive them from MinerU order
+E00_no_punctuation       remove terminal punctuation and hyphen probes
+E01_no_gutter_overlap    remove overlap/gutter features
+T00_no_ohem              train without online hard negative mining
+```
+
+## Latest Locked Results
+
+Run:
+
+```text
+data/09_eval_reports/gnn_y_network_compare_20260514
+```
+
+Clean dataset:
+
+```text
+documents: 1857
+train/val/test: 1486 / 186 / 185
+labels: MERGE=1816, PARENT_CHILD=194300, NONE=6243086
+```
+
+| experiment | MERGE P | MERGE R | MERGE F1 | PARENT F1 | positive macro F1 | tau_merge | tau_parent |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| M00_full_ce_ohem | 0.2949 | 0.7151 | 0.4176 | 0.9459 | 0.6817 | 0.08 | 0.47 |
+| M01_no_message_passing | 0.7305 | 0.5538 | 0.6300 | 0.8052 | 0.7176 | 0.47 | 0.37 |
+| M04_type_aware_message_mask | 0.5000 | 0.4677 | 0.4833 | 0.9415 | 0.7124 | 0.33 | 0.39 |
+| M05_y_network_dual_head | 0.6740 | 0.6559 | 0.6649 | 0.9412 | 0.8030 | 0.37 | 0.45 |
+| M06_y_network_plus_merge_gate | 0.6923 | 0.6290 | 0.6592 | 0.9412 | 0.8002 | 0.41 | 0.49 |
+
+Decision:
+
+```text
+M05_y_network_dual_head is the current main model.
+M06_y_network_plus_merge_gate is retained as a conservative high-precision mode.
+```
 
 ## Metrics
 
 Primary:
 
 ```text
-calibrated_test_positive_macro_f1
-= mean(MERGE_F1, PARENT_CHILD_F1)
+positive_macro_f0.5 = mean(MERGE_F0.5, PARENT_CHILD_F0.5)
 ```
 
 Secondary:
 
 ```text
-MERGE precision / recall / F1
-PARENT_CHILD precision / recall / F1
-calibrated thresholds tau_merge / tau_parent
-compile success rate
-visual QA class: PASS / MINOR / MAJOR / FATAL
+MERGE precision / recall / F1 / F0.5
+PARENT_CHILD precision / recall / F1 / F0.5
+threshold-calibrated test metrics
+visual QA compile success
+generated PDF structural sanity
 ```
 
 Accuracy and NONE F1 are diagnostic only.
 
-## Families And Questions
+## Calibration
 
-### M: Model Architecture
-
-`M00_full_ce_ohem`
-
-Main system.
-
-`M01_no_message_passing`
-
-Sets `num_layers=0`, so the classifier sees projected node features and edge attributes but no GATv2 message passing.  This answers whether graph propagation is actually helping beyond pairwise edge features.
-
-Expected failure mode: weaker PARENT_CHILD and long-range local-scope relation reasoning.
-
-`M02_no_symmetry_terms`
-
-Uses `edge_feature_mode=simple_concat`, replacing:
+The matrix runs post-training calibration:
 
 ```text
-concat([Hu, Hv, Hu-Hv, Hu*Hv, Euv])
+tau_merge / tau_parent grid search
+threshold_priority mode
+merge physical gates enabled
+precision floors from 0.55 to 0.90
 ```
 
-with:
+Calibration is selected on validation data and then locked for test evaluation.
 
-```text
-concat([Hu, Hv, Euv])
-```
+## Launch
 
-This tests the directional symmetry-breaking terms.  It should especially affect PARENT_CHILD, because `A -> B` is not equivalent to `B -> A`.
-
-`M03_shallow_predictor`
-
-Replaces the deep `[1024,512,128]` edge MLP with one `128` hidden layer.  This tests whether the rare MERGE boundary needs predictor capacity after GAT.
-
-### F: Node Feature Families
-
-`F00_no_scibert`
-
-Zeros the 768-d SciBERT vector.  If performance survives, layout dominates.  If MERGE drops, semantics is useful.
-
-`F01_semantic_only`
-
-Zeros all layout/type/stat/style/flow node features.  This is the control against a pure text-semantic model.
-
-Expected: poor layout hierarchy and weak cross-column robustness.
-
-`F02_no_geometry`
-
-Zeros local geometry and scroll geometry.  This separates geometry from style and type cues.
-
-`F03_no_reading_flow`
-
-Zeros scroll-y, sequence position, column one-hot, layout layer, flow context, and matching edge flow cues.  This is the main test for the v7 reading-flow reconstruction.
-
-Expected: reading-order inversions and parent-child degradation.
-
-`F04_no_style_title`
-
-Zeros PyMuPDF style stats, title probes, and typography edge deltas.  This tests heading hierarchy and font-cluster value.
-
-### E: Edge Feature Families
-
-`E00_no_edge_semantic`
-
-Zeros semantic cosine only.  This should primarily affect MERGE.
-
-`E01_no_punctuation`
-
-Zeros terminal punctuation and hyphen probes.  This should hurt MERGE precision/recall around paragraph endings and hyphenated line breaks.
-
-`E02_no_gutter_overlap`
-
-Zeros `y_overlap_ratio` and `has_x_gutter`.  This tests the cross-column barrier.
-
-Expected failure mode: cross-column false MERGE.
-
-`E03_no_index_bins`
-
-Zeros binned sequence distance.  This verifies whether index bins help without becoming a brittle direct answer key.
-
-### T: Training Objective / Long Tail
-
-`T00_no_ohem`
-
-Plain CE.  This is the long-tail baseline.
-
-`T01_random_none_dropout`
-
-Randomly drops NONE edges during training.  It should raise recall but may damage precision because hard negatives vanish.
-
-`T02_focal_inverse`
-
-Focal loss with inverse class weights.  It is expected to be high-recall and possibly over-predict MERGE.
-
-`T03_weighted_ce`
-
-Hand-weighted CE without OHEM.  This tests whether a simpler weighted objective is enough.
-
-## Running
-
-Generate commands:
+Only launch after the labeled manifest exists:
 
 ```bash
-python scripts/pipeline/prepare_ablation_suite.py \
-  --matrix configs/ablation_matrix_v2.json \
-  --output-sh data/08_runs/run_ablation_matrix_v2.sh \
-  --output-json data/09_eval_reports/ablation_matrix_v2_commands.json
+cd /root/autodl-tmp/pdf2latex_nn
+nohup bash data/08_runs/run_ablation_matrix_v3.sh \
+  > logs/ablation_matrix_v3_20260514.log 2>&1 &
 ```
 
-Launch:
-
-```bash
-bash data/08_runs/run_ablation_matrix_v2.sh
-```
-
-Run only a small subset:
-
-```bash
-python scripts/pipeline/prepare_ablation_suite.py \
-  --matrix configs/ablation_matrix_v2.json \
-  --only M00_full_ce_ohem,F03_no_reading_flow,T00_no_ohem \
-  --output-sh data/08_runs/run_ablation_core_subset.sh
-```
-
-Summarize after runs:
-
-```bash
-python scripts/pipeline/summarize_ablation_results.py \
-  --root data/09_eval_reports/ablations_v2 \
-  --output-json data/09_eval_reports/ablations_v2_summary.json \
-  --output-csv data/09_eval_reports/ablations_v2_summary.csv
-```
-
-## Visual QA Protocol
-
-After metric training, select:
-
-```text
-M00_full_ce_ohem
-best feature ablation competitor
-best training-objective competitor
-worst expected ablation: F03_no_reading_flow or E02_no_gutter_overlap
-```
-
-Run end-to-end inference on the same 10-20 held-out PDFs.  Score generated PDFs with:
-
-```text
-PASS: compile-safe and structural reading order is acceptable
-MINOR: paragraph split, list indentation, cosmetic table placeholder
-MAJOR: reading-order inversion, wrong section hierarchy, broken references
-FATAL: compile error, formula corruption, large text loss, section tree collapse
-```
-
-The final paper table should combine:
-
-```text
-metric table: mean/std over 3 seeds
-visual QA table: PASS/MINOR/MAJOR/FATAL counts
-qualitative figure: original PDF vs generated PDF for representative failure/success
-```
-
-## Interpretation Rules
-
-Strong project evidence:
-
-```text
-M00 > F01_semantic_only
-M00 > F00_no_scibert
-M00 > M01_no_message_passing
-M00 > M02_no_symmetry_terms
-M00 > T00_no_ohem
-F03_no_reading_flow drops visibly on reading-order cases
-E02_no_gutter_overlap increases cross-column false MERGE
-```
-
-If a feature ablation has no measurable effect across all seeds and no visual-QA difference, demote that feature to optional or remove it from the GNN contract.
+The generated script sets tokenizer and BLAS thread guards to reduce CPU contention.

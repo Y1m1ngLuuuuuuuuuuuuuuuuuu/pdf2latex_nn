@@ -36,12 +36,16 @@ def test_train_negative_edge_dropout_keeps_positives_and_drops_none():
         edge_index=torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], dtype=torch.long),
         edge_attr=torch.zeros((4, 15), dtype=torch.float32),
         y=torch.tensor([0, 1, 2, 2], dtype=torch.long),
+        message_edge_mask=torch.tensor([True, True, False, True], dtype=torch.bool),
+        merge_candidate_mask=torch.tensor([True, False, False, True], dtype=torch.bool),
     )
 
     filtered = train_edge_gnn_full.apply_train_negative_edge_dropout(batch, 0.999, torch=torch)
 
     assert filtered.edge_index.shape[1] == 2
     assert filtered.y.tolist() == [0, 1]
+    assert filtered.message_edge_mask.tolist() == [True, True]
+    assert filtered.merge_candidate_mask.tolist() == [True, False]
 
 
 def test_ohem_loss_keeps_positive_and_hardest_none_edges():

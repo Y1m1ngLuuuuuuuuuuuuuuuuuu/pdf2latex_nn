@@ -92,6 +92,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-compile", action="store_true")
     parser.add_argument("--clean-output-dir", action="store_true")
     parser.add_argument(
+        "--renderer",
+        choices=["ir", "tree"],
+        default="ir",
+        help=(
+            "ir uses the canonical decoupled generation surface. tree is the "
+            "legacy TreeDecoder renderer for regression debugging."
+        ),
+    )
+    parser.add_argument(
         "--render-table-crops",
         action="store_true",
         help="Generate table and figure crop images in generated assets/ directories. Disabled by default to save disk.",
@@ -141,6 +150,7 @@ def main() -> int:
                 compile_runs=args.compile_runs,
                 compile_timeout=args.compile_timeout,
                 skip_compile=args.skip_compile,
+                renderer=args.renderer,
                 render_table_crops=args.render_table_crops,
             )
             row["frontend"] = doc.get("frontend", {})
@@ -169,6 +179,7 @@ def main() -> int:
         "parent_threshold": args.parent_threshold,
         "require_merge_argmax": args.require_merge_argmax,
         "require_parent_argmax": args.require_parent_argmax,
+        "renderer": args.renderer,
         "documents": summary,
     }
     write_json(args.output_dir / "e2e_manifest.json", payload)

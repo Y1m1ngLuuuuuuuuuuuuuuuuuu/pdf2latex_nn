@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from src.generation.citations import strip_reference_label
-from src.generation.table_assets import ensure_figure_asset, ensure_table_pdf_crop, table_caption_text
+from src.generation.table_assets import (
+    ensure_figure_asset,
+    ensure_table_pdf_crop,
+    first_record_bbox,
+    is_wide_visual_record,
+    record_bbox,
+    table_caption_text,
+    union_bbox,
+)
 from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
 
@@ -61,6 +69,22 @@ INLINE_MATH_COMMANDS = {
     "Phi",
     "Psi",
     "Omega",
+    "ell",
+    "pmb",
+    "mathbb",
+    "mathscr",
+    "boldsymbol",
+    "hat",
+    "widehat",
+    "bar",
+    "overline",
+    "tilde",
+    "widetilde",
+    "vec",
+    "dot",
+    "ddot",
+    "check",
+    "breve",
     "mathrm",
     "mathbf",
     "mathit",
@@ -93,6 +117,21 @@ INLINE_MATH_COMMANDS = {
     "int",
     "in",
     "notin",
+    "subset",
+    "subseteq",
+    "supset",
+    "supseteq",
+    "cup",
+    "cap",
+    "forall",
+    "exists",
+    "emptyset",
+    "infty",
+    "parallel",
+    "lVert",
+    "rVert",
+    "langle",
+    "rangle",
 }
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
@@ -118,6 +157,27 @@ PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
 PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
 ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
+FLOAT_CAPTION_LABEL_RE = {
+    "table": re.compile(
+        r"^\s*(?:Table|Tab\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]?\s*",
+        re.IGNORECASE,
+    ),
+    "figure": re.compile(
+        r"^\s*(?:Figure|Fig\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]?\s*",
+        re.IGNORECASE,
+    ),
+}
+FLOAT_CAPTION_ANY_LABEL_RE = {
+    "table": re.compile(
+        r"\b(?:Table|Tab\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]\s*",
+        re.IGNORECASE,
+    ),
+    "figure": re.compile(
+        r"\b(?:Figure|Fig\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]\s*",
+        re.IGNORECASE,
+    ),
+}
+CAPTION_TEXT_MATH_COMMAND_RE = re.compile(r"\\(?:mathrm|mathbf|mathit|mathsf|mathtt)\s*\{\s*([^{}]+?)\s*\}")
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
 BARE_OPERATOR_EQUATION_RE = re.compile(r"^\\(?:arc)?(?:sin|cos|tan)\s*=")
@@ -131,6 +191,7 @@ GREEK_TO_LATEX = {
     "ζ": r"\zeta",
     "η": r"\eta",
     "θ": r"\theta",
+    "ℓ": r"\ell",
     "ι": r"\iota",
     "κ": r"\kappa",
     "λ": r"\lambda",
@@ -442,11 +503,13 @@ def is_algorithm_like_node(record: dict[str, Any], text: str) -> bool:
     return bool(PSEUDOCODE_START_RE.match(str(text or "")))
 
 
-def render_algorithm_block(text: str) -> str:
+def render_algorithm_block(text: str, *, label: str | None = None) -> str:
     caption, commands = parse_pseudo_code(text)
     lines = [r"\begin{algorithm}[H]"]
     if caption:
         lines.append(rf"\caption{{{escape_latex(caption)}}}")
+    if label:
+        lines.append(rf"\label{{{label}}}")
     lines.append(r"\begin{algorithmic}[1]")
     lines.extend(commands or [r"\State " + format_algorithmic_text(text)])
     lines.append(r"\end{algorithmic}")
@@ -586,29 +649,54 @@ def render_table_placeholder(
     source_pdf: str | Path | None = None,
     asset_output_dir: str | Path | None = None,
     asset_latex_prefix: str = "assets",
+    as_nonfloat: bool = False,
+    label: str | None = None,
 ) -> str:
     if int(record.get("table_group_size") or 1) > 1 and record.get("table_group_primary") is False:
         return ""
     table_id = table_node_identifier(record)
     bbox = format_table_bbox(record.get("table_group_bbox") or record.get("bbox"))
     caption = table_caption_text(record) or extract_table_caption(text) or "Table reconstruction placeholder"
+    caption = clean_float_caption_text(caption, "table") or "Table reconstruction placeholder"
     graphic = ensure_table_pdf_crop(
         record,
         source_pdf=source_pdf or cfg_source_pdf(record),
         asset_output_dir=asset_output_dir,
         asset_latex_prefix=asset_latex_prefix,
     )
+    source_layout = record.get("source_table_layout") if isinstance(record.get("source_table_layout"), dict) else {}
+    source_width_scope = str(source_layout.get("source_width_scope") or "").casefold()
+    source_environment = str(source_layout.get("source_environment") or "").casefold()
+    if source_width_scope == "page" or source_environment == "table*":
+        wide = True
+    elif source_width_scope == "column":
+        wide = False
+    else:
+        wide = is_wide_visual_record(record, bbox_keys=("table_group_bbox", "bbox"))
     todo = f"% [TODO_TABLE_RECONSTRUCT: BBOX={bbox}, ID={table_id}]"
-    graphic_line = rf"\includegraphics[width=\linewidth]{{{graphic}}}" if graphic else todo
-    return "\n".join(
-        [
-            r"\begin{table}[H]",
-            r"\centering",
-            graphic_line,
-            rf"\caption{{{escape_latex(caption)}}}",
-            r"\end{table}",
-        ]
-    )
+    include_width = r"\linewidth" if as_nonfloat else (r"\textwidth" if wide else r"\linewidth")
+    graphic_line = rf"\includegraphics[width={include_width}]{{{graphic}}}" if graphic else todo
+    # ``table*`` is allowed to float away from the source position in
+    # two-column layouts, and ``[H]`` does not reliably pin double-column
+    # floats.  Keep every reconstructed table in a normal float with [H]; wide
+    # tables still use ``\textwidth`` so the crop can span the available page
+    # width when it is emitted outside a multicol band.
+    environment = "table"
+    placement = "H"
+    lines = [r"\begin{center}"] if as_nonfloat else [rf"\begin{{{environment}}}[{placement}]", r"\centering"]
+    if source_layout:
+        lines.append(
+            "% [SOURCE_TABLE_LAYOUT: "
+            f"env={source_layout.get('source_environment')}, "
+            f"placement={source_layout.get('source_placement')}, "
+            f"width={source_layout.get('source_width_scope')}]"
+        )
+    lines.append(graphic_line)
+    lines.append(rf"\captionof{{table}}{{{render_text_with_inline_latex(caption)}}}" if as_nonfloat else rf"\caption{{{render_text_with_inline_latex(caption)}}}")
+    if label:
+        lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{center}" if as_nonfloat else rf"\end{{{environment}}}")
+    return "\n".join(lines)
 
 
 def figure_placeholder(record: dict[str, Any]) -> str:
@@ -625,10 +713,13 @@ def render_figure_block(
     asset_output_dir: str | Path | None = None,
     asset_latex_prefix: str = "assets",
     rendered_caption: str | None = None,
+    as_nonfloat: bool = False,
+    label: str | None = None,
 ) -> str:
     caption = rendered_caption
     if caption is None:
         caption_text = str(record.get("figure_group_caption") or record.get("image_group_caption") or record.get("figure_caption") or record.get("caption") or text or "Figure")
+        caption_text = clean_float_caption_text(caption_text, "figure") or "Figure"
         caption = render_text_with_inline_latex(caption_text)
     asset_path = ensure_figure_asset(
         record,
@@ -637,31 +728,113 @@ def render_figure_block(
         asset_latex_prefix=asset_latex_prefix,
     )
     graphic_line = (
-        rf"\includegraphics[width={figure_include_width(record)}\linewidth]{{{asset_path}}}"
+        rf"\includegraphics[width={'1.000' if as_nonfloat else figure_include_width(record)}\linewidth]{{{asset_path}}}"
         if asset_path
         else figure_placeholder(record)
     )
-    return "\n".join(
-        [
-            r"\begin{figure}[H]",
-            r"\centering",
+    if as_nonfloat:
+        lines = [
+            r"\begin{center}",
             graphic_line,
-            rf"\caption{{{caption}}}",
-            r"\end{figure}",
+            rf"\captionof{{figure}}{{{caption}}}",
         ]
-    )
+        if label:
+            lines.append(rf"\label{{{label}}}")
+        lines.append(r"\end{center}")
+        return "\n".join(lines)
+    lines = [
+        r"\begin{figure}[H]",
+        r"\centering",
+        graphic_line,
+        rf"\caption{{{caption}}}",
+    ]
+    if label:
+        lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{figure}")
+    return "\n".join(lines)
+
+
+def render_figure_minipage_group(
+    records: Sequence[dict[str, Any]],
+    text: str = "",
+    *,
+    source_pdf: str | Path | None = None,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+    rendered_caption: str | None = None,
+    as_nonfloat: bool = False,
+    label: str | None = None,
+) -> str:
+    members = [_figure_member_record(record) for record in records]
+    members = [record for record in members if record_bbox(record) is not None or any(record.get(key) for key in ("img_path", "image_path", "figure_path", "figure_asset_path", "image_asset_path"))]
+    if not members:
+        return render_figure_block(
+            records[0] if records else {"type": "figure"},
+            text,
+            source_pdf=source_pdf,
+            asset_output_dir=asset_output_dir,
+            asset_latex_prefix=asset_latex_prefix,
+            rendered_caption=rendered_caption,
+            as_nonfloat=as_nonfloat,
+            label=label,
+        )
+    members = sorted(members, key=_figure_member_sort_key)
+    caption = rendered_caption
+    if caption is None:
+        caption_text = _figure_group_caption(records, text)
+        caption_text = clean_float_caption_text(caption_text, "figure") or "Figure"
+        caption = render_text_with_inline_latex(caption_text or "Figure")
+    group_width = 0.96 if as_nonfloat else _figure_group_width_fraction(records, members)
+    widths = _figure_minipage_widths(members)
+    lines = [r"\begin{center}"] if as_nonfloat else [r"\begin{figure}[H]", r"\centering"]
+    chunks: list[str] = []
+    for member, width in zip(members, widths):
+        asset_path = ensure_figure_asset(
+            member,
+            source_pdf=source_pdf or cfg_source_pdf(member),
+            asset_output_dir=asset_output_dir,
+            asset_latex_prefix=asset_latex_prefix,
+        )
+        graphic_line = (
+            rf"\includegraphics[width=\linewidth]{{{asset_path}}}"
+            if asset_path
+            else figure_placeholder(member)
+        )
+        chunks.append(
+            "\n".join(
+                [
+                    rf"\begin{{minipage}}[t]{{{width:.3f}\linewidth}}",
+                    r"\centering",
+                    graphic_line,
+                    r"\end{minipage}",
+                ]
+            )
+        )
+    image_row = r"\hfill".join(chunks)
+    if group_width < 0.90:
+        lines.extend(
+            [
+                rf"\begin{{minipage}}[t]{{{group_width:.3f}\linewidth}}",
+                r"\centering",
+                image_row,
+                r"\end{minipage}",
+            ]
+        )
+    else:
+        lines.append(image_row)
+    if caption:
+        lines.append(rf"\captionof{{figure}}{{{caption}}}" if as_nonfloat else rf"\caption{{{caption}}}")
+    if label:
+        lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{center}" if as_nonfloat else r"\end{figure}")
+    return "\n".join(lines)
 
 
 def figure_include_width(record: dict[str, Any]) -> str:
-    bbox = record.get("figure_group_bbox") or record.get("image_group_bbox") or record.get("bbox")
-    if not isinstance(bbox, list) or len(bbox) < 4:
+    bbox = first_record_bbox(record, ("bbox", "figure_group_bbox", "image_group_bbox"))
+    if bbox is None:
         return "0.95"
-    try:
-        width = float(bbox[2]) - float(bbox[0])
-    except (TypeError, ValueError):
-        return "0.95"
-    page_width = _number_or_none(record.get("page_width")) or 1000.0
-    ratio = max(min(width / max(page_width, 1.0), 0.98), 0.25)
+    ratio = _visual_width_fraction_from_bbox(bbox, [record])
     return f"{ratio:.3f}"
 
 
@@ -674,6 +847,117 @@ def figure_node_identifier(record: dict[str, Any]) -> str:
     if value is not None:
         return f"figure_{value}"
     return "figure_unknown"
+
+
+def _figure_member_record(record: dict[str, Any]) -> dict[str, Any]:
+    member = dict(record)
+    for key in (
+        "figure_group_bbox",
+        "image_group_bbox",
+        "figure_group_id",
+        "image_group_id",
+        "figure_group_caption",
+        "image_group_caption",
+        "figure_group_member_ids",
+        "image_group_member_ids",
+        "figure_group_member_node_ids",
+        "image_group_member_node_ids",
+        "figure_group_primary",
+        "image_group_primary",
+        "figure_group_size",
+        "image_group_size",
+        "figure_group_render_strategy",
+        "image_group_render_strategy",
+    ):
+        member.pop(key, None)
+    return member
+
+
+def _figure_member_sort_key(record: dict[str, Any]) -> tuple[int, float, float, int]:
+    member_index = record.get("figure_group_member_index")
+    if member_index is None:
+        member_index = record.get("image_group_member_index")
+    box = record_bbox(record) or (0.0, 0.0, 0.0, 0.0)
+    if member_index is not None:
+        try:
+            return (0, float(member_index), box[0], int(record.get("global_order") or 0))
+        except (TypeError, ValueError):
+            pass
+    return (1, box[1], box[0], int(record.get("global_order") or 0))
+
+
+def _figure_group_caption(records: Sequence[dict[str, Any]], fallback: str) -> str:
+    for record in records:
+        value = (
+            record.get("figure_group_caption")
+            or record.get("image_group_caption")
+            or record.get("figure_caption")
+            or record.get("image_caption")
+            or record.get("caption")
+        )
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    return fallback
+
+
+def _figure_minipage_widths(records: Sequence[dict[str, Any]]) -> list[float]:
+    boxes = [record_bbox(record) for record in records]
+    raw_widths = [max((box[2] - box[0]) if box else 1.0, 1.0) for box in boxes]
+    total = sum(raw_widths)
+    if total <= 0:
+        return [0.96 / max(len(records), 1)] * len(records)
+    widths = [0.96 * width / total for width in raw_widths]
+    if len(widths) == 1:
+        return [min(max(widths[0], 0.35), 0.96)]
+    min_width = 0.16 if len(widths) > 3 else 0.20
+    max_width = 0.78 if len(widths) == 2 else 0.55
+    widths = [min(max(width, min_width), max_width) for width in widths]
+    total = sum(widths)
+    if total > 0.96:
+        scale = 0.96 / total
+        widths = [width * scale for width in widths]
+    return widths
+
+
+def _figure_group_width_fraction(
+    records: Sequence[dict[str, Any]],
+    members: Sequence[dict[str, Any]],
+) -> float:
+    member_boxes = [box for box in (record_bbox(member) for member in members) if box is not None]
+    if member_boxes:
+        return _visual_width_fraction_from_bbox(union_bbox(member_boxes), list(records) + list(members))
+    for record in records:
+        group_box = first_record_bbox(record, ("figure_group_bbox", "image_group_bbox"))
+        if group_box is not None:
+            return _visual_width_fraction_from_bbox(group_box, records)
+    return 0.96
+
+
+def _visual_width_fraction_from_bbox(
+    bbox: tuple[float, float, float, float],
+    records: Sequence[dict[str, Any]],
+) -> float:
+    width = max(float(bbox[2]) - float(bbox[0]), 0.0)
+    if width <= 0:
+        return 0.95
+    page_width = _page_width_for_visual_records(records, bbox)
+    page_ratio = width / max(page_width, 1.0)
+    if page_ratio >= 0.62:
+        return 0.98
+    # For figures rendered outside the main multicol flow, preserve their
+    # physical width instead of expanding every crop to the full text width.
+    return min(max(page_ratio, 0.22), 0.95)
+
+
+def _page_width_for_visual_records(
+    records: Sequence[dict[str, Any]],
+    fallback_bbox: tuple[float, float, float, float],
+) -> float:
+    for record in records:
+        value = _number_or_none(record.get("page_width"))
+        if value and value > 0:
+            return float(value)
+    return max(float(fallback_bbox[2]), 1000.0)
 
 
 def cfg_source_pdf(record: dict[str, Any]) -> str | None:
@@ -736,6 +1020,85 @@ def extract_table_caption(text: str) -> str | None:
     return " ".join(match.group(1).split())
 
 
+def clean_float_caption_text(text: str, kind: str) -> str:
+    """Normalize OCR float captions before feeding them to ``\\caption``.
+
+    The source PDF visibly contains labels such as ``Table 3:`` and
+    ``Figure 2:``, but LaTeX generates those labels itself.  Keeping the
+    recognized label inside ``\\caption{...}`` renders duplicate prefixes.
+    Caption OCR also often turns short prose tokens such as ``N/A`` into
+    spaced math commands (``\\mathrm { N } / \\mathrm { A }``), which should
+    be plain text in the generated caption.
+    """
+
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ""
+    value = normalize_caption_ocr_math(value)
+    value = select_float_caption_segment(value, kind)
+    value = strip_float_caption_label(value, kind)
+    return value.strip(" \t\n\r:.-–—")
+
+
+def select_float_caption_segment(text: str, kind: str) -> str:
+    """Pick the caption segment belonging to this float kind.
+
+    MinerU can occasionally attach adjacent float captions to one visual group,
+    e.g. ``Table 5: ... Figure 3: ...``.  A table should not inherit the
+    following figure caption, and a figure should start from its own label.
+    """
+
+    value = str(text or "")
+    normalized_kind = str(kind or "").casefold()
+    table_label = FLOAT_CAPTION_ANY_LABEL_RE["table"]
+    figure_label = FLOAT_CAPTION_ANY_LABEL_RE["figure"]
+    if normalized_kind == "table":
+        figure_match = figure_label.search(value, 1)
+        if figure_match:
+            return value[: figure_match.start()].rstrip(" ;,")
+        return value
+    if normalized_kind == "figure":
+        figure_match = figure_label.search(value)
+        if figure_match:
+            return value[figure_match.start() :]
+        table_match = table_label.search(value)
+        if table_match and table_match.start() == 0:
+            return ""
+    return value
+
+
+def strip_float_caption_label(text: str, kind: str) -> str:
+    value = str(text or "")
+    pattern = FLOAT_CAPTION_LABEL_RE.get(str(kind or "").casefold())
+    if pattern is None:
+        return value
+    # OCR and metadata can both carry the visible label, producing
+    # ``Table 3: Table 3: ...``.  Strip all leading labels and let LaTeX own
+    # the counter.
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = pattern.sub("", value, count=1).lstrip()
+    return value
+
+
+def normalize_caption_ocr_math(text: str) -> str:
+    value = str(text or "")
+    value = CAPTION_TEXT_MATH_COMMAND_RE.sub(_caption_math_command_to_text, value)
+    value = re.sub(r"\b([A-Za-z])\s*/\s*([A-Za-z])\b", r"\1/\2", value)
+    value = re.sub(r"\s+([,.;:])", r"\1", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return value
+
+
+def _caption_math_command_to_text(match: re.Match[str]) -> str:
+    body = " ".join(match.group(1).split())
+    compact = "".join(body.split())
+    if compact and len(compact) <= 12 and re.fullmatch(r"[A-Za-z0-9/+_.-]+", compact):
+        return compact
+    return body
+
+
 def _safe_code_verbatim_char(char: str) -> str:
     if ord(char) < 128:
         return char
@@ -795,26 +1158,46 @@ def title_command(text: str, *, depth: int) -> str:
     return SECTION_COMMANDS[min(max(0, depth), len(SECTION_COMMANDS) - 1)]
 
 
-def render_equation(text: str) -> str:
-    stripped = str(text or "").strip()
+def render_equation(text: str, *, label: str | None = None) -> str:
+    stripped = normalize_display_math_text(str(text or "").strip())
     if not stripped:
         return "\\[\n\n\\]"
     multi_tag_render = render_multi_tag_equation(stripped)
     if multi_tag_render:
-        return multi_tag_render
+        return inject_display_math_label(multi_tag_render, label)
     if stripped.startswith("\\[") or stripped.startswith("$$"):
-        return stripped
+        return inject_display_math_label(stripped, label)
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
     if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
-        return stripped
+        return inject_display_math_label(stripped, label)
     body, tag = split_trailing_equation_number(stripped)
     if tag is not None:
-        return "\\begin{equation}\n" + body + rf" \tag{{{tag}}}" + "\n\\end{equation}"
+        label_line = f"\\label{{{label}}}\n" if label else ""
+        return "\\begin{equation}\n" + label_line + body + rf" \tag{{{tag}}}" + "\n\\end{equation}"
     if TAG_RE.search(stripped):
-        return "\\begin{equation}\n" + stripped + "\n\\end{equation}"
+        label_line = f"\\label{{{label}}}\n" if label else ""
+        return "\\begin{equation}\n" + label_line + stripped + "\n\\end{equation}"
     if should_render_as_align(stripped):
-        return "\\begin{align}\n" + stripped + "\n\\end{align}"
+        label_line = f"\\label{{{label}}}\n" if label else ""
+        return "\\begin{align}\n" + label_line + stripped + "\n\\end{align}"
+    if label:
+        return "\\begin{equation}\n" + rf"\label{{{label}}}" + "\n" + stripped + "\n\\end{equation}"
     return "\\[\n" + stripped + "\n\\]"
+
+
+def inject_display_math_label(latex: str, label: str | None) -> str:
+    if not label or r"\label{" in str(latex or ""):
+        return latex
+    value = str(latex or "")
+    begin_match = re.search(r"\\begin\{(?:equation|align|gather|eqnarray|flalign|multline)\*?\}", value)
+    if begin_match:
+        insert_at = begin_match.end()
+        return value[:insert_at] + "\n" + rf"\label{{{label}}}" + value[insert_at:]
+    if value.startswith("\\[") and value.endswith("\\]"):
+        return "\\begin{equation}\n" + rf"\label{{{label}}}" + "\n" + value[2:-2].strip() + "\n\\end{equation}"
+    if value.startswith("$$") and value.endswith("$$"):
+        return "\\begin{equation}\n" + rf"\label{{{label}}}" + "\n" + value[2:-2].strip() + "\n\\end{equation}"
+    return value
 
 
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
@@ -894,11 +1277,106 @@ def render_inline_math(text: str) -> str:
 
 def normalize_inline_math_unicode(text: str) -> str:
     normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
-    return normalize_duplicate_math_command_slashes(normalized)
+    normalized = normalize_duplicate_math_command_slashes(normalized)
+    return normalize_math_ocr_spacing(separate_glued_math_commands(normalized))
+
+
+def normalize_display_math_text(text: str) -> str:
+    """Repair MinerU/OCR LaTeX fragments before emitting display math.
+
+    The OCR path often returns valid-looking LaTeX with command spacing such as
+    ``\\operatorname* { m i n }`` and ``\\mathcal { L }``.  LaTeX compiles it,
+    but the rendered equation becomes visually sparse and equation tags appear
+    separated by a huge blank.  This cleanup keeps the original formula
+    semantics while compacting only known math command patterns.
+    """
+
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    normalized = normalize_duplicate_math_command_slashes(normalized)
+    normalized = separate_glued_math_commands(normalized)
+    normalized = normalize_math_ocr_spacing(normalized)
+    return normalized.strip()
+
+
+MATH_TEXT_BRACE_COMMANDS = {
+    "mathrm",
+    "mathbf",
+    "mathit",
+    "mathsf",
+    "mathtt",
+    "mathcal",
+    "mathbfcal",
+    "mathbb",
+    "mathscr",
+    "boldsymbol",
+    "pmb",
+}
+SPACED_OPERATOR_COMMANDS = {
+    "min": r"\min",
+    "max": r"\max",
+    "lim": r"\lim",
+    "sup": r"\sup",
+    "inf": r"\inf",
+    "argmin": r"\arg\min",
+    "argmax": r"\arg\max",
+}
+MATH_COMMAND_BRACE_RE = re.compile(r"\\(?P<cmd>[A-Za-z]+)\s*\{\s*(?P<body>[^{}]+?)\s*\}")
+SPACED_OPERATORNAME_RE = re.compile(r"\\operatorname\*?\s*\{\s*(?P<body>[A-Za-z](?:\s+[A-Za-z]){1,16})\s*\}")
+
+
+def normalize_math_ocr_spacing(text: str) -> str:
+    value = str(text or "")
+    value = SPACED_OPERATORNAME_RE.sub(_replace_spaced_operatorname, value)
+    value = MATH_COMMAND_BRACE_RE.sub(_replace_spaced_math_command, value)
+    value = re.sub(r"\\operatorname\s*\{\s*([^{}]+?)\s*\}", lambda m: r"\operatorname{" + " ".join(m.group(1).split()) + "}", value)
+    value = re.sub(r"\\operatorname\*\s*\{\s*([^{}]+?)\s*\}", lambda m: r"\operatorname*{" + " ".join(m.group(1).split()) + "}", value)
+    value = re.sub(r"\s+([_^])\s*", r"\1", value)
+    value = re.sub(r"([_^])\s+\{", r"\1{", value)
+    value = re.sub(r"([_^])\{\s*(\\[A-Za-z]+\{[^{}]+\})\s*\}", r"\1{\2}", value)
+    value = re.sub(r"([_^])\{\s*([^{}]+?)\s*\}", lambda m: m.group(1) + "{" + " ".join(m.group(2).split()) + "}", value)
+    value = re.sub(r"\\left\s*\\\|", lambda _: r"\left\|", value)
+    value = re.sub(r"\\right\s*\\\|", lambda _: r"\right\|", value)
+    value = re.sub(r"\s+,", ",", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return value
+
+
+def _replace_spaced_operatorname(match: re.Match[str]) -> str:
+    compact = "".join(match.group("body").split()).casefold()
+    return SPACED_OPERATOR_COMMANDS.get(compact, r"\operatorname{" + compact + "}")
+
+
+def _replace_spaced_math_command(match: re.Match[str]) -> str:
+    cmd = match.group("cmd")
+    body = match.group("body")
+    if cmd not in MATH_TEXT_BRACE_COMMANDS:
+        return match.group(0)
+    compact_body = "".join(body.split()) if _looks_like_spaced_math_token(body) else " ".join(body.split())
+    return rf"\{cmd}{{{compact_body}}}"
+
+
+def _looks_like_spaced_math_token(text: str) -> bool:
+    pieces = str(text or "").split()
+    if not pieces:
+        return False
+    if len(pieces) == 1:
+        return True
+    return len(pieces) <= 12 and all(re.fullmatch(r"[A-Za-z0-9]+", piece) for piece in pieces)
 
 
 def normalize_duplicate_math_command_slashes(text: str) -> str:
     return re.sub(r"\\\\([A-Za-z]+)", r"\\\1", str(text or ""))
+
+
+GLUED_MATH_COMMAND_RE = re.compile(
+    r"\\(times|sigma|sim|ell|lambda|Phi|phi|theta|rho|mu|alpha|beta|gamma|delta|epsilon|in)(?=[A-Z])"
+)
+
+
+def separate_glued_math_commands(text: str) -> str:
+    """Repair OCR-style command/variable glue such as ``\\timesY``."""
+
+    return GLUED_MATH_COMMAND_RE.sub(lambda match: f"\\{match.group(1)} ", str(text or ""))
 
 
 def is_plausible_inline_math_payload(text: str) -> bool:
@@ -1368,6 +1846,10 @@ def escape_latex(text: str) -> str:
 
 
 def _escape_latex_char(char: str, replacements: dict[str, str]) -> str:
+    if char in {"\n", "\t"}:
+        return char
+    if ord(char) < 32 or ord(char) == 127:
+        return ""
     if char in UNICODE_LATEX_REPLACEMENTS:
         return UNICODE_LATEX_REPLACEMENTS[char]
     if char in replacements:
@@ -1377,7 +1859,11 @@ def _escape_latex_char(char: str, replacements: dict[str, str]) -> str:
     ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
     if ascii_fallback:
         return "".join(replacements.get(fallback_char, fallback_char) for fallback_char in ascii_fallback)
-    return "?"
+    # Do not inject literal question marks for glyphs that pdflatex cannot
+    # represent.  Most such glyphs are OCR debris or unsupported math symbols;
+    # a visible ``?`` is more misleading than a silent drop.  Common math/text
+    # symbols are covered by UNICODE_LATEX_REPLACEMENTS above.
+    return ""
 
 
 def safe_verbatim_text(text: str) -> str:
@@ -1390,7 +1876,7 @@ def _safe_verbatim_char(char: str) -> str:
     if char in UNICODE_LATEX_REPLACEMENTS:
         return UNICODE_LATEX_REPLACEMENTS[char]
     ascii_fallback = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
-    return ascii_fallback or "?"
+    return ascii_fallback or ""
 
 
 ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
@@ -1403,6 +1889,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "ζ": r"\zeta",
     "η": r"\eta",
     "θ": r"\theta",
+    "ℓ": r"\ell",
     "ι": r"\iota",
     "κ": r"\kappa",
     "λ": r"\lambda",
@@ -1583,15 +2070,33 @@ UNICODE_LATEX_REPLACEMENTS = {
     "ϵ": r"\ensuremath{\epsilon}",
     "ε": r"\ensuremath{\epsilon}",
     "η": r"\ensuremath{\eta}",
+    "ζ": r"\ensuremath{\zeta}",
     "θ": r"\ensuremath{\theta}",
+    "ι": r"\ensuremath{\iota}",
+    "κ": r"\ensuremath{\kappa}",
+    "ℓ": r"\ensuremath{\ell}",
     "λ": r"\ensuremath{\lambda}",
     "μ": r"\ensuremath{\mu}",
+    "ν": r"\ensuremath{\nu}",
+    "ξ": r"\ensuremath{\xi}",
     "π": r"\ensuremath{\pi}",
+    "ρ": r"\ensuremath{\rho}",
     "σ": r"\ensuremath{\sigma}",
+    "τ": r"\ensuremath{\tau}",
+    "υ": r"\ensuremath{\upsilon}",
     "φ": r"\ensuremath{\phi}",
+    "χ": r"\ensuremath{\chi}",
+    "ψ": r"\ensuremath{\psi}",
     "ω": r"\ensuremath{\omega}",
+    "Γ": r"\ensuremath{\Gamma}",
     "Δ": r"\ensuremath{\Delta}",
+    "Θ": r"\ensuremath{\Theta}",
+    "Λ": r"\ensuremath{\Lambda}",
+    "Ξ": r"\ensuremath{\Xi}",
+    "Π": r"\ensuremath{\Pi}",
     "Σ": r"\ensuremath{\Sigma}",
+    "Φ": r"\ensuremath{\Phi}",
+    "Ψ": r"\ensuremath{\Psi}",
     "Ω": r"\ensuremath{\Omega}",
     "≤": r"\ensuremath{\leq}",
     "≥": r"\ensuremath{\geq}",
@@ -1599,12 +2104,53 @@ UNICODE_LATEX_REPLACEMENTS = {
     "≈": r"\ensuremath{\approx}",
     "±": r"\ensuremath{\pm}",
     "×": r"\ensuremath{\times}",
+    "÷": r"\ensuremath{\div}",
     "∞": r"\ensuremath{\infty}",
+    "∂": r"\ensuremath{\partial}",
+    "∇": r"\ensuremath{\nabla}",
     "∈": r"\ensuremath{\in}",
+    "∉": r"\ensuremath{\notin}",
+    "∋": r"\ensuremath{\ni}",
+    "⊂": r"\ensuremath{\subset}",
+    "⊆": r"\ensuremath{\subseteq}",
+    "⊃": r"\ensuremath{\supset}",
+    "⊇": r"\ensuremath{\supseteq}",
+    "∪": r"\ensuremath{\cup}",
+    "∩": r"\ensuremath{\cap}",
+    "∧": r"\ensuremath{\wedge}",
+    "∨": r"\ensuremath{\vee}",
+    "¬": r"\ensuremath{\neg}",
+    "∀": r"\ensuremath{\forall}",
+    "∃": r"\ensuremath{\exists}",
+    "∅": r"\ensuremath{\emptyset}",
     "∑": r"\ensuremath{\sum}",
     "∫": r"\ensuremath{\int}",
+    "∝": r"\ensuremath{\propto}",
+    "∼": r"\ensuremath{\sim}",
+    "≃": r"\ensuremath{\simeq}",
+    "≅": r"\ensuremath{\cong}",
+    "≡": r"\ensuremath{\equiv}",
+    "≪": r"\ensuremath{\ll}",
+    "≫": r"\ensuremath{\gg}",
+    "⋅": r"\ensuremath{\cdot}",
+    "·": r"\ensuremath{\cdot}",
+    "∗": r"\ensuremath{*}",
+    "∥": r"\ensuremath{\parallel}",
+    "√": r"\ensuremath{\sqrt{}}",
     "→": r"\ensuremath{\rightarrow}",
     "←": r"\ensuremath{\leftarrow}",
+    "↔": r"\ensuremath{\leftrightarrow}",
+    "⟶": r"\ensuremath{\longrightarrow}",
+    "⟵": r"\ensuremath{\longleftarrow}",
+    "⇔": r"\ensuremath{\Leftrightarrow}",
+    "⇒": r"\ensuremath{\Rightarrow}",
+    "⇐": r"\ensuremath{\Leftarrow}",
+    "′": r"\ensuremath{'}",
+    "″": r"\ensuremath{''}",
+    "°": r"\ensuremath{^\circ}",
+    "¹": r"\ensuremath{^1}",
+    "²": r"\ensuremath{^2}",
+    "³": r"\ensuremath{^3}",
     "–": "--",
     "—": "---",
     "−": r"\ensuremath{-}",

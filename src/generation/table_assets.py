@@ -79,12 +79,49 @@ def should_group_table_fragments(left: dict[str, Any], right: dict[str, Any]) ->
         return False
     page_width = page_width_from_records(left, right)
     x_gap = bbox_x_gap(left_box, right_box)
+    left_caption = table_caption_text(left)
+    right_caption = table_caption_text(right)
+    # Two independently captioned tables placed side by side should stay split.
+    if left_caption and right_caption:
+        return normalized_caption_text(left_caption) == normalized_caption_text(right_caption)
     if x_gap > max(35.0, 0.08 * page_width):
         return False
-    # Two independently captioned tables placed side by side should stay split.
-    if table_caption_text(left) and table_caption_text(right):
-        return False
+    # A common failure mode is two unrelated column-local tables with similar
+    # vertical extent.  They overlap in Y, but there is no shared caption/title
+    # evidence.  Keep those split unless the fragments physically touch; a true
+    # cross-column table should either have a common caption or be one wide box.
+    if not left_caption and not right_caption and are_in_opposite_columns(left_box, right_box, page_width):
+        if x_gap > max(12.0, 0.018 * page_width):
+            return False
     return True
+
+
+def are_in_opposite_columns(
+    left_box: tuple[float, float, float, float],
+    right_box: tuple[float, float, float, float],
+    page_width: float,
+) -> bool:
+    center = page_width / 2.0
+    left_center = (left_box[0] + left_box[2]) / 2.0
+    right_center = (right_box[0] + right_box[2]) / 2.0
+    return (left_center < center < right_center) or (right_center < center < left_center)
+
+
+def normalized_caption_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def is_wide_visual_record(record: dict[str, Any], *, bbox_keys: tuple[str, ...] = ("bbox",), threshold: float = 0.62) -> bool:
+    bbox = first_record_bbox(record, bbox_keys)
+    if bbox is None:
+        return False
+    page_width = float(record.get("page_width") or 1000.0)
+    width_ratio = max(bbox[2] - bbox[0], 0.0) / max(page_width, 1.0)
+    if width_ratio >= threshold:
+        return True
+    center = page_width / 2.0
+    gutter_margin = 0.045 * page_width
+    return bbox[0] < center - gutter_margin and bbox[2] > center + gutter_margin
 
 
 def ensure_table_pdf_crop(

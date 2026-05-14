@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 from src.ir import BlockType, DocumentIR, DocumentNode
@@ -29,6 +30,14 @@ AUTHOR_YEAR_TEXTUAL_RE = re.compile(
     r"\((?P<year>(?:19|20)\d{2}[a-z]?)\)"
 )
 AUTHOR_YEAR_SPLIT_RE = re.compile(r"\s*;\s*")
+BBL_BIBITEM_RE = re.compile(
+    r"\\bibitem(?:\[(?P<display>(?:[^\]\\]|\\.)*)\])?\{(?P<key>[^{}]+)\}",
+    re.DOTALL,
+)
+BIBLIOGRAPHY_ENV_RE = re.compile(
+    r"\\begin\{thebibliography\}(?:\{[^{}]*\})?.*?\\end\{thebibliography\}",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,8 @@ class CitationResolution:
     text_by_node_id: dict[str, str]
     unresolved_markers: list[str] = field(default_factory=list)
     citation_style: str = "numeric"
+    raw_bibliography_latex: str | None = None
+    source_bbl_path: str | None = None
 
     @property
     def entries_by_label(self) -> dict[str, BibliographyEntry]:
@@ -93,8 +104,9 @@ class CitationResolver:
     def __init__(self, config: CitationResolverConfig | None = None) -> None:
         self.config = config or CitationResolverConfig()
 
-    def resolve_document(self, document: DocumentIR) -> CitationResolution:
-        entries = self._extract_bibliography_entries(document)
+    def resolve_document(self, document: DocumentIR, *, source_tex_path: str | Path | None = None) -> CitationResolution:
+        source_bibliography = self._resolve_source_bibliography(source_tex_path)
+        entries = source_bibliography.entries if source_bibliography is not None else self._extract_bibliography_entries(document)
         label_to_key = {entry.label: entry.key for entry in entries}
         author_year_to_key = author_year_lookup(entries)
         text_by_node_id: dict[str, str] = {}
@@ -123,7 +135,19 @@ class CitationResolver:
             text_by_node_id=text_by_node_id,
             unresolved_markers=unresolved_markers,
             citation_style=infer_citation_style(entries, occurrences),
+            raw_bibliography_latex=source_bibliography.raw_latex if source_bibliography is not None else None,
+            source_bbl_path=str(source_bibliography.path) if source_bibliography is not None else None,
         )
+
+    def _resolve_source_bibliography(self, source_tex_path: str | Path | None) -> "_SourceBibliography | None":
+        bbl_path = find_bbl_for_tex(source_tex_path)
+        if bbl_path is None:
+            return None
+        raw_latex = bbl_path.read_text(encoding="utf-8", errors="replace")
+        entries = parse_bbl_entries(raw_latex)
+        if not entries:
+            return None
+        return _SourceBibliography(path=bbl_path, raw_latex=normalize_bbl_latex(raw_latex), entries=entries)
 
     def _extract_bibliography_entries(self, document: DocumentIR) -> list[BibliographyEntry]:
         entries: list[BibliographyEntry] = []
@@ -157,6 +181,13 @@ class CitationResolver:
                 )
                 next_index += 1
         return _dedupe_entries(entries)
+
+
+@dataclass(frozen=True)
+class _SourceBibliography:
+    path: Path
+    raw_latex: str
+    entries: list[BibliographyEntry]
 
 
 def iter_reference_texts(node: DocumentNode) -> Iterable[tuple[str, dict[str, Any]]]:
@@ -204,6 +235,98 @@ def split_reference_label(text: str) -> tuple[str | None, str]:
         return None, value
     label = match.group("bracket") or match.group("number")
     return label, value[match.end() :].strip()
+
+
+def find_bbl_for_tex(source_tex_path: str | Path | None) -> Path | None:
+    """Return the compiled bibliography for a TeX source when one exists.
+
+    We prefer the exact sibling ``main.tex`` -> ``main.bbl``.  If that is not
+    available, a single ``*.bbl`` in the source directory is a safe fallback for
+    arXiv packages where the main file may be named differently by the scanner.
+    """
+
+    if source_tex_path is None:
+        return None
+    tex_path = Path(source_tex_path)
+    if not tex_path.exists():
+        return None
+    exact = tex_path.with_suffix(".bbl")
+    if exact.exists():
+        return exact
+    candidates = sorted(path for path in tex_path.parent.glob("*.bbl") if path.is_file())
+    if len(candidates) == 1:
+        return candidates[0]
+    for preferred_name in ("main.bbl", "arxiv.bbl", "paper.bbl", "ms.bbl"):
+        preferred = tex_path.parent / preferred_name
+        if preferred.exists():
+            return preferred
+    return None
+
+
+def normalize_bbl_latex(raw_latex: str) -> str:
+    """Keep the source bibliography as LaTeX.
+
+    Compiled ``.bbl`` files sometimes define small helper macros before
+    ``thebibliography`` (for example ``\natexlab`` or URL fallbacks).  Preserve
+    those definitions instead of trimming to the environment; otherwise the
+    generated document may compile differently from the source package.
+    """
+
+    value = str(raw_latex or "").strip()
+    if not value:
+        return ""
+    # Keep source LaTeX commands such as \newblock, {\em ...}, accents and URLs.
+    # Only remove comments so they do not leak into generated source.
+    lines = []
+    for line in value.splitlines():
+        lines.append(re.sub(r"(?<!\\)%.*$", "", line).rstrip())
+    return "\n".join(lines).strip()
+
+
+def parse_bbl_entries(raw_latex: str) -> list[BibliographyEntry]:
+    """Parse ``\\bibitem`` metadata while preserving the raw BBL for rendering."""
+
+    value = normalize_bbl_latex(raw_latex)
+    matches = list(BBL_BIBITEM_RE.finditer(value))
+    entries: list[BibliographyEntry] = []
+    for index, match in enumerate(matches, start=1):
+        next_start = matches[index].start() if index < len(matches) else _bibliography_end_start(value, len(value))
+        body = value[match.end() : next_start].strip()
+        key = sanitize_citation_key(match.group("key"))
+        display_label = normalize_author_year_display_label(match.group("display") or "") or None
+        label = str(index)
+        author_year = infer_author_year_from_bbl_item(display_label, body)
+        entries.append(
+            BibliographyEntry(
+                key=key,
+                label=label,
+                text=body,
+                display_label=display_label,
+                authors=author_year.authors if author_year else None,
+                year=author_year.year if author_year else None,
+                metadata={"source": "bbl", "original_key": match.group("key"), "ordinal": index},
+            )
+        )
+    return entries
+
+
+def _bibliography_end_start(value: str, fallback: int) -> int:
+    match = re.search(r"\\end\{thebibliography\}", value)
+    return match.start() if match else fallback
+
+
+def infer_author_year_from_bbl_item(display_label: str | None, body: str) -> AuthorYearLabel | None:
+    if display_label:
+        parsed = parse_author_year_part(display_label)
+        if parsed:
+            surname, year = parsed
+            return AuthorYearLabel(
+                authors=display_label,
+                surname=surname,
+                year=year,
+                display_label=display_label,
+            )
+    return infer_author_year(body, {})
 
 
 def strip_reference_label(text: str) -> str:

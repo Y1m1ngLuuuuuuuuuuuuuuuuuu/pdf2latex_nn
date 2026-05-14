@@ -158,3 +158,59 @@ def test_table_fragments_are_grouped_by_union_bbox_metadata():
     assert records[1]["table_group_primary"] is True
     assert records[1]["table_group_bbox"] == [100.0, 100.0, 390.0, 500.0]
     assert records[1]["table_group_caption"] == "Table 1: Wide result table."
+
+
+def test_table_ir_text_keeps_caption_but_not_cell_body():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 900, 300],
+                "table_caption": "Table 1: Accuracy results.",
+                "table_body": "<table><tr><td>model</td><td>99</td></tr></table>",
+                "style_spans": [],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="table-demo")
+
+    assert document.nodes[0].node_type == BlockType.TABLE
+    assert document.nodes[0].text == "Table 1: Accuracy results."
+    assert "model" not in document.nodes[0].text
+    assert document.nodes[0].metadata["table_body"] == "<table><tr><td>model</td><td>99</td></tr></table>"
+
+
+def test_duplicate_shadow_nodes_are_not_rendered_in_document_ir():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "All experiments used an NVIDIA RTX 8000 GPU with 48GB memory.",
+                "layout_layer": "main_text_flow",
+                "style_spans": [],
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 1,
+                "global_order": 1,
+                "bbox": [100, 80, 450, 120],
+                "text": "with 48GB memory.",
+                "layout_layer": "main_text_flow",
+                "style_spans": [],
+            },
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="dedupe-demo")
+
+    assert [node.text for node in document.nodes] == [
+        "All experiments used an NVIDIA RTX 8000 GPU with 48GB memory."
+    ]

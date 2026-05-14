@@ -2433,6 +2433,11 @@ def expose_math_payload(value: str) -> str:
 def pdf_item_text(item: dict[str, Any]) -> str:
     """Resolve the best text-bearing field from a MinerU content item."""
 
+    item_type = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").lower()
+    if "table" in item_type:
+        caption = table_caption_only_text(item)
+        return caption or "[TABLE]"
+
     for key in (
         "text_for_embedding",
         "text",
@@ -2451,13 +2456,22 @@ def pdf_item_text(item: dict[str, Any]) -> str:
     span_text = style_spans_text(item.get("style_spans"))
     if span_text.strip():
         return span_text
-    item_type = str(item.get("type") or item.get("raw_type") or "").lower()
     if "equation" in item_type or "formula" in item_type:
         return "[MATH]"
     if "figure" in item_type or "image" in item_type:
         return "[FIGURE]"
     if "table" in item_type:
         return "[TABLE]"
+    return ""
+
+
+def table_caption_only_text(item: dict[str, Any]) -> str:
+    for key in ("table_group_caption", "table_caption", "caption"):
+        if key not in item:
+            continue
+        text = stringify_text_payload(item[key])
+        if text.strip():
+            return " ".join(text.split())
     return ""
 
 

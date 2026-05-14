@@ -30,6 +30,10 @@ class StyleProfileExtractorConfig:
     header_footer_repeat_min_pages: int = 2
     header_footer_repeat_min_page_ratio: float = 0.35
     page_number_min_page_ratio: float = 0.50
+    output_paper: str = "a4"
+    output_paper_width_pt: float = 595.28
+    output_paper_height_pt: float = 841.89
+    body_font_bucket_pt: float = 0.25
 
 
 class StyleProfileExtractor:
@@ -50,14 +54,34 @@ class StyleProfileExtractor:
         }
         body_font_info = resolve_pdf_font(body_font_family)
         font_clusters = self._extract_font_clusters(document, body_font_size)
-        paragraph_spacing = self._estimate_paragraph_spacing(document)
-        paragraph_indent = self._estimate_paragraph_indent(document, page_layout)
-        display_spacing = self._estimate_display_spacing(document, body_font_size)
-        list_spacing = self._estimate_list_spacing(document, body_font_size)
+        paragraph_spacing = self._normalize_paragraph_spacing(
+            self._estimate_paragraph_spacing(document),
+            page_layout,
+            body_font_size,
+        )
+        paragraph_indent = self._scaled_horizontal_length(
+            self._estimate_paragraph_indent(document, page_layout),
+            page_layout,
+        )
+        display_spacing = self._normalize_vertical_spacing_dict(
+            self._estimate_display_spacing(document, body_font_size),
+            page_layout,
+            max_multiplier=2.0,
+            body_font_size=body_font_size,
+        )
+        list_spacing = self._normalize_vertical_spacing_dict(
+            self._estimate_list_spacing(document, body_font_size),
+            page_layout,
+            max_multiplier=1.2,
+            body_font_size=body_font_size,
+        )
         renderer_options = {
             "body_font_size": body_font_size,
             "body_font_family": body_font_family,
             "body_font_class": body_font_info.font_class if body_font_info else None,
+            "body_text_width": page_layout.get("body_text_width"),
+            "body_column_width": page_layout.get("body_column_width"),
+            "body_text_region_width": page_layout.get("body_text_region_width"),
             "font_clusters": font_clusters["global"],
             "role_font_clusters": font_clusters["by_role"],
             "paragraph_indent": paragraph_indent,
@@ -67,6 +91,8 @@ class StyleProfileExtractor:
             "bibliography": self._extract_bibliography_style(document, body_font_size),
             "header_footer": self._extract_header_footer_style(document),
             "column_mode": page_layout.get("column_mode"),
+            "column_gap": page_layout.get("column_gap"),
+            "column_gap_pt": self._scaled_horizontal_length(page_layout.get("column_gap"), page_layout),
             "mixed_column_strategy": "multicols_by_layout_band" if page_layout.get("column_mode") == "mixed" else None,
             "geometry_options": self._geometry_options_from_layout(page_layout),
             "font_setup": build_latex_font_setup(body_font_family, role_fonts),
@@ -110,6 +136,10 @@ class StyleProfileExtractor:
         mixed_band_pages = 0
         text_widths: list[float] = []
         text_heights: list[float] = []
+        body_text_widths: list[float] = []
+        body_text_region_widths: list[float] = []
+        body_column_widths: list[float] = []
+        body_margins_by_page: list[dict[str, float]] = []
         for page in document.pages:
             nodes = page_nodes.get(page.page_idx, [])
             boxes = [box for node in nodes if _is_layout_node(node) for box in node.bboxes]
@@ -135,6 +165,21 @@ class StyleProfileExtractor:
                 column_gaps.append(gap)
             if count >= 2 and _page_has_full_width_blocker(nodes, page.width, self.config.full_width_threshold):
                 mixed_band_pages += 1
+            body_geometry = _estimate_page_body_text_geometry(nodes, page.width, self.config.full_width_threshold)
+            if body_geometry:
+                body_text_width = _float_or_none(body_geometry.get("text_width"))
+                body_region_width = _float_or_none(body_geometry.get("text_region_width"))
+                body_margins = body_geometry.get("margins")
+                if body_text_width:
+                    body_text_widths.append(body_text_width)
+                if body_region_width:
+                    body_text_region_widths.append(body_region_width)
+                if isinstance(body_margins, dict):
+                    body_margins_by_page.append(body_margins)
+                for value in body_geometry.get("column_widths", []):
+                    width = _float_or_none(value)
+                    if width:
+                        body_column_widths.append(width)
 
         column_count = _dominant_int(column_counts, default=1)
         two_column_ratio = 0.0
@@ -152,6 +197,7 @@ class StyleProfileExtractor:
             column_mode = "mixed"
 
         margins = _median_margins(margins_by_page)
+        body_margins = _median_margins(body_margins_by_page) if body_margins_by_page else {}
         column_gap = _safe_median(column_gaps, 0.0)
         return {
             "page_width": page_width,
@@ -159,8 +205,14 @@ class StyleProfileExtractor:
             "aspect_ratio": (page_width / page_height) if page_height else None,
             "margins": margins,
             "margin_ratios": _margin_ratios(margins, page_width, page_height),
+            "body_margins": body_margins,
+            "body_margin_ratios": _margin_ratios(body_margins, page_width, page_height) if body_margins else {},
             "text_width": _safe_median(text_widths, None),
             "text_height": _safe_median(text_heights, None),
+            "body_text_width": _safe_median(body_text_widths, None),
+            "body_text_region_width": _safe_median(body_text_region_widths, None),
+            "body_column_width": _safe_median(body_column_widths, None),
+            "body_column_width_ratio": (_safe_median(body_column_widths, None) / page_width) if page_width and body_column_widths else None,
             "column_count": column_count,
             "column_gap": column_gap,
             "column_gap_ratio": (column_gap / page_width) if page_width and column_gap is not None else None,
@@ -174,13 +226,13 @@ class StyleProfileExtractor:
     def _estimate_body_font_size(self, document: DocumentIR) -> float | None:
         weighted_sizes: Counter[float] = Counter()
         for node in document.nodes:
-            if node.node_type not in {BlockType.TEXT, BlockType.LIST, BlockType.REFERENCE}:
+            if not _is_body_style_node(node):
                 continue
             for size, weight in _iter_span_sizes(node, self.config.min_body_span_chars):
-                weighted_sizes[round(size, 2)] += weight
-            fallback = _node_feature_float(node, "font_size")
+                weighted_sizes[_bucket_font_size(size, self.config.body_font_bucket_pt)] += weight
+            fallback = _node_feature_float(node, "style_baseline_size") or _node_feature_float(node, "font_size")
             if fallback:
-                weighted_sizes[round(fallback, 2)] += max(len(node.text), 1)
+                weighted_sizes[_bucket_font_size(fallback, self.config.body_font_bucket_pt)] += max(len(node.text), 1)
         if not weighted_sizes:
             return None
         return float(weighted_sizes.most_common(1)[0][0])
@@ -188,7 +240,7 @@ class StyleProfileExtractor:
     def _estimate_body_font_family(self, document: DocumentIR) -> str | None:
         weighted_fonts: Counter[str] = Counter()
         for node in document.nodes:
-            if node.node_type not in {BlockType.TEXT, BlockType.LIST, BlockType.REFERENCE}:
+            if not _is_body_style_node(node):
                 continue
             for span in node.spans:
                 font_name = (span.font_name or "").strip()
@@ -513,16 +565,75 @@ class StyleProfileExtractor:
         page_width = _float_or_none(page_layout.get("page_width"))
         page_height = _float_or_none(page_layout.get("page_height"))
         margins = page_layout.get("margins") if isinstance(page_layout.get("margins"), dict) else {}
+        body_margins = page_layout.get("body_margins") if isinstance(page_layout.get("body_margins"), dict) else {}
         if not page_width or not page_height or not isinstance(margins, dict):
             return {}
+        horizontal_margins = body_margins if _valid_horizontal_margins(body_margins) else margins
+        if self.config.output_paper.casefold() == "a4":
+            return {
+                "paperwidth": _pt(self.config.output_paper_width_pt),
+                "paperheight": _pt(self.config.output_paper_height_pt),
+                "left": _scaled_margin_pt(horizontal_margins.get("left"), page_width, self.config.output_paper_width_pt),
+                "right": _scaled_margin_pt(horizontal_margins.get("right"), page_width, self.config.output_paper_width_pt),
+                "top": _scaled_margin_pt(margins.get("top"), page_height, self.config.output_paper_height_pt),
+                "bottom": _scaled_margin_pt(margins.get("bottom"), page_height, self.config.output_paper_height_pt),
+            }
         return {
             "paperwidth": _pt_from_normalized(page_width),
             "paperheight": _pt_from_normalized(page_height),
-            "left": _pt_from_normalized(_float_or_none(margins.get("left"))),
-            "right": _pt_from_normalized(_float_or_none(margins.get("right"))),
+            "left": _pt_from_normalized(_float_or_none(horizontal_margins.get("left"))),
+            "right": _pt_from_normalized(_float_or_none(horizontal_margins.get("right"))),
             "top": _pt_from_normalized(_float_or_none(margins.get("top"))),
             "bottom": _pt_from_normalized(_float_or_none(margins.get("bottom"))),
         }
+
+    def _scaled_horizontal_length(self, value: object, page_layout: dict[str, object]) -> float | None:
+        source = _float_or_none(value)
+        page_width = _float_or_none(page_layout.get("page_width"))
+        if source is None or not page_width:
+            return None
+        if self.config.output_paper.casefold() == "a4":
+            return source / page_width * self.config.output_paper_width_pt
+        return source * 0.792
+
+    def _scaled_vertical_length(self, value: object, page_layout: dict[str, object]) -> float | None:
+        source = _float_or_none(value)
+        page_height = _float_or_none(page_layout.get("page_height"))
+        if source is None or not page_height:
+            return None
+        if self.config.output_paper.casefold() == "a4":
+            return source / page_height * self.config.output_paper_height_pt
+        return source * 0.792
+
+    def _normalize_paragraph_spacing(
+        self,
+        value: object,
+        page_layout: dict[str, object],
+        body_font_size: float | None,
+    ) -> float | None:
+        scaled = self._scaled_vertical_length(value, page_layout)
+        if scaled is None:
+            return None
+        if body_font_size:
+            return min(max(scaled, 0.0), body_font_size * 0.45)
+        return min(max(scaled, 0.0), 4.0)
+
+    def _normalize_vertical_spacing_dict(
+        self,
+        values: dict[str, float | None],
+        page_layout: dict[str, object],
+        *,
+        max_multiplier: float,
+        body_font_size: float | None,
+    ) -> dict[str, float | None]:
+        limit = body_font_size * max_multiplier if body_font_size else None
+        normalized: dict[str, float | None] = {}
+        for key, value in values.items():
+            scaled = self._scaled_vertical_length(value, page_layout)
+            if scaled is not None and limit is not None:
+                scaled = min(max(scaled, 0.0), limit)
+            normalized[key] = scaled
+        return normalized
 
 
 def _nodes_by_page(nodes: Iterable[DocumentNode]) -> dict[int, list[DocumentNode]]:
@@ -534,6 +645,71 @@ def _nodes_by_page(nodes: Iterable[DocumentNode]) -> dict[int, list[DocumentNode
 
 def _is_layout_node(node: DocumentNode) -> bool:
     return node.node_type not in {BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE, BlockType.TOC, BlockType.OTHER}
+
+
+def _is_body_style_node(node: DocumentNode) -> bool:
+    if node.node_type not in {BlockType.TEXT, BlockType.LIST}:
+        return False
+    layer = str(node.metadata.get("layout_layer") or "").casefold()
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    if layer in {"metadata_layer", "noise_layer", "float_layer"}:
+        return False
+    if role in {"caption", "figure_caption", "table_caption", "abstract_title", "author", "affiliation"}:
+        return False
+    if node.flags.get("is_noise") or node.node_type in {BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE}:
+        return False
+    return bool((node.text or "").strip())
+
+
+def _estimate_page_body_text_geometry(
+    nodes: list[DocumentNode],
+    page_width: float,
+    full_width_threshold: float,
+) -> dict[str, object]:
+    boxes = [
+        node.bboxes[0]
+        for node in nodes
+        if _is_body_style_node(node)
+        and node.bboxes
+        and 4.0 <= max(node.bboxes[0].x1 - node.bboxes[0].x0, 0.0) < full_width_threshold * max(page_width, 1.0)
+    ]
+    if not boxes:
+        return {}
+    min_x = min(box.x0 for box in boxes)
+    max_x = max(box.x1 for box in boxes)
+    margins = {"left": max(min_x, 0.0), "right": max(page_width - max_x, 0.0)}
+    columns = _split_body_text_columns(boxes, page_width)
+    column_widths = [
+        _safe_median([max(box.x1 - box.x0, 0.0) for box in column], None)
+        for column in columns
+        if column
+    ]
+    column_widths = [float(width) for width in column_widths if width]
+    text_region_width = max(max_x - min_x, 0.0)
+    text_width = _safe_median([max(box.x1 - box.x0, 0.0) for box in boxes], None)
+    return {
+        "margins": margins,
+        "text_width": text_width,
+        "text_region_width": text_region_width,
+        "column_widths": column_widths,
+    }
+
+
+def _split_body_text_columns(boxes: list[BBox], page_width: float) -> list[list[BBox]]:
+    if len(boxes) < 2 or page_width <= 0:
+        return [boxes]
+    centers = sorted((((box.x0 + box.x1) / 2.0, box.x0, box.y0, box) for box in boxes), key=lambda item: (item[0], item[1], item[2]))
+    gaps = [(centers[index + 1][0] - centers[index][0], index) for index in range(len(centers) - 1)]
+    if not gaps:
+        return [boxes]
+    largest_gap, split_index = max(gaps)
+    if largest_gap < 0.12 * page_width:
+        return [boxes]
+    left = [box for _center, _x0, _y0, box in centers[: split_index + 1]]
+    right = [box for _center, _x0, _y0, box in centers[split_index + 1 :]]
+    if not left or not right:
+        return [boxes]
+    return [left, right]
 
 
 def _estimate_page_columns(
@@ -591,6 +767,12 @@ def _iter_span_sizes(node: DocumentNode, min_chars: int) -> Iterable[tuple[float
         if char_count < min_chars:
             continue
         yield float(span.font_size), max(char_count, 1)
+
+
+def _bucket_font_size(size: float, bucket: float) -> float:
+    if bucket <= 0:
+        return round(float(size), 2)
+    return round(round(float(size) / bucket) * bucket, 2)
 
 
 def _style_flag_ratio(node: DocumentNode, flag_name: str) -> float | None:
@@ -794,6 +976,31 @@ def _pt_from_normalized(value: float | None) -> str:
     if value is None:
         return "0pt"
     return f"{max(float(value), 0.0) * 0.792:.2f}pt"
+
+
+def _pt(value: float | None) -> str:
+    if value is None:
+        return "0pt"
+    return f"{max(float(value), 0.0):.2f}pt"
+
+
+def _scaled_margin_pt(value: object, source_extent: float, target_extent_pt: float) -> str:
+    margin = _float_or_none(value)
+    if margin is None or source_extent <= 0:
+        return "0pt"
+    scaled = max(margin, 0.0) / source_extent * target_extent_pt
+    # Avoid pathological full-page margins from noisy extraction, while keeping
+    # the original paper's relative whitespace.
+    scaled = min(max(scaled, 18.0), target_extent_pt * 0.28)
+    return _pt(scaled)
+
+
+def _valid_horizontal_margins(margins: dict[str, object]) -> bool:
+    left = _float_or_none(margins.get("left"))
+    right = _float_or_none(margins.get("right"))
+    if left is None or right is None:
+        return False
+    return left >= 0 and right >= 0
 
 
 def _dominant_int(values: Iterable[int], *, default: int) -> int:

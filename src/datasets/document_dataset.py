@@ -9,7 +9,12 @@ from typing import Any
 
 from src.perception.schema import FeatureTensorSchema
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data, V7ContractError
-from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7
+from src.reasoning.graph_builder import (
+    GraphBuildConfig,
+    build_graph_from_content_v7,
+    build_merge_candidate_mask,
+    build_message_edge_mask,
+)
 from src.reasoning.label_generator import AlignmentQualityError, LabelGeneratorConfig, label_graph_edges_from_paths
 
 try:
@@ -137,7 +142,8 @@ class DocumentDataset(Dataset):  # type: ignore[misc]
     def get(self, idx: int) -> Any:
         entries = self._processed_index()
         entry = entries[idx]
-        return torch.load(Path(self.processed_dir) / entry["path"], map_location="cpu", weights_only=False)
+        data = torch.load(Path(self.processed_dir) / entry["path"], map_location="cpu", weights_only=False)
+        return sanitize_graph_data(data, config=self.config, require_labels=has_valid_edge_labels(data))
 
     def process(self) -> None:
         label_config = LabelGeneratorConfig(similarity_threshold=self.config.alignment_threshold)
@@ -301,6 +307,30 @@ def sanitize_graph_data(
         raise GraphFilterError(f"bad edge_attr shape: {tuple(data.edge_attr.shape)}")
     if int(data.edge_attr.shape[0]) != int(data.edge_index.shape[1]):
         raise GraphFilterError("edge_attr rows must match edge_index columns")
+    edge_count = int(data.edge_index.shape[1])
+    if hasattr(data, "message_edge_mask") and data.message_edge_mask is not None:
+        data.message_edge_mask = data.message_edge_mask.to(dtype=torch.bool)
+        if data.message_edge_mask.ndim != 1 or int(data.message_edge_mask.shape[0]) != edge_count:
+            raise GraphFilterError(f"bad message_edge_mask shape: {tuple(data.message_edge_mask.shape)}")
+    elif hasattr(data, "node_records") and isinstance(data.node_records, list) and len(data.node_records) == int(data.x.shape[0]):
+        data.message_edge_mask = build_message_edge_mask(
+            data.node_records,
+            edge_index=data.edge_index,
+            edge_source_types=getattr(data, "edge_source_types", None),
+        )
+    else:
+        data.message_edge_mask = torch.ones((edge_count,), dtype=torch.bool)
+    if hasattr(data, "merge_candidate_mask") and data.merge_candidate_mask is not None:
+        data.merge_candidate_mask = data.merge_candidate_mask.to(dtype=torch.bool)
+        if data.merge_candidate_mask.ndim != 1 or int(data.merge_candidate_mask.shape[0]) != edge_count:
+            raise GraphFilterError(f"bad merge_candidate_mask shape: {tuple(data.merge_candidate_mask.shape)}")
+    elif hasattr(data, "node_records") and isinstance(data.node_records, list) and len(data.node_records) == int(data.x.shape[0]):
+        data.merge_candidate_mask = build_merge_candidate_mask(
+            data.node_records,
+            edge_index=data.edge_index,
+        )
+    else:
+        data.merge_candidate_mask = torch.ones((edge_count,), dtype=torch.bool)
     if int(data.x.shape[0]) == 0:
         raise GraphFilterError("empty node graph")
     if cfg.drop_empty_edge_graphs and int(data.edge_index.shape[1]) == 0:

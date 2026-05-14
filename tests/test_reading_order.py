@@ -1,4 +1,5 @@
 from src.perception.reading_order import (
+    annotate_duplicate_contained_continuations,
     build_content_v7,
     detect_list_marker,
     document_toc_metadata,
@@ -172,6 +173,251 @@ def test_refresh_content_v7_marks_span_based_run_in_heading():
     assert "run_in_heading" not in items[1]
 
 
+def test_refresh_content_v7_does_not_mark_research_sections_as_front_matter_after_body_start():
+    payload = {
+        "items": [
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [40, 30, 760, 80],
+                "text_for_embedding": "A Paper About Code Optimization",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [300, 95, 500, 115],
+                "text_for_embedding": "University of Example",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [40, 150, 380, 315],
+                "text_for_embedding": "Abstract—This paper studies code optimization.",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [120, 340, 310, 365],
+                "text_for_embedding": "I. INTRODUCTION",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [40, 380, 380, 520],
+                "text_for_embedding": "The introduction body starts here.",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [120, 545, 360, 570],
+                "text_for_embedding": "II. RESEARCH DESIGN",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [40, 590, 380, 650],
+                "text_for_embedding": "This project adopts a research design canvas.",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [430, 300, 620, 325],
+                "text_for_embedding": "A. Research Team",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [430, 340, 770, 440],
+                "text_for_embedding": "The research team comprises the following.",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [430, 455, 770, 545],
+                "text_for_embedding": "1) Core researcher: I serve as the principal investigator.",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [430, 570, 620, 595],
+                "text_for_embedding": "B. Research Topic",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [430, 610, 770, 700],
+                "text_for_embedding": "The research focuses on trustworthy code optimization.",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [260, 740, 540, 755],
+                "text_for_embedding": "Submission to the DECS of CHASE 2025. © with the authors.",
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    by_text = {item["text_for_embedding"]: item for item in refreshed["items"]}
+
+    for text in ["II. RESEARCH DESIGN", "A. Research Team", "B. Research Topic"]:
+        assert by_text[text]["layout_layer"] == "main_text_flow"
+        assert by_text[text]["layout_role"] == "heading"
+        assert by_text[text]["is_main_flow_candidate"] is True
+        assert any(probe["reason"] == "weak_affiliation_keyword" for probe in by_text[text]["layout_probes"])
+
+    for text in [
+        "The research team comprises the following.",
+        "1) Core researcher: I serve as the principal investigator.",
+    ]:
+        assert by_text[text]["layout_layer"] == "main_text_flow"
+        assert by_text[text]["is_main_flow_candidate"] is True
+
+    footer = by_text["Submission to the DECS of CHASE 2025. © with the authors."]
+    assert footer["layout_layer"] == "noise_layer"
+    assert footer["layout_role"] == "noise"
+    assert footer["is_main_flow_candidate"] is False
+    assert "Submission to the DECS" not in " ".join(
+        item["text_for_embedding"] for item in filter_graph_content_items(refreshed["items"])
+    )
+
+
+def test_refresh_content_v7_keeps_pre_heading_epigraph_source_out_of_body_graph():
+    payload = {
+        "items": [
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [230, 100, 570, 135],
+                "text_for_embedding": "Verbalized Bayesian Persuasion",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [340, 270, 460, 292],
+                "text_for_embedding": "Abstract",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [145, 305, 655, 470],
+                "text_for_embedding": "Information design explores how a sender influences receivers.",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [170, 540, 690, 580],
+                "text_for_embedding": "You can fool some of the people all of the time, and all of the people some of the time.",
+            },
+            {
+                "type": "title",
+                "page_idx": 0,
+                "bbox": [185, 660, 355, 690],
+                "text_for_embedding": "1 Introduction",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [560, 610, 710, 630],
+                "text_for_embedding": "Abraham Lincoln",
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [110, 710, 690, 790],
+                "text_for_embedding": "Persuasion plays a significant role in modern economies.",
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    by_text = {item["text_for_embedding"]: item for item in refreshed["items"]}
+
+    source = by_text["Abraham Lincoln"]
+    assert source["layout_layer"] == "metadata_layer"
+    assert source["layout_role"] == "front_matter"
+    assert source["is_main_flow_candidate"] is False
+    assert source["front_matter_reason"] == "pre_heading_epigraph_source"
+
+
+def test_refresh_content_v7_marks_repeated_header_footer_as_noise():
+    payload = {
+        "items": [
+            {"type": "paragraph", "page_idx": 0, "bbox": [200, 20, 500, 38], "text_for_embedding": "Journal of Examples"},
+            {"type": "title", "page_idx": 0, "bbox": [80, 120, 320, 145], "text_for_embedding": "1 Introduction"},
+            {"type": "paragraph", "page_idx": 0, "bbox": [80, 170, 520, 260], "text_for_embedding": "First page body."},
+            {"type": "paragraph", "page_idx": 0, "bbox": [300, 950, 320, 965], "text_for_embedding": "1"},
+            {"type": "paragraph", "page_idx": 1, "bbox": [200, 20, 500, 38], "text_for_embedding": "Journal of Examples"},
+            {"type": "paragraph", "page_idx": 1, "bbox": [80, 120, 520, 260], "text_for_embedding": "Second page body."},
+            {"type": "paragraph", "page_idx": 1, "bbox": [300, 950, 320, 965], "text_for_embedding": "2"},
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    headers = [item for item in refreshed["items"] if item["text_for_embedding"] == "Journal of Examples"]
+    page_numbers = [item for item in refreshed["items"] if item["text_for_embedding"] in {"1", "2"}]
+
+    assert {item["layout_layer"] for item in headers} == {"noise_layer"}
+    assert {item["layout_role"] for item in headers} == {"header"}
+    assert {item["layout_role"] for item in page_numbers} == {"page_number"}
+    assert "Journal of Examples" not in " ".join(item["text_for_embedding"] for item in filter_graph_content_items(refreshed["items"]))
+
+
+def test_refresh_content_v7_marks_bottom_marker_notes_as_annotation_layer():
+    payload = {
+        "items": [
+            {"type": "title", "page_idx": 0, "bbox": [80, 80, 320, 105], "text_for_embedding": "1 Introduction"},
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [80, 140, 520, 260],
+                "text_for_embedding": "Main body text.",
+                "style_spans": [{"text": "Main body text.", "font_size": 10.0}],
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [80, 900, 520, 930],
+                "text_for_embedding": "1 This work was supported by a grant.",
+                "style_spans": [{"text": "1 This work was supported by a grant.", "font_size": 8.0}],
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    footnote = next(item for item in refreshed["items"] if item["text_for_embedding"].startswith("1 This work"))
+
+    assert footnote["layout_layer"] == "annotation_layer"
+    assert footnote["layout_role"] == "footnote"
+    assert footnote["is_main_flow_candidate"] is False
+    assert all(not item["text_for_embedding"].startswith("1 This work") for item in filter_graph_content_items(refreshed["items"]))
+
+
+def test_refresh_content_v7_attaches_float_caption_to_nearby_figure_group():
+    payload = {
+        "items": [
+            {"type": "title", "page_idx": 0, "bbox": [80, 60, 260, 85], "text_for_embedding": "1 Introduction"},
+            {"type": "image", "page_idx": 0, "bbox": [90, 140, 390, 320], "text_for_embedding": ""},
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [90, 330, 390, 370],
+                "text_for_embedding": "Figure 1: Example architecture.",
+            },
+            {"type": "paragraph", "page_idx": 0, "bbox": [90, 400, 390, 480], "text_for_embedding": "Body continues."},
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    figure = next(item for item in refreshed["items"] if item["type"] == "image")
+    caption = next(item for item in refreshed["items"] if item["text_for_embedding"].startswith("Figure 1"))
+
+    assert caption["layout_layer"] == "float_layer"
+    assert caption["layout_role"] == "figure_caption"
+    assert figure["figure_group_id"] == caption["figure_group_id"]
+    assert figure["figure_group_caption"] == "Figure 1: Example architecture."
+
+
 def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_span_separator():
     nodes = [
         {"type": "paragraph", "text_for_embedding": "left before", "bbox": [80, 100, 450, 150]},
@@ -307,6 +553,44 @@ def test_content_v7_marks_list_items_without_merging_or_rewriting_bbox():
     assert items[1]["bbox"] == [80, 150, 450, 180]
     assert items[2]["list_item_id"] is None
     assert all("merge_count" not in item for item in items)
+
+
+def test_duplicate_contained_continuation_is_marked_and_filtered_from_graph_items():
+    items = [
+        {
+            "type": "paragraph",
+            "page_idx": 0,
+            "global_order": 0,
+            "text_for_embedding": "All experiments used an NVIDIA RTX 8000 GPU with 48GB memory.",
+            "bbox": [100, 100, 450, 180],
+            "layout_layer": "main_text_flow",
+        },
+        {
+            "type": "table",
+            "page_idx": 0,
+            "global_order": 1,
+            "text_for_embedding": "Table 1: Results.",
+            "bbox": [100, 190, 900, 360],
+            "layout_layer": "float_layer",
+        },
+        {
+            "type": "paragraph",
+            "page_idx": 1,
+            "global_order": 2,
+            "text_for_embedding": "with 48GB memory.",
+            "bbox": [100, 80, 450, 120],
+            "layout_layer": "main_text_flow",
+        },
+    ]
+
+    annotated = annotate_duplicate_contained_continuations(items)
+
+    assert annotated[2]["duplicate_shadow"] is True
+    assert annotated[2]["no_render"] is True
+    assert [item["text_for_embedding"] for item in filter_graph_content_items(annotated)] == [
+        "All experiments used an NVIDIA RTX 8000 GPU with 48GB memory.",
+        "Table 1: Results.",
+    ]
 
 
 def test_two_column_page_uses_state_machine_left_column_then_right_column():

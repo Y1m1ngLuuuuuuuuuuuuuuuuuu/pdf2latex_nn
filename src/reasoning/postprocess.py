@@ -99,6 +99,12 @@ INLINE_MATH_COMMANDS = {
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
 NUMERIC_ID_RE = re.compile(r"\d+")
+MERGE_TERMINAL_PUNCT_RE = re.compile(r"[.!?。！？:;；]\s*(?:[)\]”’\"}]*)$")
+MERGE_TRAILING_HYPHEN_RE = re.compile(r"[-‐‑‒–—]\s*$")
+MERGE_CONTINUATION_START_RE = re.compile(
+    r"^\s*(?:[a-z,;:)\]}]|and\b|or\b|where\b|which\b|that\b|while\b|because\b|for\b|in\b|of\b|to\b|the\b)",
+    re.IGNORECASE,
+)
 NOTE_MARKER_RE = re.compile(
     r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
 )
@@ -206,6 +212,8 @@ class TreeDecoderConfig:
     merge_parallel_y_overlap_ratio: float = 0.10
     merge_gutter_threshold: float = 30.0
     merge_gutter_page_width_ratio: float = 0.05
+    merge_continuation_threshold: float = 0.90
+    merge_hyphen_threshold: float = 0.85
     document_class: str = "article"
     packages: tuple[str, ...] = (
         "graphicx",
@@ -365,7 +373,8 @@ class TreeDecoder:
                 continue
             merge_score = float(probs[edge_pos, MERGE].item())
             label = int(probs[edge_pos].argmax().item())
-            if merge_score < self.config.merge_threshold:
+            merge_threshold = self.merge_threshold_for(node_records[source], node_records[target])
+            if merge_score < merge_threshold:
                 continue
             if self.config.require_merge_argmax and label != MERGE:
                 continue
@@ -408,6 +417,25 @@ class TreeDecoder:
             gutter_threshold=self.config.merge_gutter_threshold,
             gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
         )
+
+    def merge_threshold_for(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> float:
+        """Return an adaptive merge threshold for obvious paragraph continuations.
+
+        The global threshold is often raised to protect precision.  That should
+        not block near-certain typographic continuations, especially hyphenated
+        line/page breaks such as ``fluctua-`` + ``tion``.  We only relax the
+        threshold for adjacent reading-order pairs that already passed every
+        physical hard gate in ``can_merge``.
+        """
+
+        threshold = float(self.config.merge_threshold)
+        if not records_are_adjacent_in_reading_order(node_u, node_v):
+            return threshold
+        if record_ends_with_hyphen(node_u) and record_starts_like_continuation(node_v):
+            return min(threshold, float(self.config.merge_hyphen_threshold))
+        if record_is_open_sentence(node_u) and record_starts_like_continuation(node_v):
+            return min(threshold, float(self.config.merge_continuation_threshold))
+        return threshold
 
     def semantic_title_deduplication(self, contracted: ContractedGraph) -> ContractedGraph:
         """Alias duplicate title supernodes before NetworkX tree decoding."""
@@ -626,6 +654,7 @@ class TreeDecoder:
         for node_id in ordered_node_ids[ref_anchor_index + 1:]:
             node = nodes[node_id]
             if is_appendix_stop_title(node):
+                node.record["_appendix_heading"] = True
                 break
             if is_page_noise_node(node):
                 continue
@@ -893,7 +922,7 @@ class TreeDecoder:
     def render_child_blocks_with_dynamic_lists(self, children: list[ResolvedNode], *, depth: int) -> list[str]:
         rendered: list[str] = []
         index = 0
-        child_list = sorted_render_children(children)
+        child_list = defer_sentence_interrupting_float_nodes(sorted_render_children(children))
         while index < len(child_list):
             child = child_list[index]
             if is_page_noise_node(child):
@@ -965,7 +994,8 @@ class TreeDecoder:
             else:
                 item_body = self.render_list_item(item, depth=depth + 1)
             extra_nodes = unique_nodes_by_id([*item.children, *continuations])
-            extra_blocks = [self.render_node(node, depth=depth + 1).strip() for node in sorted_render_children(extra_nodes)]
+            ordered_extra_nodes = defer_sentence_interrupting_float_nodes(sorted_render_children(extra_nodes))
+            extra_blocks = [self.render_node(node, depth=depth + 1).strip() for node in ordered_extra_nodes]
             body_parts = [item_body, *extra_blocks]
             item_body = "\n".join(part for part in body_parts if part).strip()
             lines.append(rf"\item {item_body}".rstrip())
@@ -980,7 +1010,7 @@ class TreeDecoder:
         return self.render_dynamic_list_group(items, environment="itemize", depth=depth)
 
     def render_list(self, node: ResolvedNode, *, depth: int = 0) -> str:
-        children = sorted_render_children(node.children)
+        children = defer_sentence_interrupting_float_nodes(sorted_render_children(node.children))
         environment = list_environment_for_record(node.record, fallback_text=node.text)
         if not children:
             item_body = render_textual_node_without_list_marker(node) if node.text else ""
@@ -1753,6 +1783,70 @@ def sorted_render_children(children: list[ResolvedNode] | tuple[ResolvedNode, ..
     return sorted(child_list, key=node_reading_order_key)
 
 
+def defer_sentence_interrupting_float_nodes(children: list[ResolvedNode]) -> list[ResolvedNode]:
+    """Move floats after a local text continuation when they split an open sentence."""
+
+    if len(children) < 3:
+        return children
+
+    reordered: list[ResolvedNode] = []
+    index = 0
+    changed = False
+    while index < len(children):
+        child = children[index]
+        previous = reordered[-1] if reordered else None
+        next_node = children[index + 1] if index + 1 < len(children) else None
+        if previous is not None and next_node is not None and is_sentence_interrupting_float_node(previous, child, next_node):
+            floating_nodes: list[ResolvedNode] = []
+            while index < len(children) and is_float_render_node(children[index]):
+                floating_nodes.append(children[index])
+                index += 1
+
+            continuation_nodes: list[ResolvedNode] = []
+            while index < len(children):
+                candidate = children[index]
+                if is_float_render_node(candidate) or not is_text_flow_render_node(candidate):
+                    break
+                if not record_starts_like_continuation(candidate.record):
+                    break
+                continuation_nodes.append(candidate)
+                index += 1
+                if not record_is_open_sentence(candidate.record):
+                    break
+
+            if continuation_nodes:
+                reordered.extend(continuation_nodes)
+                reordered.extend(floating_nodes)
+                changed = True
+            else:
+                reordered.extend(floating_nodes)
+            continue
+
+        reordered.append(child)
+        index += 1
+    return reordered if changed else children
+
+
+def is_sentence_interrupting_float_node(previous: ResolvedNode, floating: ResolvedNode, next_node: ResolvedNode) -> bool:
+    return (
+        is_text_flow_render_node(previous)
+        and is_float_render_node(floating)
+        and is_text_flow_render_node(next_node)
+        and record_is_open_sentence(previous.record)
+        and record_starts_like_continuation(next_node.record)
+    )
+
+
+def is_float_render_node(node: ResolvedNode) -> bool:
+    return canonical_render_type(node.record) in {"table", "figure"}
+
+
+def is_text_flow_render_node(node: ResolvedNode) -> bool:
+    if is_page_noise_node(node):
+        return False
+    return canonical_render_type(node.record) in {"text", "list", "reference"}
+
+
 def unique_nodes_by_id(nodes: list[ResolvedNode]) -> list[ResolvedNode]:
     seen: set[int] = set()
     unique: list[ResolvedNode] = []
@@ -1985,6 +2079,32 @@ def can_contract_merge_records(
         gutter_threshold=gutter_threshold,
         gutter_page_width_ratio=gutter_page_width_ratio,
     )
+
+
+def records_are_adjacent_in_reading_order(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_index = node_physical_index(left)
+    right_index = node_physical_index(right)
+    if left_index is None or right_index is None:
+        return False
+    return 0 < right_index - left_index <= 1.01
+
+
+def record_ends_with_hyphen(record: dict[str, Any]) -> bool:
+    return bool(MERGE_TRAILING_HYPHEN_RE.search(" ".join(node_record_text(record).split())))
+
+
+def record_is_open_sentence(record: dict[str, Any]) -> bool:
+    text = " ".join(node_record_text(record).split())
+    if not text:
+        return False
+    if record_ends_with_hyphen(record):
+        return True
+    return MERGE_TERMINAL_PUNCT_RE.search(text) is None
+
+
+def record_starts_like_continuation(record: dict[str, Any]) -> bool:
+    text = " ".join(node_record_text(record).split())
+    return bool(text and MERGE_CONTINUATION_START_RE.match(text))
 
 
 def same_layout_scope_can_contract_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -2324,7 +2444,25 @@ def root_without_redundant_document_title(root: ResolvedNode, title: str | None)
 def is_appendix_stop_title(node: ResolvedNode) -> bool:
     if canonical_render_type(node.record) != "title":
         return False
-    return "appendix" in normalize_structural_heading_text(node.text).split()
+    normalized = normalize_structural_heading_text(node.text)
+    if "appendix" in normalized.split():
+        return True
+    return looks_like_appendix_letter_title(node.text)
+
+
+def looks_like_appendix_letter_title(text: str) -> bool:
+    """Return true for appendix headings like ``A Details`` after References.
+
+    Some conference styles switch into ``\appendix`` and render headings as
+    ``A Title`` without the word "Appendix".  This helper is intentionally used
+    only after a References/Bibliography anchor so ordinary early headings such
+    as "A Study ..." are not globally treated as appendix material.
+    """
+
+    value = " ".join(str(text or "").strip().split())
+    if not value:
+        return False
+    return re.match(r"^[A-Z](?:\.\d+)*\.?\s+\S", value) is not None
 
 
 def is_page_noise_node(node: ResolvedNode) -> bool:

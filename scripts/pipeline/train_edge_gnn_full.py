@@ -57,6 +57,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="full",
         help="full uses concat([Hu,Hv,Hu-Hv,Hu*Hv,Euv]); simple_concat uses concat([Hu,Hv,Euv]).",
     )
+    parser.add_argument(
+        "--message-edge-mode",
+        choices=["all", "type_aware"],
+        default="all",
+        help="all uses every candidate edge for GAT propagation; type_aware uses data.message_edge_mask for propagation only.",
+    )
+    parser.add_argument(
+        "--prediction-architecture",
+        choices=["shared", "y_network"],
+        default="shared",
+        help="shared uses one edge head after GNN; y_network bypasses GNN for MERGE and uses propagated states for PARENT/NONE.",
+    )
+    parser.add_argument(
+        "--merge-gate-mode",
+        choices=["none", "hard"],
+        default="none",
+        help="hard suppresses the MERGE logit for edges whose data.merge_candidate_mask is false.",
+    )
+    parser.add_argument("--merge-gate-logit", type=float, default=-20.0)
     parser.add_argument("--semantic-hidden-dim", type=int, default=96)
     parser.add_argument("--layout-hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -251,6 +270,10 @@ def build_model(args: argparse.Namespace) -> EdgeRelationGAT:
             predictor_hidden_dims=parse_int_tuple(args.predictor_hidden_dims),
             predictor_layer_norm=bool(args.predictor_layer_norm),
             edge_feature_mode=args.edge_feature_mode,
+            prediction_architecture=args.prediction_architecture,
+            message_edge_mode=args.message_edge_mode,
+            merge_gate_mode=args.merge_gate_mode,
+            merge_gate_logit=args.merge_gate_logit,
             disabled_node_feature_ranges=disabled_node_ranges,
             disabled_edge_attr_indices=disabled_edge_indices,
         )
@@ -515,6 +538,10 @@ def apply_train_negative_edge_dropout(batch: Any, dropout: float, *, torch: Any)
     filtered.edge_index = filtered.edge_index[:, keep_mask]
     filtered.edge_attr = filtered.edge_attr[keep_mask]
     filtered.y = y[keep_mask]
+    if hasattr(filtered, "message_edge_mask") and filtered.message_edge_mask is not None:
+        filtered.message_edge_mask = filtered.message_edge_mask[keep_mask]
+    if hasattr(filtered, "merge_candidate_mask") and filtered.merge_candidate_mask is not None:
+        filtered.merge_candidate_mask = filtered.merge_candidate_mask[keep_mask]
     if hasattr(filtered, "edge_label") and filtered.edge_label is not None:
         filtered.edge_label = filtered.y
     return filtered

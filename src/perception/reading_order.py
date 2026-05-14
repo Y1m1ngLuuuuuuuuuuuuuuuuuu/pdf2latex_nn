@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.perception.layout_probes import best_layout_probe, collect_layout_probes, has_strong_layout_probe
 from src.perception.title_features import is_front_matter_date_text
 from src.perception.xy_cut import rebuild_reading_order
 
@@ -95,6 +97,7 @@ REFERENCE_LIST_TYPE = "reference_list"
 LAYOUT_LAYER_MAIN_TEXT = "main_text_flow"
 LAYOUT_LAYER_MATH = "math_layer"
 LAYOUT_LAYER_FLOAT = "float_layer"
+LAYOUT_LAYER_ANNOTATION = "annotation_layer"
 LAYOUT_LAYER_METADATA = "metadata_layer"
 LAYOUT_LAYER_NOISE = "noise_layer"
 LAYOUT_LAYER_OTHER = "other_layer"
@@ -105,15 +108,22 @@ FLOAT_LAYOUT_TYPES = {"figure", "image", "chart", "table", "algorithm"}
 METADATA_LAYOUT_TYPES = {"title", "author", "affiliation", "abstract"}
 NOISE_LAYOUT_TYPES = AUXILIARY_TYPES | {"header", "footer"}
 TOC_ENTRY_TYPES = {"index", "toc", "table_of_contents"}
-FRONT_MATTER_AFFILIATION_RE = re.compile(
-    r"\b("
-    r"affiliation|department|university|institute|school|college|faculty|"
-    r"laborator(?:y|ies)|\blab\b|centre|center|research|academy|"
-    r"cnrs|inria|google|microsoft|norway|china|usa|uk|germany|france|italy"
-    r")\b",
+FOOTNOTE_LAYOUT_TYPES = {"page_footnote", "footnote", "foot_note"}
+MARGIN_NOTE_LAYOUT_TYPES = {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"}
+CAPTION_LABEL_RE = re.compile(r"^\s*(?P<kind>fig\.?|figure|table|algorithm)\s*\.?\s*(?P<number>[A-Za-z]?\d+(?:\.\d+)*)\s*[:.\-]", re.IGNORECASE)
+FOOTNOTE_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}|[*†‡§¶]|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)\s+")
+DUPLICATE_CONTINUATION_TYPES = {
+    "paragraph",
+    "text",
+    "list",
+    "reference",
+    "references",
+    "bibliography",
+}
+DUPLICATE_CONTINUATION_START_RE = re.compile(
+    r"^\s*(?:[a-z,;:)\]}]|and\b|or\b|with\b|where\b|which\b|that\b|while\b|because\b|for\b|in\b|of\b|to\b|the\b|as\b|from\b|by\b|on\b|using\b|under\b|between\b)",
     re.IGNORECASE,
 )
-FRONT_MATTER_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 
 @dataclass(frozen=True)
@@ -373,9 +383,12 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
         else:
             item["layout_band_global_id"] = None
             item["layout_band_global_order"] = None
+    annotate_repeated_header_footer_layers(ordered)
+    annotate_footnote_layers(ordered)
     refine_front_matter_layers(ordered)
     mark_toc_layers(ordered)
     annotate_run_in_headings(ordered)
+    ordered = annotate_duplicate_contained_continuations(ordered)
 
     return {
         "schema_version": "content_v7_columnfix_listmarkers",
@@ -389,6 +402,7 @@ def build_content_v7(native_payload: Any) -> dict[str, Any]:
             "merge_across_pages": False,
             "merge_across_columns": False,
             "rewrite_layout_positions": False,
+            "duplicate_contained_continuation_detection": True,
         },
         "items": ordered,
     }
@@ -439,9 +453,12 @@ def refresh_content_v7_layout_metadata(payload: dict[str, Any]) -> dict[str, Any
         else:
             item["layout_band_global_id"] = None
             item["layout_band_global_order"] = None
+    annotate_repeated_header_footer_layers(ordered)
+    annotate_footnote_layers(ordered)
     refine_front_matter_layers(ordered)
     mark_toc_layers(ordered)
     annotate_run_in_headings(ordered)
+    ordered = annotate_duplicate_contained_continuations(ordered)
 
     refreshed = dict(payload)
     refreshed["schema_version"] = str(payload.get("schema_version") or "content_v7_columnfix_listmarkers")
@@ -451,6 +468,7 @@ def refresh_content_v7_layout_metadata(payload: dict[str, Any]) -> dict[str, Any
     config = dict(refreshed.get("config") or {})
     config["page_object_layers"] = True
     config["local_band_metadata"] = True
+    config["duplicate_contained_continuation_detection"] = True
     refreshed["config"] = config
     return refreshed
 
@@ -537,6 +555,7 @@ def fix_columnar_reading_order(
         node["column_fix_center_margin"] = margin
         node["layout_layer"] = layer
         node["layout_role"] = infer_layout_role(node, layer=layer)
+        node["layout_probes"] = layout_probe_payloads(node)
         node["layout_band_id"] = band_id
         node["layout_band_type"] = band_type
         node["layout_band_local_order"] = band_local_order
@@ -546,6 +565,7 @@ def fix_columnar_reading_order(
         node["is_main_flow_candidate"] = layer == LAYOUT_LAYER_MAIN_TEXT
         ordered_nodes.append(node)
     _annotate_float_groups(ordered_nodes)
+    _annotate_float_caption_groups(ordered_nodes)
     return ordered_nodes
 
 
@@ -748,6 +768,7 @@ def _annotate_columnar_order(
         item["column_fix_center_margin"] = margin
         item["layout_layer"] = layer
         item["layout_role"] = infer_layout_role(item, layer=layer)
+        item["layout_probes"] = layout_probe_payloads(item)
         item["layout_band_id"] = order
         item["layout_band_type"] = "full_span"
         item["layout_band_local_order"] = 0
@@ -1021,10 +1042,113 @@ def _annotate_float_groups(nodes: list[dict[str, Any]]) -> None:
 
 def _float_caption_text(node: dict[str, Any]) -> str:
     text = _layout_text(node)
-    match = re.search(r"\b((?:Fig\.?|Figure|Table)\s*\.?\s*\d+[:.\-]?\s+.+)$", text, re.IGNORECASE | re.DOTALL)
+    match = re.search(r"\b((?:Fig\.?|Figure|Table|Algorithm)\s*\.?\s*[A-Za-z]?\d+(?:\.\d+)*[:.\-]?\s+.+)$", text, re.IGNORECASE | re.DOTALL)
     if match:
         return " ".join(match.group(1).split())
     return ""
+
+
+def _annotate_float_caption_groups(nodes: list[dict[str, Any]]) -> None:
+    for caption_index, caption_node in enumerate(nodes):
+        role = str(caption_node.get("layout_role") or "").casefold()
+        if not role.endswith("_caption"):
+            continue
+        caption_kind = role.removesuffix("_caption")
+        if caption_kind == "fig":
+            caption_kind = "figure"
+        target_index = _nearest_float_for_caption(nodes, caption_index, caption_kind=caption_kind)
+        if target_index is None:
+            continue
+        target = nodes[target_index]
+        group_key = "table_group_id" if caption_kind == "table" else "figure_group_id"
+        caption_key = "table_group_caption" if caption_kind == "table" else "figure_group_caption"
+        bbox_key = "table_group_bbox" if caption_kind == "table" else "figure_group_bbox"
+        strategy_key = "table_group_render_strategy" if caption_kind == "table" else "figure_group_render_strategy"
+        group_id = str(target.get(group_key) or f"{caption_kind}_group_p{_numeric_or_none(target.get('page_idx')) or 0:04d}_{target_index:04d}")
+        boxes = [_first_bbox(target.get("bbox")), _first_bbox(caption_node.get("bbox"))]
+        boxes = [box for box in boxes if box is not None]
+        union = [
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        ] if boxes else None
+        caption_text = _float_caption_text(caption_node)
+        member_ids = [
+            str(target.get("global_order", target_index)),
+            str(caption_node.get("global_order", caption_index)),
+        ]
+        for member_index, index in enumerate((target_index, caption_index)):
+            nodes[index].update(
+                {
+                    group_key: group_id,
+                    caption_key: caption_text,
+                    bbox_key: union,
+                    strategy_key: "caption_attached_pdf_crop",
+                    f"{caption_kind}_group_member_ids": member_ids,
+                    f"{caption_kind}_group_member_index": member_index,
+                    f"{caption_kind}_group_size": len(member_ids),
+                    f"{caption_kind}_group_primary": index == target_index,
+                }
+            )
+        if caption_kind == "figure":
+            target["image_group_id"] = group_id
+            target["image_group_caption"] = caption_text
+            target["image_group_bbox"] = union
+            caption_node["image_group_id"] = group_id
+            caption_node["image_group_caption"] = caption_text
+            caption_node["image_group_bbox"] = union
+
+
+def _nearest_float_for_caption(nodes: list[dict[str, Any]], caption_index: int, *, caption_kind: str) -> int | None:
+    caption = nodes[caption_index]
+    caption_box = _first_bbox(caption.get("bbox"))
+    if caption_box is None:
+        return None
+    page_idx = _numeric_or_none(caption.get("page_idx")) or 0
+    best: tuple[float, int] | None = None
+    for index, node in enumerate(nodes):
+        if index == caption_index:
+            continue
+        if (_numeric_or_none(node.get("page_idx")) or 0) != page_idx:
+            continue
+        if infer_layout_layer(node) != LAYOUT_LAYER_FLOAT:
+            continue
+        if str(node.get("layout_role") or "").casefold().endswith("_caption"):
+            continue
+        if not _float_kind_matches_caption(node, caption_kind):
+            continue
+        box = _first_bbox(node.get("bbox"))
+        if box is None:
+            continue
+        overlap = _x_overlap_ratio(caption_box, box)
+        if overlap < 0.20:
+            continue
+        gap = max(0.0, max(caption_box[1], box[1]) - min(caption_box[3], box[3]))
+        if gap > 180.0:
+            continue
+        order_distance = abs(int(_numeric_or_none(caption.get("global_order")) or caption_index) - int(_numeric_or_none(node.get("global_order")) or index))
+        score = gap + 12.0 * order_distance - 25.0 * overlap
+        if best is None or score < best[0]:
+            best = (score, index)
+    return best[1] if best is not None else None
+
+
+def _float_kind_matches_caption(node: dict[str, Any], caption_kind: str) -> bool:
+    raw = _layout_raw_type(node)
+    if caption_kind == "figure":
+        return raw in {"figure", "image", "chart"}
+    if caption_kind == "table":
+        return raw == "table"
+    if caption_kind == "algorithm":
+        return raw == "algorithm"
+    return False
+
+
+def _x_overlap_ratio(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    intersection = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    min_width = max(1.0, min(left[2] - left[0], right[2] - right[0]))
+    return intersection / min_width
 
 
 def infer_layout_layer(node: dict[str, Any]) -> str:
@@ -1038,6 +1162,14 @@ def infer_layout_layer(node: dict[str, Any]) -> str:
     text = _layout_text(node)
     if node_type in TOC_ENTRY_TYPES or is_toc_title_text(text):
         return LAYOUT_LAYER_METADATA
+    if has_strong_layout_probe(node, text=text, roles={"footer"}):
+        return LAYOUT_LAYER_NOISE
+    if node_type in FOOTNOTE_LAYOUT_TYPES or str(node.get("layout_role") or "").casefold() in {"footnote", "page_footnote"}:
+        return LAYOUT_LAYER_ANNOTATION
+    if node_type in MARGIN_NOTE_LAYOUT_TYPES or str(node.get("layout_role") or "").casefold() in {"margin_note", "marginnote", "side_note", "sidenote"}:
+        return LAYOUT_LAYER_ANNOTATION
+    if _caption_kind(text) is not None:
+        return LAYOUT_LAYER_FLOAT
     if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
         return LAYOUT_LAYER_MAIN_TEXT
     if node_type in NOISE_LAYOUT_TYPES:
@@ -1065,22 +1197,29 @@ def infer_layout_role(node: dict[str, Any], *, layer: str | None = None) -> str:
         return TOC_TITLE_ROLE
     if layer == LAYOUT_LAYER_NOISE:
         return "noise"
+    caption = _caption_kind(text)
+    if layer == LAYOUT_LAYER_FLOAT and caption is not None:
+        return f"{caption}_caption"
     if layer == LAYOUT_LAYER_FLOAT:
         return node_type or "float"
     if layer == LAYOUT_LAYER_MATH:
         return "inline_math" if node_type in MICRO_INLINE_MATH_TYPES else "display_math"
+    if layer == LAYOUT_LAYER_ANNOTATION:
+        if node_type in MARGIN_NOTE_LAYOUT_TYPES:
+            return "margin_note"
+        return "footnote"
     if str(node.get("list_type") or "").lower() == REFERENCE_LIST_TYPE:
         return "reference_list"
-    if detect_list_marker(text):
-        return "list_item"
     if node_type in {"title", "section", "subsection", "subsubsection", "heading"}:
         return "heading"
+    if detect_list_marker(text):
+        return "list_item"
     return "body_text" if layer == LAYOUT_LAYER_MAIN_TEXT else layer
 
 
 def is_layout_band_boundary_node(node: dict[str, Any], *, span_label: str, layer: str | None = None) -> bool:
     layer = layer or infer_layout_layer(node)
-    if layer in {LAYOUT_LAYER_FLOAT, LAYOUT_LAYER_MATH, LAYOUT_LAYER_METADATA}:
+    if layer in {LAYOUT_LAYER_FLOAT, LAYOUT_LAYER_MATH, LAYOUT_LAYER_METADATA, LAYOUT_LAYER_ANNOTATION}:
         return True
     return span_label == "FULL_SPAN" and infer_layout_role(node, layer=layer) in {"heading", "reference_list"}
 
@@ -1105,6 +1244,29 @@ def _layout_text(node: dict[str, Any]) -> str:
         if text:
             return text
     return ""
+
+
+def _caption_kind(text: str) -> str | None:
+    match = CAPTION_LABEL_RE.match(str(text or ""))
+    if not match:
+        return None
+    raw = match.group("kind").casefold().rstrip(".")
+    if raw == "fig":
+        return "figure"
+    return raw
+
+
+def layout_probe_payloads(node: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": probe.role,
+            "confidence": probe.confidence,
+            "reason": probe.reason,
+            "scope": probe.scope,
+            "strength": probe.strength,
+        }
+        for probe in collect_layout_probes(node, text=_layout_text(node))
+    ]
 
 
 def hydrate_empty_text_fields(node: dict[str, Any]) -> None:
@@ -1165,9 +1327,181 @@ def _looks_like_front_matter(node: dict[str, Any], text: str) -> bool:
         or normalized.startswith("abstract")
         or is_toc_title_text(text)
         or is_front_matter_date_text(text)
-        or FRONT_MATTER_EMAIL_RE.search(text) is not None
-        or FRONT_MATTER_AFFILIATION_RE.search(text) is not None
+        or has_strong_layout_probe(node, text=text, roles={"abstract", "front_matter", "affiliation"})
     )
+
+
+def _looks_like_footer_noise(node: dict[str, Any], text: str) -> bool:
+    return has_strong_layout_probe(node, text=text, roles={"footer"})
+
+
+def annotate_repeated_header_footer_layers(
+    items: list[dict[str, Any]],
+    *,
+    zone_ratio: float = 0.18,
+    min_pages: int = 2,
+    min_page_ratio: float = 0.35,
+) -> None:
+    """Mark repeated top/bottom page furniture as noise while retaining it in full IR."""
+
+    page_heights = _page_heights(items)
+    page_count = max(1, len(page_heights))
+    candidates: dict[tuple[str, str], list[int]] = {}
+    for index, item in enumerate(items):
+        text = _layout_text(item)
+        page_idx = _numeric_or_none(item.get("page_idx")) or 0
+        bbox = _first_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        page_height = page_heights.get(page_idx) or max(bbox[3], 1.0)
+        zone = _page_furniture_zone(bbox, page_height, zone_ratio)
+        if zone is None:
+            continue
+        if _looks_like_page_number_text(text):
+            _mark_noise_item(item, role="page_number", reason="page_number_zone")
+            continue
+        normalized = _normalize_repeated_furniture_text(text)
+        if not normalized:
+            continue
+        if len(normalized) > 90:
+            continue
+        candidates.setdefault((zone, normalized), []).append(index)
+
+    threshold = max(min_pages, int(page_count * min_page_ratio + 0.999))
+    for (zone, normalized), indexes in candidates.items():
+        pages = {_numeric_or_none(items[index].get("page_idx")) or 0 for index in indexes}
+        if len(pages) < threshold:
+            continue
+        for index in indexes:
+            _mark_noise_item(items[index], role=zone, reason="repeated_page_furniture", normalized=normalized)
+
+
+def annotate_footnote_layers(items: list[dict[str, Any]], *, bottom_zone_ratio: float = 0.22) -> None:
+    """Promote visually bottom-anchored note text into the annotation layer."""
+
+    page_heights = _page_heights(items)
+    body_font_by_page = _body_font_by_page(items)
+    for item in items:
+        raw = _layout_raw_type(item)
+        role = str(item.get("layout_role") or "").casefold()
+        text = _layout_text(item)
+        if not text:
+            continue
+        if raw in FOOTNOTE_LAYOUT_TYPES or role in {"footnote", "page_footnote"}:
+            _mark_annotation_item(item, role="footnote", reason="raw_footnote_type")
+            continue
+        if raw in MARGIN_NOTE_LAYOUT_TYPES or role in {"margin_note", "marginnote", "side_note", "sidenote"}:
+            _mark_annotation_item(item, role="margin_note", reason="raw_margin_note_type")
+            continue
+        if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_METADATA}:
+            continue
+        if raw not in {"paragraph", "text", "paragraph_text", "list"}:
+            continue
+        bbox = _first_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        page_idx = _numeric_or_none(item.get("page_idx")) or 0
+        page_height = page_heights.get(page_idx) or max(bbox[3], 1.0)
+        if bbox[1] < page_height * (1.0 - bottom_zone_ratio):
+            continue
+        if not FOOTNOTE_PREFIX_RE.match(text):
+            continue
+        font_size = _node_font_size(item)
+        body_font = body_font_by_page.get(page_idx, 0.0)
+        if body_font > 0 and font_size > 0 and font_size > body_font * 0.92:
+            continue
+        _mark_annotation_item(item, role="footnote", reason="bottom_marker_small_text")
+
+
+def _mark_noise_item(item: dict[str, Any], *, role: str, reason: str, normalized: str | None = None) -> None:
+    item["layout_layer"] = LAYOUT_LAYER_NOISE
+    item["layout_role"] = role if role in {"header", "footer", "page_number"} else "noise"
+    item["is_main_flow_candidate"] = False
+    item["layout_noise_reason"] = reason
+    if normalized is not None:
+        item["layout_noise_normalized_text"] = normalized
+    item["layout_probes"] = layout_probe_payloads(item)
+
+
+def _mark_annotation_item(item: dict[str, Any], *, role: str, reason: str) -> None:
+    item["layout_layer"] = LAYOUT_LAYER_ANNOTATION
+    item["layout_role"] = role
+    item["is_main_flow_candidate"] = False
+    item["annotation_reason"] = reason
+    item["layout_probes"] = layout_probe_payloads(item)
+
+
+def _page_heights(items: list[dict[str, Any]]) -> dict[int, float]:
+    heights: dict[int, float] = {}
+    for item in items:
+        page_idx = _numeric_or_none(item.get("page_idx")) or 0
+        explicit = item.get("page_height")
+        if isinstance(explicit, (int, float)) and explicit > 0:
+            heights[page_idx] = max(float(explicit), heights.get(page_idx, 0.0))
+            continue
+        bbox = _first_bbox(item.get("bbox"))
+        if bbox is not None:
+            heights[page_idx] = max(float(bbox[3]), heights.get(page_idx, 0.0))
+    return heights
+
+
+def _body_font_by_page(items: list[dict[str, Any]]) -> dict[int, float]:
+    weighted: dict[int, dict[float, int]] = {}
+    for item in items:
+        raw = _layout_raw_type(item)
+        if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
+            continue
+        if FOOTNOTE_PREFIX_RE.match(_layout_text(item)):
+            continue
+        if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_METADATA, LAYOUT_LAYER_FLOAT, LAYOUT_LAYER_MATH}:
+            continue
+        size = _node_font_size(item)
+        if size <= 0:
+            continue
+        page_idx = _numeric_or_none(item.get("page_idx")) or 0
+        bucket = weighted.setdefault(page_idx, {})
+        rounded = round(size, 1)
+        bucket[rounded] = bucket.get(rounded, 0) + max(1, min(len(_layout_text(item)), 120))
+    return {page: max(values.items(), key=lambda item: item[1])[0] for page, values in weighted.items() if values}
+
+
+def _node_font_size(item: dict[str, Any]) -> float:
+    for key in ("style_baseline_size", "baseline_font_size", "font_size", "font_size_px", "avg_font_size"):
+        value = item.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    spans = item.get("style_spans")
+    if isinstance(spans, list):
+        return _weighted_micro_font_size([span for span in spans if isinstance(span, dict)])
+    return 0.0
+
+
+def _normalize_repeated_furniture_text(text: str) -> str:
+    value = " ".join(str(text or "").casefold().split())
+    if not value:
+        return ""
+    value = re.sub(r"\d+", "#", value)
+    value = re.sub(r"[^a-z#©]+", " ", value)
+    value = " ".join(value.split())
+    if len(value) <= 1:
+        return ""
+    return value
+
+
+def _page_furniture_zone(bbox: tuple[float, float, float, float], page_height: float, zone_ratio: float) -> str | None:
+    if page_height <= 0:
+        return None
+    center_y = (bbox[1] + bbox[3]) / 2.0
+    if center_y <= page_height * zone_ratio:
+        return "header"
+    if center_y >= page_height * (1.0 - zone_ratio):
+        return "footer"
+    return None
+
+
+def _looks_like_page_number_text(text: str) -> bool:
+    value = str(text or "").strip()
+    return bool(re.fullmatch(r"(?:\d{1,4}|[ivxlcdm]{1,8})", value, flags=re.IGNORECASE))
 
 
 def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
@@ -1196,15 +1530,27 @@ def refine_front_matter_layers(items: list[dict[str, Any]]) -> None:
         text = _layout_text(item)
         if raw in NOISE_LAYOUT_TYPES or not text:
             continue
+        if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}:
+            continue
         if raw in {"title", "paragraph", "text", "author", "affiliation"} or _front_matter_text_marker(text):
             item["layout_layer"] = LAYOUT_LAYER_METADATA
             item["layout_role"] = "abstract" if _front_matter_text_marker(text) else "front_matter"
             item["is_main_flow_candidate"] = False
-    for item in items:
-        if _looks_like_top_page_author_block(item, first_body_heading_y0=first_body_heading_y0):
+    for index, item in enumerate(items):
+        if _looks_like_top_page_author_block(
+            item,
+            first_body_heading_y0=first_body_heading_y0,
+            item_order=index,
+            first_body_heading_order=first_body_heading_order,
+        ):
             item["layout_layer"] = LAYOUT_LAYER_METADATA
             item["layout_role"] = _front_matter_role(item)
             item["is_main_flow_candidate"] = False
+    _mark_pre_heading_epigraph_sources(
+        items,
+        first_body_heading_y0=first_body_heading_y0,
+        first_body_heading_order=first_body_heading_order,
+    )
 
 
 def _is_body_heading_candidate(item: dict[str, Any]) -> bool:
@@ -1233,10 +1579,17 @@ def _front_matter_text_marker(text: str) -> bool:
         normalized.startswith(("abstract", "keywords", "author", "authors", "affiliation"))
         or is_toc_title_text(text)
         or is_front_matter_date_text(text)
+        or has_strong_layout_probe({}, text=text, roles={"abstract", "front_matter"})
     )
 
 
-def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_heading_y0: float | None) -> bool:
+def _looks_like_top_page_author_block(
+    item: dict[str, Any],
+    *,
+    first_body_heading_y0: float | None,
+    item_order: int | None = None,
+    first_body_heading_order: int | None = None,
+) -> bool:
     """Catch two-column author/affiliation blocks that sort after the first heading."""
 
     if item.get("page_idx") not in {0, None}:
@@ -1247,6 +1600,14 @@ def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_headin
     raw = _layout_raw_type(item)
     if raw in NOISE_LAYOUT_TYPES or raw in FLOAT_LAYOUT_TYPES or raw in MATH_LAYOUT_TYPES:
         return False
+    if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}:
+        return False
+    if item_order is not None and first_body_heading_order is not None and item_order >= first_body_heading_order:
+        # Once the ordered stream has entered the body, do not use physical
+        # y-position alone to pull right-column body text back into metadata.
+        # Two-column first pages often place the right-column continuation
+        # above the left-column Introduction baseline.
+        return False
     bbox = _parse_bbox(item.get("bbox"))
     if bbox is None:
         return False
@@ -1256,7 +1617,7 @@ def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_headin
     normalized = " ".join(text.lower().split())
     if _front_matter_text_marker(text):
         return True
-    if FRONT_MATTER_EMAIL_RE.search(text) or FRONT_MATTER_AFFILIATION_RE.search(text):
+    if has_strong_layout_probe(item, text=text, roles={"front_matter", "affiliation"}):
         return True
     # Author names in two-column IEEE-like papers are short top-page lines.
     if y0 <= 280 and _looks_like_author_name(text) and not normalized.startswith(("fig", "table", "algorithm")):
@@ -1264,15 +1625,96 @@ def _looks_like_top_page_author_block(item: dict[str, Any], *, first_body_headin
     return False
 
 
+def _mark_pre_heading_epigraph_sources(
+    items: list[dict[str, Any]],
+    *,
+    first_body_heading_y0: float | None,
+    first_body_heading_order: int | None,
+) -> None:
+    """Keep pre-section epigraph attribution lines out of the body graph.
+
+    Some templates render ``\\epigraph{quote}{source}`` between abstract and the
+    first section.  The quote body is usually sorted before the first heading,
+    but a short right-aligned source line can be pulled after the heading by
+    noisy column/band sorting.  If the line is still physically above the first
+    body heading and looks like a compact attribution, it belongs to front
+    matter, not to the following section.
+    """
+
+    if first_body_heading_y0 is None or first_body_heading_order is None:
+        return
+
+    has_pre_heading_frontmatter_text = False
+    for item in items[:first_body_heading_order]:
+        if item.get("page_idx") not in {0, None}:
+            continue
+        if str(item.get("layout_layer") or "").casefold() != LAYOUT_LAYER_METADATA:
+            continue
+        text = _layout_text(item).strip()
+        if len(text) >= 40 and not _front_matter_text_marker(text):
+            has_pre_heading_frontmatter_text = True
+            break
+    if not has_pre_heading_frontmatter_text:
+        return
+
+    for index, item in enumerate(items):
+        if index < first_body_heading_order:
+            continue
+        if item.get("page_idx") not in {0, None}:
+            continue
+        raw = _layout_raw_type(item)
+        if raw not in {"paragraph", "text", "paragraph_text", "title"}:
+            continue
+        if str(item.get("layout_layer") or "").casefold() in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}:
+            continue
+        bbox = _parse_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        if bbox[1] >= first_body_heading_y0:
+            continue
+        text = _layout_text(item).strip()
+        if not _looks_like_epigraph_source_line(text):
+            continue
+        item["layout_layer"] = LAYOUT_LAYER_METADATA
+        item["layout_role"] = "front_matter"
+        item["is_main_flow_candidate"] = False
+        item["front_matter_reason"] = "pre_heading_epigraph_source"
+
+
+def _looks_like_epigraph_source_line(text: str) -> bool:
+    stripped = " ".join(str(text or "").replace(",", " ").split())
+    if not stripped or len(stripped) > 90:
+        return False
+    lowered = stripped.casefold()
+    if lowered.startswith(("fig", "figure", "table", "algorithm", "abstract", "keywords")):
+        return False
+    if any(char.isdigit() for char in stripped):
+        return False
+    if re.search(r"[!?;:]", stripped):
+        return False
+    if _looks_like_author_name(stripped):
+        return True
+    stripped = stripped.lstrip("-–— ").strip()
+    words = [word for word in re.split(r"\s+", stripped) if word]
+    if not 1 <= len(words) <= 8:
+        return False
+    alpha_words = [word for word in words if re.search(r"[A-Za-z]", word)]
+    if not alpha_words:
+        return False
+    capitalized = sum(1 for word in alpha_words if word[0].isupper())
+    return capitalized >= max(1, int(len(alpha_words) * 0.6))
+
+
 def _front_matter_role(item: dict[str, Any]) -> str:
     text = _layout_text(item)
+    probe = best_layout_probe(item, text=text)
     if is_toc_title_text(text):
         return TOC_TITLE_ROLE
     if is_front_matter_date_text(text):
         return "front_matter"
     if _front_matter_text_marker(text):
         return "abstract" if text.strip().lower().startswith("abstract") else "front_matter"
-    if FRONT_MATTER_EMAIL_RE.search(text) or FRONT_MATTER_AFFILIATION_RE.search(text):
+    if probe is not None and probe.role == "affiliation" and probe.confidence >= 0.80:
         return "affiliation"
     if _looks_like_author_name(text):
         return "author"
@@ -1297,9 +1739,130 @@ def is_toc_record(item: dict[str, Any]) -> bool:
 
 
 def filter_graph_content_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop derived table-of-contents OCR blocks before GNN featurization."""
+    """Drop non-trainable OCR artifacts before GNN featurization."""
 
-    return [item for item in items if not is_toc_record(item)]
+    annotated = annotate_duplicate_contained_continuations(items)
+    return [
+        item
+        for item in annotated
+        if not is_toc_record(item)
+        and not is_duplicate_shadow_record(item)
+        and str(item.get("layout_layer") or "").casefold() not in {LAYOUT_LAYER_NOISE, LAYOUT_LAYER_ANNOTATION}
+    ]
+
+
+def annotate_duplicate_contained_continuations(
+    items: list[dict[str, Any]],
+    *,
+    lookahead: int = 12,
+    min_duplicate_chars: int = 12,
+) -> list[dict[str, Any]]:
+    """Mark later OCR fragments already contained in an earlier text node.
+
+    MinerU occasionally emits one logical paragraph node whose text already
+    contains a later continuation bbox, while also keeping that continuation as
+    an independent node.  Feeding both nodes to the graph gives contradictory
+    supervision: the later node is visually real but textually duplicated.  We
+    keep the raw record intact and mark the later node as ``duplicate_shadow`` /
+    ``no_render`` so graph building, label generation and IR rendering can skip
+    it with a single stable flag.
+    """
+
+    normalized = [dict(item) for item in items if isinstance(item, dict)]
+    if len(normalized) <= 1:
+        return normalized
+
+    texts = [_layout_text(item) for item in normalized]
+    compact_texts = [_duplicate_compact_text(text) for text in texts]
+    for source_index, source in enumerate(normalized):
+        source_compact = compact_texts[source_index]
+        if len(source_compact) < min_duplicate_chars * 2:
+            continue
+        if not _duplicate_continuation_source_type(source):
+            continue
+        for target_index in range(source_index + 1, min(len(normalized), source_index + lookahead + 1)):
+            target = normalized[target_index]
+            if is_duplicate_shadow_record(target):
+                continue
+            if not _duplicate_continuation_target_type(target):
+                continue
+            target_compact = compact_texts[target_index]
+            if len(target_compact) < min_duplicate_chars:
+                continue
+            if not _looks_like_duplicate_continuation_text(texts[target_index]):
+                continue
+            if not _contained_near_source_tail(source_compact, target_compact):
+                continue
+            if not _duplicate_continuation_scope_is_plausible(source, target):
+                continue
+            target["duplicate_shadow"] = True
+            target["no_render"] = True
+            target["duplicate_shadow_of_index"] = source_index
+            target["duplicate_shadow_of_global_order"] = source.get("global_order")
+            target["duplicate_shadow_reason"] = "contained_continuation_tail"
+            target["duplicate_shadow_text_preview"] = texts[target_index][:200]
+    return normalized
+
+
+def is_duplicate_shadow_record(item: dict[str, Any]) -> bool:
+    return bool(item.get("duplicate_shadow") or item.get("no_render") or item.get("render_skip"))
+
+
+def _duplicate_continuation_source_type(item: dict[str, Any]) -> bool:
+    raw = _layout_raw_type(item)
+    canonical = str(item.get("canonical_type") or "").casefold()
+    if raw in DUPLICATE_CONTINUATION_TYPES or canonical in DUPLICATE_CONTINUATION_TYPES:
+        return True
+    return bool(_layout_text(item)) and infer_layout_layer(item) == LAYOUT_LAYER_MAIN_TEXT
+
+
+def _duplicate_continuation_target_type(item: dict[str, Any]) -> bool:
+    raw = _layout_raw_type(item)
+    canonical = str(item.get("canonical_type") or "").casefold()
+    if raw in {"title", "section", "subsection", "subsubsection", "heading"} or canonical == "title":
+        return False
+    if infer_layout_layer(item) != LAYOUT_LAYER_MAIN_TEXT:
+        return False
+    return raw in DUPLICATE_CONTINUATION_TYPES or canonical in DUPLICATE_CONTINUATION_TYPES or bool(_layout_text(item))
+
+
+def _duplicate_compact_text(text: str) -> str:
+    value = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    return re.sub(r"[^0-9a-z]+", "", value)
+
+
+def _looks_like_duplicate_continuation_text(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(DUPLICATE_CONTINUATION_START_RE.match(value))
+
+
+def _contained_near_source_tail(source_compact: str, target_compact: str) -> bool:
+    if not source_compact or not target_compact:
+        return False
+    position = source_compact.find(target_compact)
+    if position < 0:
+        return False
+    if position == 0 and len(source_compact) == len(target_compact):
+        return False
+    tail_start = max(0, len(source_compact) - max(len(target_compact) * 3, 80))
+    return position >= tail_start or source_compact.endswith(target_compact)
+
+
+def _duplicate_continuation_scope_is_plausible(source: dict[str, Any], target: dict[str, Any]) -> bool:
+    source_page = _numeric_or_none(source.get("page_idx"))
+    target_page = _numeric_or_none(target.get("page_idx"))
+    if source_page is not None and target_page is not None:
+        if target_page < source_page:
+            return False
+        if target_page - source_page > 1:
+            return False
+    source_band = _numeric_or_none(source.get("layout_band_global_id"))
+    target_band = _numeric_or_none(target.get("layout_band_global_id"))
+    if source_band is not None and target_band is not None and target_band < source_band:
+        return False
+    return True
 
 
 def document_toc_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:

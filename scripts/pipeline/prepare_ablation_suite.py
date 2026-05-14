@@ -20,10 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--matrix", type=Path, default=REPO_ROOT / "configs/ablation_matrix_v2.json")
-    parser.add_argument("--output-sh", type=Path, default=REPO_ROOT / "data/08_runs/run_ablation_matrix_v2.sh")
-    parser.add_argument("--output-json", type=Path, default=REPO_ROOT / "data/09_eval_reports/ablation_matrix_v2_commands.json")
+    parser.add_argument("--matrix", type=Path, default=REPO_ROOT / "configs/ablation_matrix_v3.json")
+    parser.add_argument("--output-sh", type=Path, default=REPO_ROOT / "data/08_runs/run_ablation_matrix_v3.sh")
+    parser.add_argument("--output-json", type=Path, default=REPO_ROOT / "data/09_eval_reports/ablation_matrix_v3_commands.json")
     parser.add_argument("--only", default="", help="Comma-separated experiment names to include.")
+    parser.add_argument("--output-root", help="Optional override for common.output_root in the matrix.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without writing files.")
     return parser
 
@@ -31,6 +32,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
     matrix = json.loads(args.matrix.read_text(encoding="utf-8"))
+    if args.output_root:
+        matrix.setdefault("common", {})["output_root"] = args.output_root
     selected = {name.strip() for name in str(args.only or "").split(",") if name.strip()}
     commands = build_commands(matrix, selected_names=selected)
     payload = {
@@ -90,7 +93,7 @@ def build_commands(matrix: dict[str, Any], *, selected_names: set[str]) -> list[
 
 def build_train_command(args: dict[str, Any], *, output_dir: Path) -> list[str]:
     command = [
-        "python",
+        str(args.get("python_bin", "python")),
         "scripts/pipeline/train_edge_gnn_full.py",
         "--root",
         str(args["root"]),
@@ -124,6 +127,10 @@ def build_train_command(args: dict[str, Any], *, output_dir: Path) -> list[str]:
         "seed": "--seed",
         "selection_metric": "--selection-metric",
         "edge_feature_mode": "--edge-feature-mode",
+        "message_edge_mode": "--message-edge-mode",
+        "prediction_architecture": "--prediction-architecture",
+        "merge_gate_mode": "--merge-gate-mode",
+        "merge_gate_logit": "--merge-gate-logit",
         "ablate_node_groups": "--ablate-node-groups",
         "ablate_edge_groups": "--ablate-edge-groups",
         "ablate_edge_fields": "--ablate-edge-fields",
@@ -137,8 +144,8 @@ def build_train_command(args: dict[str, Any], *, output_dir: Path) -> list[str]:
 
 
 def build_calibration_command(common: dict[str, Any], calibration: dict[str, Any], *, output_dir: Path) -> list[str]:
-    return [
-        "python",
+    command = [
+        str(common.get("python_bin", "python")),
         "scripts/pipeline/calibrate_edge_thresholds.py",
         "--root",
         str(common["root"]),
@@ -165,6 +172,13 @@ def build_calibration_command(common: dict[str, Any], calibration: dict[str, Any
         "--mode",
         str(calibration.get("mode", "threshold_priority")),
     ]
+    if calibration.get("min_merge_precision") not in (None, ""):
+        command.extend(["--min-merge-precision", str(calibration["min_merge_precision"])])
+    if calibration.get("precision_floors") not in (None, ""):
+        command.extend(["--precision-floors", str(calibration["precision_floors"])])
+    if bool(calibration.get("apply_merge_gates", False)):
+        command.append("--apply-merge-gates")
+    return command
 
 
 def render_shell_script(commands: list[dict[str, Any]]) -> str:
@@ -172,6 +186,12 @@ def render_shell_script(commands: list[dict[str, Any]]) -> str:
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "cd \"$(dirname \"$0\")/../..\"",
+        "",
+        "export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}",
+        "export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}",
+        "export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}",
+        "export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}",
+        "export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}",
         "",
         "echo \"[ablation] started at $(date)\"",
     ]

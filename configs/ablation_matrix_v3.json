@@ -1,0 +1,229 @@
+{
+  "schema_version": "ablation_matrix_v3",
+  "description": "Core v7 layered/epigraph-clean ablations on the current clean 3-class graph relation dataset. Runtime masks keep .pt graph tensors immutable.",
+  "common": {
+    "python_bin": "/root/miniconda3/envs/pdf2latex/bin/python",
+    "root": "data/06_graph_features_v7_ablation_epigraph_20260514_0238",
+    "manifest": "data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json",
+    "output_root": "data/09_eval_reports/ablations_v3_layers_epigraph_20260514_0238",
+    "epochs": 30,
+    "batch_size": 8,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "hidden_dim": 128,
+    "heads": 4,
+    "num_layers": 3,
+    "predictor_hidden_dims": "1024,512,128",
+    "predictor_layer_norm": true,
+    "edge_feature_mode": "full",
+    "semantic_hidden_dim": 96,
+    "layout_hidden_dim": 64,
+    "dropout": 0.1,
+    "device": "auto",
+    "num_workers": 0,
+    "seed": 7,
+    "repeat_seeds": [
+      7
+    ],
+    "selection_metric": "val_positive_macro_f0_5"
+  },
+  "calibration": {
+    "enabled": true,
+    "tau_min": 0.05,
+    "tau_max": 0.95,
+    "tau_step": 0.01,
+    "mode": "threshold_priority",
+    "apply_merge_gates": true,
+    "precision_floors": "0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"
+  },
+  "experiments": [
+    {
+      "name": "M00_full_ce_ohem",
+      "family": "main",
+      "hypothesis": "Full v7 multimodal graph model is the baseline for structure relation prediction.",
+      "purpose": "Full features + GATv2 + directional deep head + CE/OHEM.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64,
+        "train_negative_dropout": 0.0
+      }
+    },
+    {
+      "name": "M01_no_message_passing",
+      "family": "architecture",
+      "hypothesis": "If graph context matters, removing GAT message passing hurts parent-child and ambiguous merge.",
+      "purpose": "Project nodes and classify candidate edges with no graph convolution.",
+      "args": {
+        "num_layers": 0,
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "M02_no_symmetry_terms",
+      "family": "architecture",
+      "hypothesis": "Directional symmetry-breaking terms Hu-Hv and Hu*Hv are important for directed parent-child.",
+      "purpose": "Use concat([Hu,Hv,Euv]) instead of concat([Hu,Hv,Hu-Hv,Hu*Hv,Euv]).",
+      "args": {
+        "edge_feature_mode": "simple_concat",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "M03_shallow_predictor",
+      "family": "architecture",
+      "hypothesis": "Rare merge needs a deeper edge predictor; a shallow head should underfit boundary subtleties.",
+      "purpose": "Keep GATv2 but reduce predictor to one hidden layer.",
+      "args": {
+        "predictor_hidden_dims": "128",
+        "predictor_layer_norm": false,
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "M04_type_aware_message_mask",
+      "family": "architecture",
+      "hypothesis": "Message passing helps hierarchy but pollutes MERGE; masking noisy cross-layer propagation should keep PARENT_CHILD strong while recovering MERGE precision/recall.",
+      "purpose": "Use all candidate edges for classification, but restrict GAT propagation to type/layout-compatible edges via data.message_edge_mask.",
+      "args": {
+        "message_edge_mode": "type_aware",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "M05_y_network_dual_head",
+      "family": "architecture",
+      "hypothesis": "MERGE needs unpolluted local features while PARENT_CHILD benefits from GNN propagation; a Y-network should preserve both signals.",
+      "purpose": "Bypass GNN for MERGE logits using raw projected node features, while PARENT/NONE logits use propagated GAT states.",
+      "args": {
+        "prediction_architecture": "y_network",
+        "message_edge_mode": "all",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "M06_y_network_plus_merge_gate",
+      "family": "architecture",
+      "hypothesis": "A class-specific MERGE gate should reduce false positive contractions without removing edges needed for PARENT_CHILD.",
+      "purpose": "Use the Y-network and suppress only the MERGE logit for edges failing TreeDecoder-compatible physical merge gates.",
+      "args": {
+        "prediction_architecture": "y_network",
+        "message_edge_mode": "all",
+        "merge_gate_mode": "hard",
+        "merge_gate_logit": -20.0,
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "F00_no_scibert",
+      "family": "node_features",
+      "hypothesis": "Layout alone is not enough for paragraph continuation and semantic ambiguity.",
+      "purpose": "Zero the 768-d SciBERT segment only.",
+      "args": {
+        "ablate_node_groups": "semantic",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "F01_semantic_only",
+      "family": "node_features",
+      "hypothesis": "Text semantics alone cannot solve columns, visual hierarchy, and layout boundaries.",
+      "purpose": "Keep SciBERT, zero all non-semantic node features.",
+      "args": {
+        "ablate_node_groups": "layout_all",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "F02_no_reading_flow",
+      "family": "node_features",
+      "hypothesis": "v7 band/column/flow features protect against reading-order inversion.",
+      "purpose": "Remove scroll-y, sequence, column, layout-layer, flow-context and matching edge flow cues.",
+      "args": {
+        "ablate_node_groups": "scroll,sequence,column,layout_layer,flow_context",
+        "ablate_edge_groups": "index_bins,layout_flow",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "F03_raw_mineru_flow",
+      "family": "node_features",
+      "hypothesis": "If v7 reading-flow repair matters beyond MinerU's native extraction order, keeping flow features but deriving them from raw original_index should reduce structure quality.",
+      "purpose": "Keep reading-flow features, but rebuild scroll/index/pseudo-y, flow context, candidate edges, and edge index bins from MinerU original_index instead of repaired layout_flow_order.",
+      "args": {
+        "root": "data/06_graph_features_v7_ablation_raw_mineru_flow_20260514",
+        "manifest": "data/00_manifests/v7_raw_mineru_flow_20260514_trainable_recall98.json",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "E00_no_punctuation",
+      "family": "edge_features",
+      "hypothesis": "Terminal punctuation and hyphen probes are high-precision merge boundary signals.",
+      "purpose": "Remove source terminal punctuation and hyphen edge features.",
+      "args": {
+        "ablate_edge_groups": "punctuation",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "E01_no_gutter_overlap",
+      "family": "edge_features",
+      "hypothesis": "Gutter/overlap features suppress cross-column false merge.",
+      "purpose": "Remove y_overlap_ratio and has_x_gutter.",
+      "args": {
+        "ablate_edge_groups": "overlap_gutter",
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
+      "name": "T00_no_ohem",
+      "family": "training",
+      "hypothesis": "Without OHEM, the long-tail NONE distribution washes out positive edges.",
+      "purpose": "Full model, plain CE, no OHEM.",
+      "args": {
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 0.0,
+        "train_negative_dropout": 0.0
+      }
+    }
+  ]
+}

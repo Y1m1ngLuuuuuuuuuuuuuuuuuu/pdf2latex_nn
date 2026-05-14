@@ -54,6 +54,7 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "layout_layer_main_text_flow",
         "layout_layer_math_layer",
         "layout_layer_float_layer",
+        "layout_layer_annotation_layer",
         "layout_layer_metadata_layer",
         "layout_layer_noise_layer",
         "layout_layer_other_layer",
@@ -67,7 +68,7 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "is_band_boundary",
         "is_main_flow_candidate",
     ]
-    assert schema.node_feature_dim == 831
+    assert schema.node_feature_dim == 832
     assert schema.edge_attr_dim == 22
     assert schema.edge_attr_fields == [
         "semantic_cosine",
