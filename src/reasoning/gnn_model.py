@@ -124,6 +124,8 @@ class EdgeGATConfig:
     message_edge_mode: str = "all"
     merge_gate_mode: str = "none"
     merge_gate_logit: float = -20.0
+    gaussian_edge_feature_mode: str = "none"
+    gaussian_sigma: float = 0.10
     disabled_node_feature_ranges: tuple[tuple[int, int], ...] = ()
     disabled_edge_attr_indices: tuple[int, ...] = ()
 
@@ -140,6 +142,9 @@ class EdgeRelationGAT(_MODULE_BASE):
             raise ModuleNotFoundError("EdgeRelationGAT requires torch and torch-geometric to be installed")
         super().__init__()
         self.config = config or EdgeGATConfig()
+        self.raw_edge_dim = int(self.config.edge_dim)
+        self.gaussian_extra_dim = self._gaussian_extra_dim()
+        self.effective_edge_dim = self.raw_edge_dim + self.gaussian_extra_dim
         self.projector = FeatureProjector(self.config.node_projector)
 
         convs = []
@@ -150,7 +155,7 @@ class EdgeRelationGAT(_MODULE_BASE):
                     in_channels=in_dim,
                     out_channels=self.config.hidden_dim,
                     heads=self.config.heads,
-                    edge_dim=self.config.edge_dim,
+                    edge_dim=self.effective_edge_dim,
                     dropout=self.config.dropout,
                     concat=True,
                 )
@@ -212,7 +217,7 @@ class EdgeRelationGAT(_MODULE_BASE):
             raise ValueError("EdgeRelationGAT.forward requires data or x/edge_index/edge_attr")
 
         x, edge_attr = self._mask_inputs(x, edge_attr)
-        edge_attr = self._align_edge_attr(edge_attr)
+        edge_attr = self._prepare_edge_attr(edge_attr)
         h_raw = self.projector(x)
         h = h_raw
         conv_edge_index, conv_edge_attr = self._message_passing_edges(edge_index, edge_attr, message_edge_mask)
@@ -304,9 +309,9 @@ class EdgeRelationGAT(_MODULE_BASE):
     def _edge_feature_dim(self, node_dim: int) -> int:
         mode = getattr(self.config, "edge_feature_mode", "full")
         if mode == "full":
-            return int(node_dim) * 4 + self.config.edge_dim
+            return int(node_dim) * 4 + self.effective_edge_dim
         if mode == "simple_concat":
-            return int(node_dim) * 2 + self.config.edge_dim
+            return int(node_dim) * 2 + self.effective_edge_dim
         raise ValueError(f"Unknown edge_feature_mode: {mode}")
 
     def _apply_merge_gate(self, logits, merge_candidate_mask):  # type: ignore[no-untyped-def]
@@ -337,15 +342,59 @@ class EdgeRelationGAT(_MODULE_BASE):
         )
         return gated
 
-    def _align_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
-        """Pad or truncate runtime edge attributes to the checkpoint config."""
+    def _prepare_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
+        """Align raw edge attributes and append optional derived model features."""
 
-        expected_dim = int(self.config.edge_dim)
+        edge_attr = self._align_edge_attr(edge_attr)
+        return self._append_gaussian_edge_features(edge_attr)
+
+    def _align_edge_attr(self, edge_attr):  # type: ignore[no-untyped-def]
+        """Pad or truncate runtime raw edge attributes to the checkpoint config."""
+
+        expected_dim = self.raw_edge_dim
         if edge_attr.shape[1] > expected_dim:
             return edge_attr[:, :expected_dim]
         if edge_attr.shape[1] < expected_dim:
             return F.pad(edge_attr, (0, expected_dim - edge_attr.shape[1]))
         return edge_attr
+
+    def _gaussian_extra_dim(self) -> int:
+        mode = getattr(self.config, "gaussian_edge_feature_mode", "none")
+        if mode in (None, "", "none"):
+            return 0
+        if mode == "center":
+            return 1
+        raise ValueError(f"Unknown gaussian_edge_feature_mode: {mode}")
+
+    def _append_gaussian_edge_features(self, edge_attr):  # type: ignore[no-untyped-def]
+        """Append Gaussian proximity hints derived from existing edge features.
+
+        M07 keeps graph `.pt` tensors immutable.  The stored edge_attr remains
+        the 22-dimensional v7 contract; this model-side feature turns the
+        normalized center distance into a proximity cue:
+
+            exp(-d^2 / (2 * sigma^2))
+
+        The feature is a hint for the learned edge heads and GATv2 edge MLP. It
+        is not a hard attention bias.
+        """
+
+        mode = getattr(self.config, "gaussian_edge_feature_mode", "none")
+        if mode in (None, "", "none"):
+            return edge_attr
+        if mode != "center":
+            raise ValueError(f"Unknown gaussian_edge_feature_mode: {mode}")
+        try:
+            distance_idx = EDGE_ATTR_FIELDS.index("center_distance")
+        except ValueError as exc:  # pragma: no cover - schema constant regression guard.
+            raise ValueError("EDGE_ATTR_FIELDS must contain center_distance for gaussian edge features") from exc
+        if distance_idx >= int(edge_attr.shape[1]):
+            distance = torch.zeros((int(edge_attr.shape[0]),), dtype=edge_attr.dtype, device=edge_attr.device)
+        else:
+            distance = edge_attr[:, distance_idx].clamp_min(0.0)
+        sigma = max(float(getattr(self.config, "gaussian_sigma", 0.10)), 1e-6)
+        gaussian = torch.exp(-((distance ** 2) / (2.0 * sigma * sigma))).unsqueeze(-1)
+        return torch.cat([edge_attr, gaussian], dim=-1)
 
 
 def build_edge_predictor_head(

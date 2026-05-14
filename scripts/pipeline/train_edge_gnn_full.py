@@ -76,6 +76,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="hard suppresses the MERGE logit for edges whose data.merge_candidate_mask is false.",
     )
     parser.add_argument("--merge-gate-logit", type=float, default=-20.0)
+    parser.add_argument(
+        "--gaussian-edge-feature-mode",
+        choices=["none", "center"],
+        default="none",
+        help="Append runtime Gaussian proximity edge features derived from existing edge_attr without rewriting graph .pt files.",
+    )
+    parser.add_argument(
+        "--gaussian-sigma",
+        type=float,
+        default=0.10,
+        help="Sigma for gaussian_edge_feature_mode=center using normalized center_distance.",
+    )
     parser.add_argument("--semantic-hidden-dim", type=int, default=96)
     parser.add_argument("--layout-hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -274,6 +286,8 @@ def build_model(args: argparse.Namespace) -> EdgeRelationGAT:
             message_edge_mode=args.message_edge_mode,
             merge_gate_mode=args.merge_gate_mode,
             merge_gate_logit=args.merge_gate_logit,
+            gaussian_edge_feature_mode=args.gaussian_edge_feature_mode,
+            gaussian_sigma=args.gaussian_sigma,
             disabled_node_feature_ranges=disabled_node_ranges,
             disabled_edge_attr_indices=disabled_edge_indices,
         )

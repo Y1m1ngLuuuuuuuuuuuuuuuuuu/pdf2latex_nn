@@ -7,6 +7,8 @@ This file records the current locked GNN ablation state. Raw machine-readable re
 ```text
 data/09_eval_reports/gnn_y_network_compare_20260514/summary.csv
 data/09_eval_reports/gnn_y_network_compare_20260514/summary.json
+data/09_eval_reports/gnn_m07_gaussian_20260514/summary.csv
+data/09_eval_reports/gnn_m07_gaussian_20260514/summary.json
 ```
 
 ## Dataset
@@ -40,6 +42,7 @@ MERGE gate oracle recall: 1.0000
 | M04_type_aware_message_mask | 0.5000 | 0.4677 | 0.4833 | 0.9415 | 0.7124 | 0.33 | 0.39 |
 | M05_y_network_dual_head | 0.6740 | 0.6559 | 0.6649 | 0.9412 | 0.8030 | 0.37 | 0.45 |
 | M06_y_network_plus_merge_gate | 0.6923 | 0.6290 | 0.6592 | 0.9412 | 0.8002 | 0.41 | 0.49 |
+| M07_y_network_plus_gaussian_edge_feature | 0.6879 | 0.5806 | 0.6297 | 0.9715 | 0.8006 | 0.43 | 0.72 |
 
 ## Decision
 
@@ -49,6 +52,8 @@ Conservative model: M06_y_network_plus_merge_gate
 ```
 
 M05 is the current main architecture because it removes the old tradeoff: MERGE recovers beyond the no-message-passing model while PARENT_CHILD stays near the full GAT model. M06 is useful when downstream rendering needs stricter merge precision and can tolerate slightly lower merge recall.
+
+M07 adds a runtime Gaussian proximity feature derived from `center_distance`. It improves PARENT_CHILD substantially (`0.9715`) but reduces MERGE recall enough that positive macro F1 stays slightly below M05. Keep M07 as evidence that proximity hints are useful for hierarchy, but do not promote it over M05 unless the downstream priority is PARENT_CHILD stability.
 
 ## Interpretation
 
@@ -68,4 +73,4 @@ MERGE logit        = raw projected node features + edge_attr
 PARENT/NONE logits = GAT-propagated node features + edge_attr
 ```
 
-The next optional experiment is Gaussian proximity as an additional edge feature, not as a direct PyG `edge_weight`, because the active model uses `GATv2Conv(edge_attr=...)`.
+The next optional experiment is M08: Gaussian proximity as an actual attention bias. It should only be attempted if we explicitly want to trade engineering complexity for a stronger hierarchy-focused message-passing prior.

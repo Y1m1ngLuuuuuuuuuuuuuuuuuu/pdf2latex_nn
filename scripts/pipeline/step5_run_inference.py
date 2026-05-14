@@ -75,8 +75,11 @@ def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> Edge
                 node_projector=replace(config.node_projector, layout_input_dim_override=checkpoint_layout_dim),
             )
     checkpoint_edge_dim = infer_checkpoint_edge_dim(state_dict, config=config)
-    if checkpoint_edge_dim is not None and checkpoint_edge_dim != config.edge_dim:
-        config = replace(config, edge_dim=checkpoint_edge_dim)
+    if checkpoint_edge_dim is not None and checkpoint_edge_dim != effective_edge_dim(config):
+        extra_dim = gaussian_extra_dim(config)
+        raw_edge_dim = checkpoint_edge_dim - extra_dim
+        if raw_edge_dim > 0:
+            config = replace(config, edge_dim=raw_edge_dim)
     legacy_head_weight = state_dict.get("edge_head.3.weight")
     if legacy_head_weight is not None and "edge_head.4.weight" not in state_dict and "edge_head.12.weight" not in state_dict:
         first_head_weight = state_dict.get("edge_head.0.weight")
@@ -103,6 +106,19 @@ def infer_checkpoint_edge_dim(state_dict: Any, *, config: EdgeGATConfig) -> int 
         if inferred > 0:
             return inferred
     return None
+
+
+def gaussian_extra_dim(config: EdgeGATConfig) -> int:
+    mode = getattr(config, "gaussian_edge_feature_mode", "none")
+    if mode in (None, "", "none"):
+        return 0
+    if mode == "center":
+        return 1
+    return 0
+
+
+def effective_edge_dim(config: EdgeGATConfig) -> int:
+    return int(config.edge_dim) + gaussian_extra_dim(config)
 
 
 if __name__ == "__main__":

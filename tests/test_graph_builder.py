@@ -205,3 +205,44 @@ def test_edge_relation_gat_hard_merge_gate_only_suppresses_merge_logit():
 
     assert float(logits[1, 0].detach()) == -123.0
     assert torch.isfinite(logits[:, 1:]).all()
+
+
+def test_edge_relation_gat_appends_gaussian_edge_feature_without_rewriting_graph_attr():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    from src.perception.schema import EDGE_ATTR_FIELDS, FeatureTensorSchema
+    from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT, FeatureProjectorConfig
+
+    config = EdgeGATConfig(
+        node_projector=FeatureProjectorConfig(semantic_hidden_dim=16, layout_hidden_dim=8, dropout=0.0),
+        hidden_dim=8,
+        heads=2,
+        num_layers=1,
+        dropout=0.0,
+        prediction_architecture="y_network",
+        gaussian_edge_feature_mode="center",
+        gaussian_sigma=0.10,
+    )
+    model = EdgeRelationGAT(config)
+    center_idx = EDGE_ATTR_FIELDS.index("center_distance")
+    edge_attr = torch.zeros((2, config.edge_dim), dtype=torch.float32)
+    edge_attr[0, center_idx] = 0.0
+    edge_attr[1, center_idx] = 0.10
+    data = Data(
+        x=torch.randn(3, FeatureTensorSchema().node_feature_dim),
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        edge_attr=edge_attr,
+    )
+
+    prepared = model._prepare_edge_attr(data.edge_attr)
+    logits = model(data)
+
+    assert model.raw_edge_dim == config.edge_dim
+    assert model.effective_edge_dim == config.edge_dim + 1
+    assert tuple(prepared.shape) == (2, config.edge_dim + 1)
+    assert torch.allclose(prepared[:, -1], torch.tensor([1.0, 0.60653067]), atol=1e-6)
+    assert tuple(logits.shape) == (2, 3)

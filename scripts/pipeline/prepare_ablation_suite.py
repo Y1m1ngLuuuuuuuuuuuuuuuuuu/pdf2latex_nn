@@ -131,6 +131,8 @@ def build_train_command(args: dict[str, Any], *, output_dir: Path) -> list[str]:
         "prediction_architecture": "--prediction-architecture",
         "merge_gate_mode": "--merge-gate-mode",
         "merge_gate_logit": "--merge-gate-logit",
+        "gaussian_edge_feature_mode": "--gaussian-edge-feature-mode",
+        "gaussian_sigma": "--gaussian-sigma",
         "ablate_node_groups": "--ablate-node-groups",
         "ablate_edge_groups": "--ablate-edge-groups",
         "ablate_edge_fields": "--ablate-edge-fields",

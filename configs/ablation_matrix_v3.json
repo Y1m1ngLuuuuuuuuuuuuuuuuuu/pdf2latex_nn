@@ -134,6 +134,22 @@
       }
     },
     {
+      "name": "M07_y_network_plus_gaussian_edge_feature",
+      "family": "architecture",
+      "hypothesis": "A Gaussian proximity cue should help the propagated PARENT/NONE branch downweight physically distant candidate edges without forcing a custom attention kernel.",
+      "purpose": "Use the Y-network and append a runtime gaussian_proximity feature derived from center_distance to the effective edge_attr.",
+      "args": {
+        "prediction_architecture": "y_network",
+        "message_edge_mode": "all",
+        "gaussian_edge_feature_mode": "center",
+        "gaussian_sigma": 0.1,
+        "loss": "cross_entropy",
+        "class_weights": "none",
+        "ohem_negative_ratio": 5.0,
+        "ohem_min_negatives": 64
+      }
+    },
+    {
       "name": "F00_no_scibert",
       "family": "node_features",
       "hypothesis": "Layout alone is not enough for paragraph continuation and semantic ambiguity.",

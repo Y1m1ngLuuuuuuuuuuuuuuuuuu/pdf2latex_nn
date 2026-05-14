@@ -55,6 +55,8 @@ M04_type_aware_message_mask
 M05_y_network_dual_head  MERGE bypasses GNN; PARENT/NONE use GAT states
 M06_y_network_plus_merge_gate
                           M05 plus hard physical MERGE gate
+M07_y_network_plus_gaussian_edge_feature
+                          M05 plus runtime gaussian proximity edge feature
 F00_no_scibert           zero semantic node features
 F01_semantic_only        keep semantic features only
 F02_no_reading_flow      remove scroll/sequence/column/flow cues
@@ -87,12 +89,14 @@ labels: MERGE=1816, PARENT_CHILD=194300, NONE=6243086
 | M04_type_aware_message_mask | 0.5000 | 0.4677 | 0.4833 | 0.9415 | 0.7124 | 0.33 | 0.39 |
 | M05_y_network_dual_head | 0.6740 | 0.6559 | 0.6649 | 0.9412 | 0.8030 | 0.37 | 0.45 |
 | M06_y_network_plus_merge_gate | 0.6923 | 0.6290 | 0.6592 | 0.9412 | 0.8002 | 0.41 | 0.49 |
+| M07_y_network_plus_gaussian_edge_feature | 0.6879 | 0.5806 | 0.6297 | 0.9715 | 0.8006 | 0.43 | 0.72 |
 
 Decision:
 
 ```text
 M05_y_network_dual_head is the current main model.
 M06_y_network_plus_merge_gate is retained as a conservative high-precision mode.
+M07_y_network_plus_gaussian_edge_feature is retained as a hierarchy-stability variant, not the default.
 ```
 
 ## Metrics
