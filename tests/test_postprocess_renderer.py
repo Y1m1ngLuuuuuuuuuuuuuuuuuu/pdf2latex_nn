@@ -75,6 +75,69 @@ def test_tree_decoder_contracts_merge_nodes_and_repoints_parent_edges():
     assert title.children[0].text == "Cybersecurity, matters."
 
 
+def test_tree_decoder_groups_nearby_figure_fragments_under_caption():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {
+            "type": "title",
+            "text_for_embedding": "1 Introduction",
+            "global_order": 0,
+            "bbox": [80, 60, 260, 84],
+            "style_baseline_size": 16.0,
+        },
+        {
+            "type": "image",
+            "text_for_embedding": "",
+            "global_order": 1,
+            "page_idx": 0,
+            "bbox": [100, 120, 330, 300],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "image",
+            "text_for_embedding": "",
+            "global_order": 2,
+            "page_idx": 0,
+            "bbox": [350, 122, 580, 300],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "paragraph",
+            "text_for_embedding": "Figure 1: Two-panel overview.",
+            "global_order": 3,
+            "page_idx": 0,
+            "layout_role": "figure_caption",
+            "bbox": [100, 318, 580, 350],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "paragraph",
+            "text_for_embedding": "Body continues.",
+            "global_order": 4,
+            "bbox": [80, 390, 600, 450],
+        },
+    ]
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    scores = torch.empty((0, 3), dtype=torch.float32)
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5)).decode(records, edge_index, scores)
+    title = root.children[0]
+    figure_nodes = [child for child in title.children if child.record.get("figure_group_caption")]
+
+    assert len(figure_nodes) == 1
+    figure = figure_nodes[0]
+    assert figure.record["figure_group_caption"] == "Figure 1: Two-panel overview."
+    assert figure.record["figure_group_size"] == 2
+    assert figure.record["figure_group_source_node_ids"] == [1, 2]
+    assert all(child.text != "Figure 1: Two-panel overview." for child in root.children)
+
+
 def test_tree_decoder_refuses_author_biography_merge_contraction():
     if not has_torch():
         return

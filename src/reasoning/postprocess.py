@@ -133,6 +133,11 @@ PSEUDOCODE_IF_RE = re.compile(r"^\s*if\s+(.+?)(?:\s+then)?\s*$", re.IGNORECASE)
 PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
 PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
+FLOAT_CAPTION_RE = re.compile(
+    r"^\s*(?P<kind>Figure|Fig\.?|Table|Tab\.?|Algorithm|Alg\.?)"
+    r"\s*(?P<number>\d+(?:\.\d+)*[A-Za-z]?)?\s*[:.\-]\s*(?P<body>.+)?",
+    re.IGNORECASE,
+)
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
 ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
@@ -768,6 +773,7 @@ class TreeDecoder:
             if scope_id in nodes:
                 parent_of[node_id] = int(scope_id)
 
+        apply_float_caption_grouping(nodes, parent_of, skeleton)
         enforce_numbered_list_parent_continuity(nodes, parent_of)
 
         for child_id, parent_id in parent_of.items():
@@ -2489,6 +2495,270 @@ def is_page_noise_node(node: ResolvedNode) -> bool:
         return True
     normalized = normalize_structural_heading_text(node.text).replace(" ", "")
     return bool(normalized) and normalized.isdigit() and len(normalized) <= 4
+
+
+def apply_float_caption_grouping(
+    nodes: dict[int, ResolvedNode],
+    parent_of: dict[int, int],
+    skeleton: HeadingSkeleton,
+) -> None:
+    """Attach visual float captions to nearby floats before tree materialization.
+
+    GNN parent edges are deliberately conservative around floating objects: TeX
+    source order and PDF placement often disagree.  This pass uses only physical
+    layout evidence plus shallow caption labels and writes the caption back onto
+    the primary float record, so the IR renderer emits a single figure/table
+    block rather than a loose caption paragraph.
+    """
+
+    if not nodes:
+        return
+    float_ids = [
+        node_id
+        for node_id, node in nodes.items()
+        if canonical_render_type(node.record) in {"figure", "table"} and not is_page_noise_node(node)
+    ]
+    if not float_ids:
+        return
+
+    caption_ids = [
+        node_id
+        for node_id in sorted(nodes, key=lambda item: node_reading_order_key(nodes[item]))
+        if float_caption_kind(nodes[node_id]) in {"figure", "table"} and not is_page_noise_node(nodes[node_id])
+    ]
+    consumed_caption_ids: set[int] = set()
+    for caption_id in caption_ids:
+        if caption_id in consumed_caption_ids:
+            continue
+        caption_node = nodes[caption_id]
+        kind = float_caption_kind(caption_node)
+        if kind not in {"figure", "table"}:
+            continue
+        group = nearest_float_group_for_caption(caption_node, kind=kind, nodes=nodes, float_ids=float_ids)
+        if not group:
+            continue
+        primary_id = choose_float_group_primary(nodes, group, caption_node)
+        write_float_group_metadata(nodes, group, primary_id=primary_id, caption_node=caption_node, kind=kind)
+        parent_of[caption_id] = primary_id
+        consumed_caption_ids.add(caption_id)
+        for member_id in group:
+            if member_id != primary_id:
+                parent_of[member_id] = primary_id
+        scope_id = skeleton.scope_by_node.get(caption_id)
+        if scope_id in nodes and primary_id not in parent_of:
+            parent_of[primary_id] = int(scope_id)
+
+
+def float_caption_kind(node: ResolvedNode) -> str | None:
+    role = node_layout_role(node.record)
+    if "figure_caption" in role or role in {"caption", "image_caption"}:
+        return "figure"
+    if "table_caption" in role:
+        return "table"
+    match = FLOAT_CAPTION_RE.match(" ".join(node.text.split()))
+    if not match:
+        return None
+    kind = match.group("kind").casefold().rstrip(".")
+    if kind in {"figure", "fig"}:
+        return "figure"
+    if kind in {"table", "tab"}:
+        return "table"
+    return None
+
+
+def nearest_float_group_for_caption(
+    caption_node: ResolvedNode,
+    *,
+    kind: str,
+    nodes: dict[int, ResolvedNode],
+    float_ids: list[int],
+) -> list[int]:
+    caption_box = merge_barrier_bbox(caption_node.record)
+    caption_page = merge_barrier_page(caption_node.record)
+    if caption_box is None:
+        return []
+    candidates: list[tuple[float, int]] = []
+    for float_id in float_ids:
+        float_node = nodes[float_id]
+        if canonical_render_type(float_node.record) != kind:
+            continue
+        if caption_page is not None and merge_barrier_page(float_node.record) not in {None, caption_page}:
+            continue
+        float_box = merge_barrier_bbox(float_node.record)
+        if float_box is None:
+            continue
+        score = caption_float_distance_score(caption_box, float_box, caption_node.record, float_node.record)
+        if score is not None:
+            candidates.append((score, float_id))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0])
+    primary_id = candidates[0][1]
+    primary_box = merge_barrier_bbox(nodes[primary_id].record)
+    if primary_box is None:
+        return [primary_id]
+    group = {primary_id}
+    for score, candidate_id in candidates[1:]:
+        candidate_box = merge_barrier_bbox(nodes[candidate_id].record)
+        if candidate_box is None:
+            continue
+        if score > max(140.0, 0.18 * max(float_page_height(caption_node.record), 1.0)):
+            continue
+        if floats_share_caption_band(primary_box, candidate_box, caption_box, caption_node.record):
+            group.add(candidate_id)
+    return sorted(group, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+
+
+def caption_float_distance_score(
+    caption_box: tuple[float, float, float, float],
+    float_box: tuple[float, float, float, float],
+    caption_record: dict[str, Any],
+    float_record: dict[str, Any],
+) -> float | None:
+    page_width = max(float_page_width(caption_record, float_record), 1.0)
+    page_height = max(float_page_height(caption_record, float_record), 1.0)
+    x_overlap = bbox_x_overlap_ratio(caption_box, float_box)
+    x_gap = bbox_x_gap(caption_box, float_box)
+    below_gap = caption_box[1] - float_box[3]
+    above_gap = float_box[1] - caption_box[3]
+    vertical_gap = below_gap if below_gap >= 0 else above_gap if above_gap >= 0 else 0.0
+    if vertical_gap > max(160.0, 0.20 * page_height):
+        return None
+    if x_overlap < 0.08 and x_gap > max(80.0, 0.12 * page_width):
+        return None
+    caption_center_x = (caption_box[0] + caption_box[2]) / 2.0
+    float_center_x = (float_box[0] + float_box[2]) / 2.0
+    alignment_penalty = 0.0 if x_overlap >= 0.25 else min(abs(caption_center_x - float_center_x) / page_width, 1.0) * 40.0
+    return vertical_gap + alignment_penalty
+
+
+def floats_share_caption_band(
+    primary_box: tuple[float, float, float, float],
+    candidate_box: tuple[float, float, float, float],
+    caption_box: tuple[float, float, float, float],
+    caption_record: dict[str, Any],
+) -> bool:
+    page_width = max(float_page_width(caption_record), 1.0)
+    page_height = max(float_page_height(caption_record), 1.0)
+    if y_overlap_ratio(primary_box, candidate_box) >= 0.18:
+        return True
+    primary_gap = min(abs(caption_box[1] - primary_box[3]), abs(primary_box[1] - caption_box[3]))
+    candidate_gap = min(abs(caption_box[1] - candidate_box[3]), abs(candidate_box[1] - caption_box[3]))
+    if abs(candidate_gap - primary_gap) > max(55.0, 0.08 * page_height):
+        return False
+    union_width = max(primary_box[2], candidate_box[2]) - min(primary_box[0], candidate_box[0])
+    return union_width <= page_width * 0.98
+
+
+def choose_float_group_primary(
+    nodes: dict[int, ResolvedNode],
+    group: list[int],
+    caption_node: ResolvedNode,
+) -> int:
+    caption_order = node_physical_index(caption_node)
+    if caption_order is not None:
+        before_caption = [
+            node_id
+            for node_id in group
+            if (node_physical_index(nodes[node_id]) is not None and node_physical_index(nodes[node_id]) <= caption_order)
+        ]
+        if before_caption:
+            return max(before_caption, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+    return max(group, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+
+
+def write_float_group_metadata(
+    nodes: dict[int, ResolvedNode],
+    group: list[int],
+    *,
+    primary_id: int,
+    caption_node: ResolvedNode,
+    kind: str,
+) -> None:
+    boxes = [merge_barrier_bbox(nodes[node_id].record) for node_id in group]
+    boxes = [box for box in boxes if box is not None]
+    if not boxes:
+        return
+    union = [
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    ]
+    caption = " ".join(caption_node.text.split())
+    group_id = existing_float_group_id(nodes, group, kind) or f"{kind}_group_auto_{primary_id}"
+    member_ids = sorted(group, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+    prefix = "figure" if kind == "figure" else "table"
+    for member_index, node_id in enumerate(member_ids):
+        record = nodes[node_id].record
+        record[f"{prefix}_group_id"] = group_id
+        record[f"{prefix}_group_member_index"] = member_index
+        record[f"{prefix}_group_size"] = len(member_ids)
+        record[f"{prefix}_group_primary"] = node_id == primary_id
+        record[f"{prefix}_group_bbox"] = list(union)
+        record[f"{prefix}_group_caption"] = caption
+        record[f"{prefix}_group_source_node_ids"] = member_ids
+        if kind == "figure":
+            record["image_group_id"] = group_id
+            record["image_group_member_index"] = member_index
+            record["image_group_size"] = len(member_ids)
+            record["image_group_primary"] = node_id == primary_id
+            record["image_group_bbox"] = list(union)
+            record["image_group_caption"] = caption
+            record["image_group_source_node_ids"] = member_ids
+        if node_id == primary_id:
+            record["merged_text"] = caption
+
+
+def existing_float_group_id(nodes: dict[int, ResolvedNode], group: list[int], kind: str) -> str | None:
+    keys = ("figure_group_id", "image_group_id") if kind == "figure" else ("table_group_id",)
+    for node_id in group:
+        for key in keys:
+            value = nodes[node_id].record.get(key)
+            if value is not None and str(value).strip():
+                return str(value)
+    return None
+
+
+def bbox_x_overlap_ratio(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    intersection = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    min_width = max(min(left[2] - left[0], right[2] - right[0]), 1e-6)
+    return intersection / min_width
+
+
+def y_overlap_ratio(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    intersection = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    min_height = max(min(left[3] - left[1], right[3] - right[1]), 1e-6)
+    return intersection / min_height
+
+
+def bbox_x_gap(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    return max(max(left[0], right[0]) - min(left[2], right[2]), 0.0)
+
+
+def float_page_width(*records: dict[str, Any]) -> float:
+    for record in records:
+        value = numeric_value(record.get("page_width"))
+        if value is not None and value > 0:
+            return value
+    return 1000.0
+
+
+def float_page_height(*records: dict[str, Any]) -> float:
+    for record in records:
+        value = numeric_value(record.get("page_height"))
+        if value is not None and value > 0:
+            return value
+    return 1000.0
 
 
 def enforce_numbered_list_parent_continuity(nodes: dict[int, ResolvedNode], parent_of: dict[int, int]) -> None:

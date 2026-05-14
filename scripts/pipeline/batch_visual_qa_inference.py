@@ -483,6 +483,19 @@ def render_tree_from_resolved_root(
 
 def source_indexes_for_resolved_node(node: ResolvedNode) -> list[int]:
     indexes: list[int] = []
+    for key in (
+        "float_group_source_node_ids",
+        "figure_group_source_node_ids",
+        "image_group_source_node_ids",
+        "table_group_source_node_ids",
+    ):
+        value = node.record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, int) and item >= 0:
+                    indexes.append(item)
+                elif isinstance(item, str) and item.isdigit():
+                    indexes.append(int(item))
     for value in node.merged_node_ids or [node.node_id]:
         if isinstance(value, int) and value >= 0:
             indexes.append(value)
