@@ -8,6 +8,7 @@ rendering.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -330,7 +331,20 @@ def text_from_v7_item(item: dict[str, Any]) -> str:
         # Keep table cell OCR out of the semantic text surface.  The raw body is
         # still preserved in metadata for crop/table reconstruction, but the IR
         # node text should represent the table as a visual object plus caption.
-        return caption_text
+        if caption_text:
+            return caption_text
+        for key in ("text", "text_for_embedding", "text_preview"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                extracted = table_caption_from_text(value)
+                if extracted:
+                    return extracted
+        block = item.get("block")
+        if isinstance(block, dict):
+            extracted = table_caption_from_text(text_from_block(block))
+            if extracted:
+                return extracted
+        return ""
     for key in ("text", "text_for_embedding", "text_preview"):
         value = item.get(key)
         if isinstance(value, str) and value:
@@ -357,6 +371,56 @@ def text_from_block(block: dict[str, Any]) -> str:
             if isinstance(value, list):
                 return "".join(text_from_content_segment(segment) for segment in value)
     return ""
+
+
+TABLE_CAPTION_RE = re.compile(
+    r"^\s*(?P<caption>Table\s+(?:[0-9]+|[IVXLCDM]+|[A-Z])(?:\.[0-9A-Za-z]+)*\s*[:.]\s+.+)",
+    re.IGNORECASE,
+)
+
+
+def table_caption_from_text(text: str) -> str:
+    value = " ".join(str(text or "").replace("\r", "\n").split())
+    if not value:
+        return ""
+    match = TABLE_CAPTION_RE.match(value)
+    if not match:
+        return ""
+    caption = clean_table_caption_markup(match.group("caption").strip())
+    # OCR table bodies are often appended after the caption.  Retain enough text
+    # for numbering and a useful caption, but avoid dumping full table cells into
+    # the semantic surface.
+    return safe_table_caption_excerpt(caption)
+
+
+def clean_table_caption_markup(text: str) -> str:
+    value = str(text or "")
+    # MinerU can emit small OCR math fragments such as ``\mathrm { N }`` inside
+    # table notes.  A later hard cut can otherwise leave ``\mathrm {`` dangling
+    # inside ``\caption{...}``.  Captions only need readable text and numbering,
+    # so unwrap simple LaTeX font/math commands before any truncation.
+    previous = None
+    while previous != value:
+        previous = value
+        value = re.sub(r"\\[A-Za-z]+\s*\{\s*([^{}]*?)\s*\}", r"\1", value)
+    value = re.sub(r"\\[A-Za-z]+", " ", value)
+    value = value.replace("{", "").replace("}", "")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def safe_table_caption_excerpt(text: str, *, limit: int = 360) -> str:
+    value = " ".join(str(text or "").split()).strip()
+    if len(value) <= limit:
+        return value.rstrip(" ,;:")
+    sentence_ends = [match.end() for match in re.finditer(r"[.!?]\s+", value)]
+    usable = [end for end in sentence_ends if 80 <= end <= limit]
+    if usable:
+        return value[: usable[-1]].rstrip(" ,;:")
+    cut = value.rfind(" ", 0, limit)
+    if cut < 80:
+        cut = limit
+    return value[:cut].rstrip(" ,;:")
 
 
 def text_from_content_segment(segment: Any) -> str:

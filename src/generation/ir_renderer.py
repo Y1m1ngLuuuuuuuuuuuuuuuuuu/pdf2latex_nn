@@ -117,7 +117,7 @@ class OriginalLikeIRLatexRenderer:
         style: StyleProfile,
         citations: CitationResolution | None = None,
     ) -> str:
-        tree = self._tree_with_missing_referenced_float_nodes(document, tree)
+        tree = self._tree_with_missing_float_nodes(document, tree)
         document_nodes = {node.node_id: node for node in document.nodes}
         render_nodes = {node.render_id: node for node in tree.nodes}
         root = render_nodes[tree.root_id]
@@ -145,13 +145,11 @@ class OriginalLikeIRLatexRenderer:
         lines.append(r"\end{document}")
         return "\n".join(lines).rstrip() + "\n"
 
-    def _tree_with_missing_referenced_float_nodes(self, document: DocumentIR, tree: RenderTreeIR) -> RenderTreeIR:
+    def _tree_with_missing_float_nodes(self, document: DocumentIR, tree: RenderTreeIR) -> RenderTreeIR:
         registry = self._active_cross_refs
         if registry is None:
             return tree
         referenced_labels = registry.referenced_labels(document)
-        if not referenced_labels:
-            return tree
 
         used_source_ids = {source_id for node in tree.nodes for source_id in node.source_node_ids}
         document_nodes = {node.node_id: node for node in document.nodes}
@@ -178,7 +176,11 @@ class OriginalLikeIRLatexRenderer:
             if kind is None:
                 continue
             label = registry.label_for_node(source.node_id, kind=kind)
-            if not label or label not in referenced_labels or source.node_id in used_source_ids:
+            is_visual_float = source.node_type in {BlockType.FIGURE, BlockType.TABLE}
+            is_referenced_structural = bool(label and label in referenced_labels)
+            if not is_visual_float and not is_referenced_structural:
+                continue
+            if source.node_id in used_source_ids:
                 continue
             if source.node_type == BlockType.FIGURE:
                 group_id = _figure_group_id(source)
@@ -204,7 +206,13 @@ class OriginalLikeIRLatexRenderer:
                     render_id=f"full_v7_ref_float_{_safe_render_id(source.node_id)}",
                     role=role,
                     source_node_ids=[source.node_id],
-                    attributes={"injected_reason": "referenced_float_missing_from_tree"},
+                    attributes={
+                        "injected_reason": (
+                            "referenced_float_missing_from_tree"
+                            if is_referenced_structural
+                            else "full_v7_float_missing_from_tree"
+                        )
+                    },
                 )
             )
             used_source_ids.add(source.node_id)
@@ -235,7 +243,7 @@ class OriginalLikeIRLatexRenderer:
             document_ir_path=tree.document_ir_path,
             predicted_relations_path=tree.predicted_relations_path,
             style_profile_path=tree.style_profile_path,
-            metadata={**tree.metadata, "referenced_float_fallback_count": len(additions)},
+            metadata={**tree.metadata, "float_fallback_count": len(additions)},
         )
 
     def _render_preamble(self, style: StyleProfile, citations: CitationResolution | None = None) -> list[str]:

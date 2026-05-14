@@ -1328,6 +1328,49 @@ def test_original_like_ir_renderer_injects_referenced_float_missing_from_tree():
     assert r"\label{fig:1}" in tex
 
 
+def test_original_like_ir_renderer_injects_missing_table_even_without_reference():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="A paragraph before the table.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="tab",
+            node_type=BlockType.TABLE,
+            text="Table 2: Unreferenced but present.",
+            page_idx=0,
+            bboxes=[BBox(100, 200, 700, 400)],
+            reading_index=1,
+            metadata={"table_caption": "Table 2: Unreferenced but present."},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="missing_table",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="missing_table",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["body"]),
+            RenderTreeNode(render_id="body", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\caption{Unreferenced but present}" in tex
+    assert r"\label{tab:2}" in tex
+
+
 def test_original_like_ir_renderer_groups_list_siblings_and_keeps_equation_inside_item():
     nodes = [
         DocumentNode(

@@ -184,6 +184,56 @@ def test_table_ir_text_keeps_caption_but_not_cell_body():
     assert document.nodes[0].metadata["table_body"] == "<table><tr><td>model</td><td>99</td></tr></table>"
 
 
+def test_table_ir_text_extracts_caption_from_ocr_text_when_caption_field_is_missing():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 900, 300],
+                "text_for_embedding": "Table 3: Results summary. Method A B 99 98 raw cells should not dominate.",
+                "style_spans": [],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="table-caption-fallback")
+
+    assert document.nodes[0].node_type == BlockType.TABLE
+    assert document.nodes[0].text.startswith("Table 3: Results summary.")
+    assert len(document.nodes[0].text) <= 420
+
+
+def test_table_ir_caption_fallback_does_not_cut_inside_latex_command():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 900, 300],
+                "text_for_embedding": (
+                    "Table 3: The worst-group accuracy is highlighted in bold. "
+                    "Performance is evaluated on the test set. "
+                    r"\mathrm { N } / \mathrm { A } means no result is reported. "
+                    + "x " * 260
+                ),
+                "style_spans": [],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="table-caption-safe")
+
+    assert r"\mathrm" not in document.nodes[0].text
+    assert "{" not in document.nodes[0].text
+    assert "}" not in document.nodes[0].text
+    assert len(document.nodes[0].text) <= 360
+
+
 def test_duplicate_shadow_nodes_are_not_rendered_in_document_ir():
     payload = {
         "schema_version": "content_v7_columnfix_listmarkers_with_styles",
