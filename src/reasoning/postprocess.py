@@ -1504,19 +1504,22 @@ def strict_heading_stack_decision(
         return None
     prefix_kind = evidence.numbering_style
     prefix_level = evidence.numbering_level
-    block_type = canonical_render_type(node.record)
-    role = node_layout_role(node.record)
     standalone = looks_like_standalone_heading(text)
-    physical_gate = strict_physical_heading_gate(node, evidence=evidence, profile=profile)
     numbered = prefix_level is not None and prefix_kind not in {"numeric_paren", "custom_colon"}
-    strong_numbered = strict_has_strong_numbering_signal(evidence, node=node, layout_heading_signal=layout_heading_signal)
 
-    if strong_numbered and standalone:
+    score, score_reasons = strict_heading_evidence_score(
+        node,
+        evidence=evidence,
+        profile=profile,
+        layout_heading_signal=layout_heading_signal,
+        standalone=standalone,
+    )
+    node.record["_strict_heading_score"] = round(float(score), 4)
+    node.record["_strict_heading_score_reasons"] = score_reasons
+
+    if score >= strict_heading_score_threshold(evidence, node=node, layout_heading_signal=layout_heading_signal):
         level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
-        return HeadingDecision(True, level, False, f"numbered-{prefix_kind}")
-    if physical_gate and standalone and (block_type == "title" or role == "heading" or layout_heading_signal):
-        level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
-        reason = "physical-title-heading" if not layout_heading_signal else "layout-physical-heading"
+        reason = "scored-heading:" + ",".join(score_reasons[:5])
         return HeadingDecision(True, level, False, reason)
     if numbered and not standalone:
         # Numbered but sentence-like nodes are list or run-in candidates, not
@@ -1570,6 +1573,118 @@ def strict_style_supports_heading(evidence: HeadingEvidence, profile: HeadingSty
     if cluster in profile.level_by_font_cluster and evidence.relative_font_size >= 1.03:
         return True
     return evidence.is_bold and evidence.is_line_isolated and evidence.relative_font_size >= 1.0
+
+
+def strict_heading_evidence_score(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence,
+    profile: HeadingStyleProfile,
+    layout_heading_signal: bool,
+    standalone: bool,
+) -> tuple[float, list[str]]:
+    """Fuse noisy visual, lexical, and layout signals before stack admission."""
+
+    record = node.record
+    text = " ".join(node.text.split())
+    reasons: list[str] = []
+    score = 0.0
+
+    strong_numbered = strict_has_strong_numbering_signal(evidence, node=node, layout_heading_signal=layout_heading_signal)
+    if strong_numbered:
+        score += 3.0
+        reasons.append(f"numbering:{evidence.numbering_style}")
+    elif evidence.numbering_level is not None:
+        score += 1.0
+        reasons.append(f"weak-numbering:{evidence.numbering_style}")
+
+    if evidence.relative_font_size >= 1.15:
+        score += 2.0
+        reasons.append("font>=1.15")
+    elif evidence.relative_font_size >= 1.08:
+        score += 1.0
+        reasons.append("font>=1.08")
+
+    cluster = round(evidence.relative_font_size * 20.0) / 20.0
+    if cluster in profile.level_by_font_cluster and evidence.relative_font_size >= 1.03:
+        score += 1.0
+        reasons.append("font-cluster")
+
+    if evidence.is_bold or node_is_bold(record):
+        score += 1.0
+        reasons.append("bold")
+
+    if evidence.is_line_isolated:
+        score += 0.8
+        reasons.append("isolated")
+    if evidence.vertical_gap_before > 0:
+        score += 0.6
+        reasons.append("gap-before")
+    if evidence.vertical_gap_after > 0:
+        score += 0.6
+        reasons.append("gap-after")
+
+    word_count = len([part for part in re.split(r"\s+", text) if part])
+    if 0 < word_count < 10:
+        score += 1.0
+        reasons.append("short")
+    elif word_count <= 16:
+        score += 0.4
+        reasons.append("medium-short")
+
+    if canonical_render_type(record) == "title":
+        score += 1.0
+        reasons.append("type-title")
+    role = node_layout_role(record)
+    if role == "heading" or layout_heading_signal:
+        score += 1.0
+        reasons.append("layout-heading")
+
+    sentence_terminal = text.endswith((".", "。", "?", "!", "？", "！"))
+    if not standalone and not (strong_numbered and sentence_terminal):
+        score -= 2.5
+        reasons.append("not-standalone")
+    if text.endswith((",", "，", ";", "；")):
+        score -= 3.0
+        reasons.append("terminal-comma")
+    elif sentence_terminal:
+        penalty = 1.0 if strong_numbered else 2.5
+        score -= penalty
+        reasons.append("terminal-sentence")
+    if word_count > 18:
+        score -= 2.0
+        reasons.append("too-long")
+    if word_count > 30 or len(text) > 180:
+        score -= 3.0
+        reasons.append("very-long")
+    math_markers = text.count("[MATH]") + text.count("\\") + text.count("{") + text.count("}")
+    if math_markers >= 3 and len(text) > 36:
+        score -= 5.0
+        reasons.append("math-fragment")
+    if "@" in text or "\\@" in text:
+        score -= 5.0
+        reasons.append("email-like")
+    if strict_node_is_reference_item(node):
+        score -= 5.0
+        reasons.append("reference-item")
+    if strict_node_is_float_caption(node):
+        score -= 5.0
+        reasons.append("float-caption")
+
+    return score, reasons
+
+
+def strict_heading_score_threshold(
+    evidence: HeadingEvidence,
+    *,
+    node: ResolvedNode,
+    layout_heading_signal: bool,
+) -> float:
+    if strict_has_strong_numbering_signal(evidence, node=node, layout_heading_signal=layout_heading_signal):
+        return 4.0
+    if canonical_render_type(node.record) == "title" or node_layout_role(node.record) == "heading" or layout_heading_signal:
+        return 4.0
+    return 4.5
 
 
 def strict_physical_heading_gate(
@@ -3055,16 +3170,24 @@ def apply_float_caption_grouping(
         for node_id in sorted(nodes, key=lambda item: node_reading_order_key(nodes[item]))
         if float_caption_kind(nodes[node_id]) in {"figure", "table"} and not is_page_noise_node(nodes[node_id])
     ]
+    matches = build_float_caption_matches(caption_ids=caption_ids, float_ids=float_ids, nodes=nodes)
     consumed_caption_ids: set[int] = set()
-    for caption_id in caption_ids:
-        if caption_id in consumed_caption_ids:
+    consumed_float_ids: set[int] = set()
+    for _score, caption_id, primary_candidate_id in matches:
+        if caption_id in consumed_caption_ids or primary_candidate_id in consumed_float_ids:
             continue
         caption_node = nodes[caption_id]
         kind = float_caption_kind(caption_node)
         if kind not in {"figure", "table"}:
             continue
-        group = nearest_float_group_for_caption(caption_node, kind=kind, nodes=nodes, float_ids=float_ids)
-        if not group:
+        group = expand_float_group_for_caption(
+            caption_node,
+            kind=kind,
+            nodes=nodes,
+            primary_id=primary_candidate_id,
+            float_ids=float_ids,
+        )
+        if not group or any(member_id in consumed_float_ids for member_id in group):
             continue
         primary_id = choose_float_group_primary(nodes, group, caption_node)
         write_float_group_metadata(nodes, group, primary_id=primary_id, caption_node=caption_node, kind=kind)
@@ -3072,12 +3195,117 @@ def apply_float_caption_grouping(
         caption_node.record["canonical_type"] = "caption"
         parent_of[caption_id] = primary_id
         consumed_caption_ids.add(caption_id)
+        consumed_float_ids.update(group)
         for member_id in group:
             if member_id != primary_id:
                 parent_of[member_id] = primary_id
         scope_id = skeleton.scope_by_node.get(caption_id)
         if scope_id in nodes and primary_id not in parent_of:
             parent_of[primary_id] = int(scope_id)
+
+
+def build_float_caption_matches(
+    *,
+    caption_ids: list[int],
+    float_ids: list[int],
+    nodes: dict[int, ResolvedNode],
+) -> list[tuple[float, int, int]]:
+    """Score all caption/float candidates before greedily matching them.
+
+    This is a lightweight bipartite matcher: captions and floats are first
+    separated into pools, every compatible pair gets a score using textual
+    anchors plus physical alignment, then the strongest non-conflicting pairs
+    are consumed first.
+    """
+
+    matches: list[tuple[float, int, int]] = []
+    for caption_id in caption_ids:
+        caption_node = nodes[caption_id]
+        kind = float_caption_kind(caption_node)
+        if kind not in {"figure", "table"}:
+            continue
+        for float_id in float_ids:
+            float_node = nodes[float_id]
+            if canonical_render_type(float_node.record) != kind:
+                continue
+            score = caption_float_match_score(caption_node, float_node, kind=kind)
+            if score is not None:
+                matches.append((score, caption_id, float_id))
+    return sorted(matches, key=lambda item: (-item[0], node_reading_order_key(nodes[item[1]]), node_reading_order_key(nodes[item[2]])))
+
+
+def caption_float_match_score(caption_node: ResolvedNode, float_node: ResolvedNode, *, kind: str) -> float | None:
+    caption_box = merge_barrier_bbox(caption_node.record)
+    float_box = merge_barrier_bbox(float_node.record)
+    if caption_box is None or float_box is None:
+        return None
+    caption_page = merge_barrier_page(caption_node.record)
+    float_page = merge_barrier_page(float_node.record)
+    if caption_page is not None and float_page not in {None, caption_page}:
+        return None
+
+    distance = caption_float_distance_score(caption_box, float_box, caption_node.record, float_node.record)
+    if distance is None:
+        return None
+
+    page_width = max(float_page_width(caption_node.record, float_node.record), 1.0)
+    x_overlap = bbox_x_overlap_ratio(caption_box, float_box)
+    caption_center_x = (caption_box[0] + caption_box[2]) / 2.0
+    float_center_x = (float_box[0] + float_box[2]) / 2.0
+    center_delta = abs(caption_center_x - float_center_x) / page_width
+    below_gap = caption_box[1] - float_box[3]
+    above_gap = float_box[1] - caption_box[3]
+
+    score = 1000.0 - distance
+    score += 30.0  # type-compatible pool match
+    if caption_page is not None and float_page == caption_page:
+        score += 10.0
+    if x_overlap >= 0.25:
+        score += 12.0
+    elif center_delta <= 0.08:
+        score += 8.0
+    if kind == "figure" and below_gap >= -8.0:
+        score += 8.0
+    if kind == "table" and (below_gap >= -8.0 or above_gap >= -8.0):
+        score += 8.0
+
+    caption_number = float_caption_number(caption_node)
+    if caption_number and caption_number in float_identifier_tokens(float_node.record):
+        score += 25.0
+    return score
+
+
+def expand_float_group_for_caption(
+    caption_node: ResolvedNode,
+    *,
+    kind: str,
+    nodes: dict[int, ResolvedNode],
+    primary_id: int,
+    float_ids: list[int],
+) -> list[int]:
+    primary_box = merge_barrier_bbox(nodes[primary_id].record)
+    caption_box = merge_barrier_bbox(caption_node.record)
+    if primary_box is None or caption_box is None:
+        return [primary_id]
+    caption_page = merge_barrier_page(caption_node.record)
+    group = {primary_id}
+    for candidate_id in float_ids:
+        if candidate_id == primary_id:
+            continue
+        candidate_node = nodes[candidate_id]
+        if canonical_render_type(candidate_node.record) != kind:
+            continue
+        if caption_page is not None and merge_barrier_page(candidate_node.record) not in {None, caption_page}:
+            continue
+        candidate_box = merge_barrier_bbox(candidate_node.record)
+        if candidate_box is None:
+            continue
+        score = caption_float_match_score(caption_node, candidate_node, kind=kind)
+        if score is None:
+            continue
+        if floats_share_caption_band(primary_box, candidate_box, caption_box, caption_node.record):
+            group.add(candidate_id)
+    return sorted(group, key=lambda node_id: node_reading_order_key(nodes[node_id]))
 
 
 def float_caption_kind(node: ResolvedNode) -> str | None:
@@ -3095,6 +3323,23 @@ def float_caption_kind(node: ResolvedNode) -> str | None:
     if kind in {"table", "tab"}:
         return "table"
     return None
+
+
+def float_caption_number(node: ResolvedNode) -> str | None:
+    match = FLOAT_CAPTION_RE.match(" ".join(node.text.split()))
+    if not match:
+        return None
+    value = match.group("number")
+    return str(value).casefold() if value else None
+
+
+def float_identifier_tokens(record: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("figure_id", "image_id", "table_id", "id", "block_id", "node_id"):
+        value = record.get(key)
+        if value is not None:
+            tokens.update(match.group(0).casefold() for match in NUMERIC_ID_RE.finditer(str(value)))
+    return tokens
 
 
 def nearest_float_group_for_caption(

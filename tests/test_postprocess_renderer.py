@@ -1275,6 +1275,8 @@ def test_stack_heading_mode_uses_numbering_as_override_but_requires_style_for_fr
         {"type": "paragraph", "layout_role": "heading", "text": "Background", "global_order": 1, "style_baseline_size": 10.0},
         {"type": "paragraph", "text": "2.1 Method", "global_order": 2, "style_baseline_size": 10.0},
         {"type": "paragraph", "text": "Method body.", "global_order": 3, "style_baseline_size": 10.0},
+        {"type": "paragraph", "text": "3.1 Implementation.", "global_order": 4, "style_baseline_size": 10.0, "is_bold": True},
+        {"type": "paragraph", "text": "Implementation body.", "global_order": 5, "style_baseline_size": 10.0},
     ]
 
     root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
@@ -1286,8 +1288,68 @@ def test_stack_heading_mode_uses_numbering_as_override_but_requires_style_for_fr
 
     assert r"\section{Introduction}" in tex
     assert r"\subsection{Method}" in tex
+    assert r"\subsection{Implementation.}" in tex
     assert r"\subsection{Background}" not in tex
     assert "Background" in tex
+
+
+def test_tree_decoder_float_caption_bipartite_prefers_aligned_float():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text_for_embedding": "1 Results", "global_order": 0, "style_baseline_size": 16.0},
+        {
+            "type": "image",
+            "global_order": 1,
+            "page_idx": 0,
+            "bbox": [80, 120, 330, 290],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "image",
+            "global_order": 2,
+            "page_idx": 0,
+            "bbox": [610, 118, 880, 292],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "paragraph",
+            "text_for_embedding": "Figure 1: Left model.",
+            "layout_role": "figure_caption",
+            "global_order": 3,
+            "page_idx": 0,
+            "bbox": [72, 305, 338, 340],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+        {
+            "type": "paragraph",
+            "text_for_embedding": "Figure 2: Right model.",
+            "layout_role": "figure_caption",
+            "global_order": 4,
+            "page_idx": 0,
+            "bbox": [600, 305, 895, 340],
+            "page_width": 1000,
+            "page_height": 1000,
+        },
+    ]
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+    title = root.children[0]
+    figures = [child for child in title.children if child.record.get("figure_group_caption")]
+
+    assert len(figures) == 2
+    captions = {figure.record["figure_group_caption"]: figure.record["figure_group_source_node_ids"] for figure in figures}
+    assert captions["Figure 1: Left model."] == [1]
+    assert captions["Figure 2: Right model."] == [2]
 
 
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
