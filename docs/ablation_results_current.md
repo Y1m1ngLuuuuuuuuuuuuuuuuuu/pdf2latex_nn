@@ -137,6 +137,39 @@ float-caption attachment.  The stack decoder improved heading accuracy over
 the prior stack run (`0.6222 -> 0.6337`) but does not yet close the Nougat
 heading gap.
 
+Strict active-scope check:
+
+```text
+postprocess variant: strict active heading scope + font-size gate + numbering override
+report: data/09_eval_reports/ours_vs_nougat_compare100_no20_activestack_m07_20260516/summary.json
+local copy: local_outputs/final_eval_20260516/nougat_compare/ours_vs_nougat_compare100_no20_activestack_m07_20260516/summary.json
+documents: 100
+compile success: 100 / 100
+```
+
+| metric | strict active-stack ours | Nougat | delta |
+| --- | ---: | ---: | ---: |
+| macro_structure_score | 0.7178 | 0.7455 | -0.0276 |
+| heading_tree_accuracy | 0.5581 | 0.7315 | -0.1734 |
+| reading_order_accuracy | 0.9587 | 0.9835 | -0.0249 |
+| paragraph_merge_f1 | 0.6046 | 0.5777 | +0.0269 |
+| section_attachment_f1 | 0.6633 | 0.7403 | -0.0769 |
+| reference_section_completeness | 0.8713 | 0.7256 | +0.1456 |
+| float_caption_attachment_accuracy | 0.3732 | 0.5134 | -0.1403 |
+| generated_structure_validity | 0.9959 | 0.9461 | +0.0498 |
+| layout_similarity | 0.8101 | n/a | n/a |
+
+Interpretation: the strict implementation follows the intended active-scope
+contract more faithfully: once a body node is attached by reading flow to the
+current heading, GNN parent edges cannot steal it. It also requires unnumbered
+headings to pass a document-local font-size step (`>= 1.15x` body) while strong
+numbering patterns can still promote headings. This slightly improves section
+attachment over the filtered stack run (`0.6608 -> 0.6633`), but the current
+font gate is too conservative for heading-tree recall (`0.6337 -> 0.5581`).
+The next heading-skeleton improvement should learn per-document heading style
+clusters more aggressively rather than lowering the strict active-scope
+contract.
+
 Local E2E output folders:
 
 ```text
