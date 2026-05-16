@@ -17,7 +17,7 @@ from src.reasoning.heading_skeleton import (
     collect_heading_evidence,
     learn_heading_style_profile,
 )
-from src.reasoning.layout_state_machine import parse_layout_state_machine
+from src.reasoning.layout_state_machine import LayoutParseResult, parse_layout_state_machine
 
 
 MERGE = 0
@@ -1274,9 +1274,7 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legac
     for node in nodes.values():
         node.record["_heading_profile_body_font_size"] = round(float(profile.body_font_size), 4)
 
-    if mode == "stack":
-        return build_strict_heading_stack_skeleton(nodes, evidence_by_id=evidence_by_id, profile=profile)
-
+    layout_result: LayoutParseResult | None = None
     if has_layout_state_signals(node.record for node in nodes.values()):
         layout_result = parse_layout_state_machine(
             {node_id: node.record for node_id, node in nodes.items()},
@@ -1286,6 +1284,15 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legac
             if node_id in nodes:
                 nodes[node_id].record.update(hints)
 
+    if mode == "stack":
+        return build_strict_heading_stack_skeleton(
+            nodes,
+            evidence_by_id=evidence_by_id,
+            profile=profile,
+            layout_result=layout_result,
+        )
+
+    if layout_result is not None:
         if layout_result.heading_ids or layout_result.parent_by_node:
             for node_id in layout_result.heading_ids:
                 if node_id not in nodes:
@@ -1344,6 +1351,7 @@ def build_strict_heading_stack_skeleton(
     *,
     evidence_by_id: dict[int, HeadingEvidence],
     profile: HeadingStyleProfile,
+    layout_result: LayoutParseResult | None = None,
 ) -> HeadingSkeleton:
     """Build a document-global outline without using GNN parent edges.
 
@@ -1364,6 +1372,8 @@ def build_strict_heading_stack_skeleton(
     seen_body_heading = False
     references_open = False
     appendix_open = False
+    layout_heading_ids = set(layout_result.heading_ids) if layout_result is not None else set()
+    layout_heading_levels = dict(layout_result.heading_levels) if layout_result is not None else {}
 
     for effective_pos, node_id in enumerate(ordered_ids):
         node = nodes[node_id]
@@ -1385,6 +1395,8 @@ def build_strict_heading_stack_skeleton(
             seen_body_heading=seen_body_heading,
             references_open=references_open,
             appendix_open=appendix_open,
+            layout_heading_level=layout_heading_levels.get(node_id),
+            layout_heading_signal=node_id in layout_heading_ids,
         )
         if decision is not None:
             apply_heading_decision(node, decision)
@@ -1445,6 +1457,8 @@ def strict_heading_stack_decision(
     seen_body_heading: bool,
     references_open: bool,
     appendix_open: bool,
+    layout_heading_level: int | None = None,
+    layout_heading_signal: bool = False,
 ) -> HeadingDecision | None:
     text = " ".join(node.text.split())
     if not text or is_page_noise_node(node):
@@ -1464,6 +1478,9 @@ def strict_heading_stack_decision(
         return HeadingDecision(True, 1, False, "abstract-scope")
     if strict_node_is_front_matter(node) and not seen_body_heading:
         return None
+    if layout_heading_signal:
+        level = int(layout_heading_level or strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos))
+        return HeadingDecision(True, min(max(1, level), 5), False, "layout-heading-signal")
     if strict_node_is_list_item(node):
         if strict_numbered_heading_override(node, evidence=evidence, profile=profile, seen_body_heading=seen_body_heading):
             level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
