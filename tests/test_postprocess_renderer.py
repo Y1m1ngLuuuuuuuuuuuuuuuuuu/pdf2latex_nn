@@ -136,6 +136,8 @@ def test_tree_decoder_groups_nearby_figure_fragments_under_caption():
     assert figure.record["figure_group_size"] == 2
     assert figure.record["figure_group_source_node_ids"] == [1, 2]
     assert all(child.text != "Figure 1: Two-panel overview." for child in root.children)
+    tex = TreeDecoder().render_document(root)
+    assert tex.count("Two-panel overview.") == 1
 
 
 def test_tree_decoder_refuses_author_biography_merge_contraction():
@@ -1200,6 +1202,30 @@ def test_stack_heading_mode_keeps_text_parent_edges_from_stealing_section_scope(
     )
     intro_stack = next(child for child in stack_root.children if child.text == "1 Introduction")
     assert [child.text for child in intro_stack.children] == ["First paragraph.", "Second paragraph."]
+
+
+def test_stack_heading_mode_keeps_abstract_out_of_introduction_scope():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "Abstract", "layout_role": "abstract_title", "global_order": 0, "style_baseline_size": 12.0},
+        {"type": "paragraph", "text": "This paper studies layout.", "layout_role": "abstract_body", "global_order": 1, "style_baseline_size": 10.0},
+        {"type": "title", "text": "1 Introduction", "global_order": 2, "style_baseline_size": 16.0},
+        {"type": "paragraph", "text": "Intro body.", "global_order": 3, "style_baseline_size": 10.0},
+    ]
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+
+    abstract = next(child for child in root.children if child.text == "Abstract")
+    intro = next(child for child in root.children if child.text == "1 Introduction")
+    assert [child.text for child in abstract.children] == ["This paper studies layout."]
+    assert [child.text for child in intro.children] == ["Intro body."]
 
 
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():

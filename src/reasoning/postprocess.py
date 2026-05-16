@@ -11,7 +11,12 @@ from src.generation.citations import strip_reference_label
 from src.generation.table_assets import ensure_figure_asset, ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
-from src.reasoning.heading_skeleton import collect_heading_evidence, learn_heading_style_profile
+from src.reasoning.heading_skeleton import (
+    HeadingEvidence,
+    HeadingStyleProfile,
+    collect_heading_evidence,
+    learn_heading_style_profile,
+)
 from src.reasoning.layout_state_machine import parse_layout_state_machine
 
 
@@ -894,6 +899,8 @@ class TreeDecoder:
                 if rendered
             )
 
+        if node.record.get("_consumed_as_float_caption"):
+            return ""
         if layout_layer_name(node.record) == "noise_layer":
             return ""
         block_type = canonical_render_type(node.record)
@@ -1267,6 +1274,9 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legac
     for node in nodes.values():
         node.record["_heading_profile_body_font_size"] = round(float(profile.body_font_size), 4)
 
+    if mode == "stack":
+        return build_strict_heading_stack_skeleton(nodes, evidence_by_id=evidence_by_id, profile=profile)
+
     if has_layout_state_signals(node.record for node in nodes.values()):
         layout_result = parse_layout_state_machine(
             {node_id: node.record for node_id, node in nodes.items()},
@@ -1327,6 +1337,300 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legac
         heading_parent=heading_parent,
         scope_by_node=scope_by_node,
     )
+
+
+def build_strict_heading_stack_skeleton(
+    nodes: dict[int, ResolvedNode],
+    *,
+    evidence_by_id: dict[int, HeadingEvidence],
+    profile: HeadingStyleProfile,
+) -> HeadingSkeleton:
+    """Build a document-global outline without using GNN parent edges.
+
+    This is the production candidate for `--heading-skeleton-mode stack`:
+    the stack owns heading parentage and section scope, while GNN edges may
+    only refine local non-heading relations later in ``build_skeleton_tree``.
+    """
+
+    ordered_ids = sorted(nodes, key=lambda node_id: node_reading_order_key(nodes[node_id]))
+    heading_ids: set[int] = set()
+    heading_levels: dict[int, int] = {}
+    heading_parent: dict[int, int | None] = {}
+    scope_by_node: dict[int, int | None] = {}
+    parent_by_node: dict[int, int] = {}
+    render_hints: dict[int, dict[str, Any]] = {}
+    events: list[str] = []
+    stack: list[tuple[int, int]] = []
+    seen_body_heading = False
+    references_open = False
+    appendix_open = False
+
+    for effective_pos, node_id in enumerate(ordered_ids):
+        node = nodes[node_id]
+        evidence = evidence_by_id.get(node_id)
+        if is_page_noise_node(node):
+            events.append(f"{node_id}:skip-noise")
+            continue
+        if strict_node_is_front_matter(node) and not seen_body_heading and not strict_is_abstract_heading(node):
+            scope_by_node[node_id] = None
+            events.append(f"{node_id}:front-matter")
+            continue
+
+        decision = strict_heading_stack_decision(
+            node,
+            evidence=evidence,
+            profile=profile,
+            effective_pos=effective_pos,
+            current_level=stack[-1][0] if stack else 0,
+            seen_body_heading=seen_body_heading,
+            references_open=references_open,
+            appendix_open=appendix_open,
+        )
+        if decision is not None:
+            apply_heading_decision(node, decision)
+            if decision.is_structural:
+                level = max(1, int(decision.level))
+                node.record["_skeleton_heading_level"] = level
+                node.record["_heading_render_level"] = level
+                node.record["canonical_type"] = "title"
+                heading_ids.add(node_id)
+                heading_levels[node_id] = level
+                if strict_is_references_heading(node):
+                    references_open = True
+                    appendix_open = False
+                    stack.clear()
+                elif strict_is_appendix_heading(node):
+                    appendix_open = True
+                    stack.clear()
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                parent_id = stack[-1][1] if stack else None
+                heading_parent[node_id] = parent_id
+                if parent_id is not None:
+                    parent_by_node[node_id] = parent_id
+                scope_by_node[node_id] = node_id
+                stack.append((level, node_id))
+                seen_body_heading = True
+                events.append(f"{node_id}:strict-heading level={level} parent={parent_id} reason={decision.reason}")
+                continue
+            render_hints[node_id] = dict(node.record)
+            events.append(f"{node_id}:strict-non-heading reason={decision.reason}")
+
+        current_scope = stack[-1][1] if stack else None
+        scope_by_node[node_id] = current_scope
+        if current_scope is not None and strict_node_participates_in_section_scope(node):
+            parent_by_node[node_id] = current_scope
+            events.append(f"{node_id}:strict-attach scope={current_scope}")
+        else:
+            events.append(f"{node_id}:strict-root-or-layer")
+
+    return HeadingSkeleton(
+        heading_ids=frozenset(heading_ids),
+        heading_levels=heading_levels,
+        heading_parent=heading_parent,
+        scope_by_node=scope_by_node,
+        parent_by_node=parent_by_node,
+        render_hints=render_hints,
+        events=events,
+    )
+
+
+def strict_heading_stack_decision(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    profile: HeadingStyleProfile,
+    effective_pos: int,
+    current_level: int,
+    seen_body_heading: bool,
+    references_open: bool,
+    appendix_open: bool,
+) -> HeadingDecision | None:
+    text = " ".join(node.text.split())
+    if not text or is_page_noise_node(node):
+        return None
+    if is_toc_title_node(node.record, text) or strict_node_is_toc_entry(node):
+        return HeadingDecision(False, 1, False, "toc")
+    if strict_node_is_float_caption(node) or canonical_render_type(node.record) in {"figure", "table", "equation", "inline_math", "algorithm", "code"}:
+        return None
+    if node.record.get("run_in_heading"):
+        level = int(numeric_value(node.record.get("run_in_heading_level")) or title_numbering_level(text) or max(2, current_level + 1 if current_level else 2))
+        return HeadingDecision(True, min(max(1, level), 5), False, "run-in-heading")
+    if strict_is_references_heading(node):
+        return HeadingDecision(True, 1, False, "references-scope")
+    if strict_is_appendix_heading(node):
+        return HeadingDecision(True, 1, False, "appendix-scope")
+    if strict_is_abstract_heading(node):
+        return HeadingDecision(True, 1, False, "abstract-scope")
+    if strict_node_is_front_matter(node) and not seen_body_heading:
+        return None
+    if strict_node_is_list_item(node):
+        if strict_numbered_heading_override(node, evidence=evidence, profile=profile, seen_body_heading=seen_body_heading):
+            level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
+            return HeadingDecision(True, level, False, "numbered-heading-over-list-role")
+        return None
+    if strict_node_is_reference_item(node):
+        return None
+
+    if evidence is None:
+        return None
+    prefix_kind = evidence.numbering_style
+    prefix_level = evidence.numbering_level
+    block_type = canonical_render_type(node.record)
+    role = node_layout_role(node.record)
+    standalone = looks_like_standalone_heading(text)
+    style_heading = strict_style_supports_heading(evidence, profile)
+    numbered = prefix_level is not None and prefix_kind not in {"numeric_paren", "custom_colon"}
+
+    if numbered and standalone and (block_type == "title" or role == "heading" or style_heading or node_is_bold(node.record)):
+        level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
+        return HeadingDecision(True, level, False, f"numbered-{prefix_kind}")
+    if block_type == "title" and standalone and evidence.score >= 1.2:
+        level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
+        return HeadingDecision(True, level, False, "title-style")
+    if role == "heading" and standalone and (style_heading or evidence.score >= 1.4):
+        level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
+        return HeadingDecision(True, level, False, "role-heading")
+    if numbered and not standalone:
+        # Numbered but sentence-like nodes are list or run-in candidates, not
+        # standalone section titles unless upstream has already split them.
+        return HeadingDecision(False, max(1, prefix_level or 1), True, "numbered-non-standalone")
+    if references_open or appendix_open:
+        return None
+    return None
+
+
+def strict_heading_level(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    profile: HeadingStyleProfile,
+    current_level: int,
+    effective_pos: int,
+) -> int:
+    text = " ".join(node.text.split())
+    explicit = title_numbering_level(text)
+    if explicit is not None:
+        return max(1, min(explicit, 5))
+    if evidence is not None and evidence.numbering_level is not None:
+        if evidence.numbering_style == "alpha" and current_level >= 1:
+            return max(2, min(current_level + 1, 5))
+        return max(1, min(evidence.numbering_level, 5))
+    raw_type = str(node.record.get("type") or node.record.get("raw_type") or node.record.get("block_type") or "").casefold()
+    if raw_type == "section":
+        return 1
+    if raw_type == "subsection":
+        return 2
+    if raw_type == "subsubsection":
+        return 3
+    if evidence is not None:
+        cluster = round(evidence.relative_font_size * 20.0) / 20.0
+        if cluster in profile.level_by_font_cluster:
+            return max(1, min(profile.level_by_font_cluster[cluster], 5))
+        if evidence.relative_font_size >= 1.18:
+            return 1
+        if evidence.relative_font_size >= 1.05:
+            return 2 if current_level else 1
+    if is_local_subheading_layout(node.record):
+        return 2 if current_level else 1
+    return heading_stack_level_without_numbering(node, body_font_size=profile.body_font_size, order_pos=effective_pos)
+
+
+def strict_style_supports_heading(evidence: HeadingEvidence, profile: HeadingStyleProfile) -> bool:
+    if evidence.relative_font_size >= 1.10:
+        return True
+    cluster = round(evidence.relative_font_size * 20.0) / 20.0
+    if cluster in profile.level_by_font_cluster and evidence.relative_font_size >= 1.03:
+        return True
+    return evidence.is_bold and evidence.is_line_isolated and evidence.relative_font_size >= 1.0
+
+
+def strict_numbered_heading_override(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    profile: HeadingStyleProfile,
+    seen_body_heading: bool,
+) -> bool:
+    if evidence is None or evidence.numbering_level is None:
+        return False
+    text = " ".join(node.text.split())
+    if evidence.numbering_style not in {"numeric", "dotted_numeric", "bare_numbered", "roman", "appendix_dotted"}:
+        return False
+    if not looks_like_standalone_heading(text):
+        return False
+    if canonical_render_type(node.record) == "title":
+        return True
+    if node_is_bold(node.record) and (evidence.relative_font_size >= 1.0 or seen_body_heading):
+        return True
+    return strict_style_supports_heading(evidence, profile)
+
+
+def strict_node_participates_in_section_scope(node: ResolvedNode) -> bool:
+    role = node_layout_role(node.record)
+    if is_page_noise_node(node):
+        return False
+    if strict_node_is_front_matter(node):
+        return role in {"abstract_body", "abstract_paragraph"}
+    if strict_node_is_toc_entry(node):
+        return False
+    return True
+
+
+def strict_node_is_front_matter(node: ResolvedNode) -> bool:
+    layer = layout_layer_name(node.record).casefold()
+    role = node_layout_role(node.record)
+    if layer == "metadata_layer":
+        return role in {
+            "",
+            "front_matter",
+            "document_title",
+            "front_matter_title",
+            "author",
+            "authors",
+            "affiliation",
+            "date",
+            "email",
+            "correspondence",
+            "abstract",
+            "abstract_title",
+        }
+    return role in {"document_title", "front_matter_title", "author", "authors", "affiliation", "date", "email", "correspondence"}
+
+
+def strict_node_is_toc_entry(node: ResolvedNode) -> bool:
+    role = node_layout_role(node.record)
+    return role in {"toc", "toc_title", "toc_entry"} or canonical_render_type(node.record) == "toc"
+
+
+def strict_node_is_float_caption(node: ResolvedNode) -> bool:
+    return float_caption_kind(node) in {"figure", "table"}
+
+
+def strict_node_is_list_item(node: ResolvedNode) -> bool:
+    role = node_layout_role(node.record)
+    return role in {"list_item", "list"} or canonical_render_type(node.record) == "list" or bool(node.record.get("_render_as_list_item"))
+
+
+def strict_node_is_reference_item(node: ResolvedNode) -> bool:
+    return canonical_render_type(node.record) == "reference" and not strict_is_references_heading(node)
+
+
+def strict_is_abstract_heading(node: ResolvedNode) -> bool:
+    normalized = normalize_structural_heading_text(node.text)
+    role = node_layout_role(node.record)
+    compact_text = " ".join(node.text.split())
+    return normalized == "abstract" or role == "abstract_title" or (role == "abstract" and len(compact_text) <= 32)
+
+
+def strict_is_references_heading(node: ResolvedNode) -> bool:
+    normalized = normalize_structural_heading_text(node.text)
+    return normalized in {"references", "bibliography"}
+
+
+def strict_is_appendix_heading(node: ResolvedNode) -> bool:
+    normalized = normalize_structural_heading_text(node.text)
+    return normalized.startswith("appendix") or bool(node.record.get("_appendix_heading"))
 
 
 def has_layout_state_signals(records: Any) -> bool:
@@ -2653,6 +2957,8 @@ def apply_float_caption_grouping(
             continue
         primary_id = choose_float_group_primary(nodes, group, caption_node)
         write_float_group_metadata(nodes, group, primary_id=primary_id, caption_node=caption_node, kind=kind)
+        caption_node.record["_consumed_as_float_caption"] = True
+        caption_node.record["canonical_type"] = "caption"
         parent_of[caption_id] = primary_id
         consumed_caption_ids.add(caption_id)
         for member_id in group:
