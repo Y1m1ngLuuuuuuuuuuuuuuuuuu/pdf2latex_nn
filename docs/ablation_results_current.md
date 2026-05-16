@@ -170,6 +170,38 @@ The next heading-skeleton improvement should learn per-document heading style
 clusters more aggressively rather than lowering the strict active-scope
 contract.
 
+Scored heading evidence + float-caption matcher check:
+
+```text
+postprocess variant: active heading scope + multi-dimensional heading evidence score + caption/float candidate matching
+report: data/09_eval_reports/ours_vs_nougat_compare100_no20_scoredstack_m07_20260516/summary.json
+local copy: local_outputs/final_eval_20260516/nougat_compare/ours_vs_nougat_compare100_no20_scoredstack_m07_20260516/summary.json
+documents: 100
+compile success: 100 / 100
+```
+
+| metric | scored-stack ours | Nougat | delta |
+| --- | ---: | ---: | ---: |
+| macro_structure_score | 0.7210 | 0.7455 | -0.0244 |
+| heading_tree_accuracy | 0.5778 | 0.7315 | -0.1536 |
+| reading_order_accuracy | 0.9588 | 0.9835 | -0.0248 |
+| paragraph_merge_f1 | 0.6052 | 0.5777 | +0.0274 |
+| section_attachment_f1 | 0.6659 | 0.7403 | -0.0744 |
+| reference_section_completeness | 0.8713 | 0.7256 | +0.1456 |
+| float_caption_attachment_accuracy | 0.3732 | 0.5134 | -0.1403 |
+| generated_structure_validity | 0.9952 | 0.9461 | +0.0491 |
+| layout_similarity | 0.8104 | n/a | n/a |
+
+Interpretation: the scored evidence gate recovers part of the strict
+active-stack heading loss (`0.5581 -> 0.5778`) and gives the best section
+attachment among the stack variants (`0.6659`), but it is still substantially
+below the filtered-stack heading score (`0.6337`) and does not improve
+float-caption attachment.  Relative to filtered-stack, scored-stack changes are
+not production-worthy yet: macro mean delta is `-0.0078`, heading mean delta is
+`-0.0558`, heading improves on only 20/100 documents and worsens on 31/100.
+For paper metrics, filtered-stack remains the best current structure decoder;
+scored-stack is retained as an experimental ablation and diagnostic path.
+
 Local E2E output folders:
 
 ```text
