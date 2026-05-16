@@ -1228,6 +1228,43 @@ def test_stack_heading_mode_keeps_abstract_out_of_introduction_scope():
     assert [child.text for child in intro.children] == ["Intro body."]
 
 
+def test_stack_heading_mode_does_not_promote_document_title_or_math_sentence():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {
+            "type": "title",
+            "text": "Determining Layer-wise Sparsity for Large Language Models Through a Theoretical Perspective",
+            "global_order": 0,
+            "style_baseline_size": 20.0,
+            "is_bold": True,
+        },
+        {"type": "title", "text": "1 Introduction", "global_order": 1, "style_baseline_size": 16.0},
+        {
+            "type": "title",
+            "text": "[MATH] is an orthogonal matrix [MATH] V { T } V = I [MATH] , and",
+            "global_order": 2,
+            "style_baseline_size": 16.0,
+        },
+        {"type": "paragraph", "text": "Intro body.", "global_order": 3, "style_baseline_size": 10.0},
+        {"type": "title", "text": "ACKNOWLEDGMENT", "global_order": 4, "style_baseline_size": 13.0},
+    ]
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+
+    root_titles = [child.text for child in root.children if child.record.get("canonical_type") == "title"]
+    assert "Determining Layer-wise Sparsity for Large Language Models Through a Theoretical Perspective" not in root_titles
+    assert "[MATH] is an orthogonal matrix [MATH] V { T } V = I [MATH] , and" not in root_titles
+    assert "1 Introduction" in root_titles
+    assert "ACKNOWLEDGMENT" in root_titles
+
+
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
     records = [
         {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},

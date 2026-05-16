@@ -1476,6 +1476,12 @@ def strict_heading_stack_decision(
         return HeadingDecision(True, 1, False, "appendix-scope")
     if strict_is_abstract_heading(node):
         return HeadingDecision(True, 1, False, "abstract-scope")
+    if strict_is_acknowledgement_heading(node):
+        return HeadingDecision(True, 1, False, "acknowledgement-scope")
+    if strict_is_likely_document_title(node, evidence=evidence, effective_pos=effective_pos, seen_body_heading=seen_body_heading):
+        return None
+    if strict_rejects_heading_like_text(text):
+        return None
     if strict_node_is_front_matter(node) and not seen_body_heading:
         return None
     if layout_heading_signal:
@@ -1633,6 +1639,41 @@ def strict_node_is_reference_item(node: ResolvedNode) -> bool:
     return canonical_render_type(node.record) == "reference" and not strict_is_references_heading(node)
 
 
+def strict_rejects_heading_like_text(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return True
+    math_markers = value.count("[MATH]") + value.count("\\") + value.count("{") + value.count("}")
+    if len(value) > 72 and math_markers >= 2:
+        return True
+    if value.startswith("[MATH]") and len(value) > 36:
+        return True
+    if len(value) > 150 and title_numbering_level(value) is None:
+        return True
+    return False
+
+
+def strict_is_likely_document_title(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    effective_pos: int,
+    seen_body_heading: bool,
+) -> bool:
+    if seen_body_heading or effective_pos > 4:
+        return False
+    text = " ".join(node.text.split())
+    if not text or title_numbering_level(text) is not None:
+        return False
+    role = node_layout_role(node.record)
+    if role in {"document_title", "front_matter_title"}:
+        return True
+    if canonical_render_type(node.record) != "title":
+        return False
+    relative = evidence.relative_font_size if evidence is not None else 0.0
+    return len(text) >= 32 and (relative >= 1.12 or node_is_bold(node.record))
+
+
 def strict_is_abstract_heading(node: ResolvedNode) -> bool:
     normalized = normalize_structural_heading_text(node.text)
     role = node_layout_role(node.record)
@@ -1648,6 +1689,11 @@ def strict_is_references_heading(node: ResolvedNode) -> bool:
 def strict_is_appendix_heading(node: ResolvedNode) -> bool:
     normalized = normalize_structural_heading_text(node.text)
     return normalized.startswith("appendix") or bool(node.record.get("_appendix_heading"))
+
+
+def strict_is_acknowledgement_heading(node: ResolvedNode) -> bool:
+    normalized = normalize_structural_heading_text(node.text).replace(" ", "")
+    return normalized in {"acknowledgment", "acknowledgement", "acknowledgments", "acknowledgements"}
 
 
 def has_layout_state_signals(records: Any) -> bool:
