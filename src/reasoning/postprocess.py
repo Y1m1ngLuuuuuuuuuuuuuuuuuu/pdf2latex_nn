@@ -774,11 +774,13 @@ class TreeDecoder:
             if target_id in skeleton.heading_ids:
                 continue
             if normalize_heading_skeleton_mode(self.config.heading_skeleton_mode) == "stack":
-                if not stack_mode_allows_local_parent(edge, nodes, skeleton):
+                # In stack mode the active heading state machine owns section
+                # attachment.  GNN parent edges remain useful for diagnostics
+                # and non-stack modes, but they must not re-parent body nodes
+                # away from the current heading scope.
+                if target_id in parent_of:
                     continue
-                current_parent = parent_of.get(target_id)
-                current_scope = skeleton.scope_by_node.get(target_id)
-                if current_parent is not None and current_parent != current_scope:
+                if not stack_mode_allows_local_parent(edge, nodes, skeleton):
                     continue
             elif target_id in parent_of:
                 continue
@@ -1484,11 +1486,14 @@ def strict_heading_stack_decision(
         return None
     if strict_node_is_front_matter(node) and not seen_body_heading:
         return None
-    if layout_heading_signal:
-        level = int(layout_heading_level or strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos))
-        return HeadingDecision(True, min(max(1, level), 5), False, "layout-heading-signal")
     if strict_node_is_list_item(node):
-        if strict_numbered_heading_override(node, evidence=evidence, profile=profile, seen_body_heading=seen_body_heading):
+        if strict_numbered_heading_override(
+            node,
+            evidence=evidence,
+            profile=profile,
+            seen_body_heading=seen_body_heading,
+            layout_heading_signal=layout_heading_signal,
+        ):
             level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
             return HeadingDecision(True, level, False, "numbered-heading-over-list-role")
         return None
@@ -1502,18 +1507,17 @@ def strict_heading_stack_decision(
     block_type = canonical_render_type(node.record)
     role = node_layout_role(node.record)
     standalone = looks_like_standalone_heading(text)
-    style_heading = strict_style_supports_heading(evidence, profile)
+    physical_gate = strict_physical_heading_gate(node, evidence=evidence, profile=profile)
     numbered = prefix_level is not None and prefix_kind not in {"numeric_paren", "custom_colon"}
+    strong_numbered = strict_has_strong_numbering_signal(evidence, node=node, layout_heading_signal=layout_heading_signal)
 
-    if numbered and standalone and (block_type == "title" or role == "heading" or style_heading or node_is_bold(node.record)):
+    if strong_numbered and standalone:
         level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
         return HeadingDecision(True, level, False, f"numbered-{prefix_kind}")
-    if block_type == "title" and standalone and evidence.score >= 1.2:
+    if physical_gate and standalone and (block_type == "title" or role == "heading" or layout_heading_signal):
         level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
-        return HeadingDecision(True, level, False, "title-style")
-    if role == "heading" and standalone and (style_heading or evidence.score >= 1.4):
-        level = strict_heading_level(node, evidence=evidence, profile=profile, current_level=current_level, effective_pos=effective_pos)
-        return HeadingDecision(True, level, False, "role-heading")
+        reason = "physical-title-heading" if not layout_heading_signal else "layout-physical-heading"
+        return HeadingDecision(True, level, False, reason)
     if numbered and not standalone:
         # Numbered but sentence-like nodes are list or run-in candidates, not
         # standalone section titles unless upstream has already split them.
@@ -1568,25 +1572,69 @@ def strict_style_supports_heading(evidence: HeadingEvidence, profile: HeadingSty
     return evidence.is_bold and evidence.is_line_isolated and evidence.relative_font_size >= 1.0
 
 
+def strict_physical_heading_gate(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    profile: HeadingStyleProfile,
+) -> bool:
+    """Physical gate for unnumbered heading promotion.
+
+    Numbering can promote a heading on its own, but free-form headings must show
+    a real document-local style jump.  This is the "font-size step" barrier the
+    stack decoder uses to avoid bold run-in paragraph starts becoming sections.
+    """
+
+    relative = evidence.relative_font_size if evidence is not None else 0.0
+    if relative >= 1.15:
+        return True
+    font_size = node_font_size(node.record)
+    if profile.body_font_size > 0 and font_size >= profile.body_font_size * 1.15:
+        return True
+    return False
+
+
+def strict_has_strong_numbering_signal(
+    evidence: HeadingEvidence,
+    *,
+    node: ResolvedNode,
+    layout_heading_signal: bool,
+) -> bool:
+    """Return true for numbering patterns strong enough to define a heading."""
+
+    if evidence.numbering_level is None:
+        return False
+    if evidence.numbering_style in {"numeric_paren", "custom_colon"}:
+        return False
+    if evidence.numbering_style in {"dotted_numeric", "appendix_dotted", "bare_numbered", "roman", "numeric"}:
+        return True
+    if evidence.numbering_style == "alpha":
+        return layout_heading_signal or canonical_render_type(node.record) == "title" or node_is_bold(node.record)
+    return False
+
+
 def strict_numbered_heading_override(
     node: ResolvedNode,
     *,
     evidence: HeadingEvidence | None,
     profile: HeadingStyleProfile,
     seen_body_heading: bool,
+    layout_heading_signal: bool = False,
 ) -> bool:
     if evidence is None or evidence.numbering_level is None:
         return False
     text = " ".join(node.text.split())
-    if evidence.numbering_style not in {"numeric", "dotted_numeric", "bare_numbered", "roman", "appendix_dotted"}:
+    if evidence.numbering_style not in {"numeric", "dotted_numeric", "bare_numbered", "roman", "appendix_dotted", "alpha"}:
         return False
     if not looks_like_standalone_heading(text):
+        return False
+    if not strict_has_strong_numbering_signal(evidence, node=node, layout_heading_signal=layout_heading_signal):
         return False
     if canonical_render_type(node.record) == "title":
         return True
     if node_is_bold(node.record) and (evidence.relative_font_size >= 1.0 or seen_body_heading):
         return True
-    return strict_style_supports_heading(evidence, profile)
+    return strict_physical_heading_gate(node, evidence=evidence, profile=profile)
 
 
 def strict_node_participates_in_section_scope(node: ResolvedNode) -> bool:

@@ -1265,6 +1265,31 @@ def test_stack_heading_mode_does_not_promote_document_title_or_math_sentence():
     assert "ACKNOWLEDGMENT" in root_titles
 
 
+def test_stack_heading_mode_uses_numbering_as_override_but_requires_style_for_freeform():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "1 Introduction", "global_order": 0, "style_baseline_size": 16.0},
+        {"type": "paragraph", "layout_role": "heading", "text": "Background", "global_order": 1, "style_baseline_size": 10.0},
+        {"type": "paragraph", "text": "2.1 Method", "global_order": 2, "style_baseline_size": 10.0},
+        {"type": "paragraph", "text": "Method body.", "global_order": 3, "style_baseline_size": 10.0},
+    ]
+
+    root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
+        records,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        scores=torch.empty((0, 3), dtype=torch.float32),
+    )
+    tex = TreeDecoder().render_document(root)
+
+    assert r"\section{Introduction}" in tex
+    assert r"\subsection{Method}" in tex
+    assert r"\subsection{Background}" not in tex
+    assert "Background" in tex
+
+
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
     records = [
         {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},
