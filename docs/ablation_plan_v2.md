@@ -1,8 +1,10 @@
 # Ablation Plan
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-16
 
-This is the current ablation protocol for the v7 graph-relation model. The filename remains `ablation_plan_v2.md`, but the executable matrix for the adapter-aware run is `configs/ablation_matrix_v7_adapteraware_20260514_2109.json`.
+This is the current ablation protocol for the v7 graph-relation model. The
+filename remains `ablation_plan_v2.md`, but the active locked results now come
+from the registry/adapter-aware run tagged `v7_registry_adapteraware_20260515_181724`.
 
 ## Controls
 
@@ -21,14 +23,13 @@ Feature removal is runtime-only. Ablations zero node/edge feature groups during 
 
 ## Current Matrix
 
-```text
-configs/ablation_matrix_v7_adapteraware_20260514_2109.json
-```
+The executable matrix is maintained in the current project configs. Historical
+matrix names from 2026-05-14 remain in the repo for reproducibility.
 
 Current expected manifest:
 
 ```text
-data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
+data/00_manifests/v7_registry_adapteraware_20260515_181724_labeled.json
 ```
 
 Generate commands:
@@ -66,7 +67,7 @@ M07_y_network_gaussian_edge_feature runtime gaussian proximity edge feature
 Run:
 
 ```text
-data/09_eval_reports/train_v7_adapteraware_20260514_2109_m05
+data/09_eval_reports/ablations_v7_registry_adapteraware_20260515_181724
 ```
 
 Clean dataset:
@@ -82,49 +83,32 @@ orphan_ratio_median: 0.0909
 orphan_ratio_max: 0.3000
 ```
 
-Locked M05 smoke result on the adapter-aware set:
-
-```text
-best_epoch: 60
-test_f1: 0.8557
-test_positive_macro_f1: 0.7840
-test_positive_macro_f0.5: 0.7915
-test_merge_precision: 0.6250
-test_merge_recall: 0.5700
-test_merge_f0.5: 0.6130
-```
-
-## Previous Locked Results
+## Current Locked Results
 
 Run:
 
 ```text
-data/09_eval_reports/gnn_y_network_compare_20260514
-```
-
-Clean dataset:
-
-```text
-documents: 1857
-train/val/test: 1486 / 186 / 185
-labels: MERGE=1816, PARENT_CHILD=194300, NONE=6243086
+data/09_eval_reports/ablations_v7_registry_adapteraware_20260515_181724
 ```
 
 | experiment | MERGE P | MERGE R | MERGE F1 | PARENT F1 | positive macro F1 | tau_merge | tau_parent |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| M00_full_ce_ohem | 0.2949 | 0.7151 | 0.4176 | 0.9459 | 0.6817 | 0.08 | 0.47 |
-| M01_no_message_passing | 0.7305 | 0.5538 | 0.6300 | 0.8052 | 0.7176 | 0.47 | 0.37 |
-| M04_type_aware_message_mask | 0.5000 | 0.4677 | 0.4833 | 0.9415 | 0.7124 | 0.33 | 0.39 |
-| M05_y_network_dual_head | 0.6740 | 0.6559 | 0.6649 | 0.9412 | 0.8030 | 0.37 | 0.45 |
-| M06_y_network_plus_merge_gate | 0.6923 | 0.6290 | 0.6592 | 0.9412 | 0.8002 | 0.41 | 0.49 |
-| M07_y_network_plus_gaussian_edge_feature | 0.6879 | 0.5806 | 0.6297 | 0.9715 | 0.8006 | 0.43 | 0.72 |
+| M06_y_network_plus_merge_gate | 0.6688 | 0.6564 | 0.6625 | 0.9353 | 0.7989 | 0.37 | 0.35 |
+| M07_y_network_plus_gaussian_edge_feature | 0.6114 | 0.6564 | 0.6331 | 0.9620 | 0.7976 | 0.44 | 0.45 |
+| M05_y_network_dual_head | 0.5914 | 0.6748 | 0.6304 | 0.9534 | 0.7919 | 0.22 | 0.52 |
+| M01_no_message_passing | 0.6731 | 0.6442 | 0.6583 | 0.7995 | 0.7289 | 0.43 | 0.34 |
+| F03_raw_mineru_flow | 0.6835 | 0.2813 | 0.3985 | 0.9581 | 0.6783 | 0.37 | 0.39 |
+| F02_no_reading_flow | 0.1807 | 0.1840 | 0.1824 | 0.9508 | 0.5666 | 0.08 | 0.52 |
 
 Decision:
 
 ```text
-The older epigraph run remains useful as a historical architecture comparison,
-but new tables should be generated from the adapter-aware matrix above.
+M07 is the current production/E2E checkpoint.
+M06 remains the best MERGE-only result.
+M05 remains the architectural baseline.
 ```
+
+The full table is in `docs/ablation_results_current.md`.
 
 ## Metrics
 

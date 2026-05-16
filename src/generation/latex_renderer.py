@@ -135,6 +135,7 @@ INLINE_MATH_COMMANDS = {
 }
 LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+DECIMAL_HEADING_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+\S")
 NUMERIC_ID_RE = re.compile(r"\d+")
 NOTE_MARKER_RE = re.compile(
     r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
@@ -376,6 +377,8 @@ def list_environment_for_record(record: dict[str, Any], *, fallback_text: str = 
 
 def list_environment_for_text(text: str) -> str | None:
     value = str(text or "")
+    if DECIMAL_HEADING_PREFIX_RE.match(value):
+        return None
     if not LIST_MARKER_RE.match(value):
         return None
     return "enumerate" if ORDERED_LIST_MARKER_RE.match(value) else "itemize"
@@ -1162,6 +1165,8 @@ def render_equation(text: str, *, label: str | None = None) -> str:
     stripped = normalize_display_math_text(str(text or "").strip())
     if not stripped:
         return "\\[\n\n\\]"
+    if not is_safe_display_math_latex(stripped):
+        return render_display_math_fallback(stripped)
     multi_tag_render = render_multi_tag_equation(stripped)
     if multi_tag_render:
         return inject_display_math_label(multi_tag_render, label)
@@ -1170,9 +1175,15 @@ def render_equation(text: str, *, label: str | None = None) -> str:
     begin_match = re.match(r"\\begin\{([^}]+)\}", stripped)
     if begin_match and begin_match.group(1).rstrip("*") in DISPLAY_MATH_ENVS:
         return inject_display_math_label(stripped, label)
+    body_with_explicit_tag, explicit_tag = split_single_explicit_equation_tag(stripped)
+    if explicit_tag is not None:
+        label_line = f"\\label{{{label}}}\n" if label else ""
+        body = scale_oversized_display_math_body(body_with_explicit_tag)
+        return "\\begin{equation}\n" + label_line + body + rf" \tag{{{explicit_tag}}}" + "\n\\end{equation}"
     body, tag = split_trailing_equation_number(stripped)
     if tag is not None:
         label_line = f"\\label{{{label}}}\n" if label else ""
+        body = scale_oversized_display_math_body(body)
         return "\\begin{equation}\n" + label_line + body + rf" \tag{{{tag}}}" + "\n\\end{equation}"
     if TAG_RE.search(stripped):
         label_line = f"\\label{{{label}}}\n" if label else ""
@@ -1180,9 +1191,81 @@ def render_equation(text: str, *, label: str | None = None) -> str:
     if should_render_as_align(stripped):
         label_line = f"\\label{{{label}}}\n" if label else ""
         return "\\begin{align}\n" + label_line + stripped + "\n\\end{align}"
+    scaled = scale_oversized_display_math_body(stripped)
     if label:
-        return "\\begin{equation}\n" + rf"\label{{{label}}}" + "\n" + stripped + "\n\\end{equation}"
-    return "\\[\n" + stripped + "\n\\]"
+        return "\\begin{equation}\n" + rf"\label{{{label}}}" + "\n" + scaled + "\n\\end{equation}"
+    return "\\[\n" + scaled + "\n\\]"
+
+
+def render_display_math_fallback(text: str) -> str:
+    r"""Render malformed OCR formula text without breaking the whole document.
+
+    MinerU can occasionally emit display-equation LaTeX with unbalanced braces
+    or unmatched ``\left`` / ``\right`` delimiters.  Passing those fragments
+    into ``align`` causes a fatal compile error, so the generator degrades that
+    single formula into a compact escaped text box.  It is deliberately ugly
+    but safe; preserving the rest of the paper is more important than trusting
+    broken OCR math.
+    """
+
+    compact = re.sub(r"\s+", " ", str(text or "").strip())
+    escaped = escape_latex(compact)
+    return (
+        "\\begin{center}\n"
+        "\\begin{minipage}{0.95\\linewidth}\n"
+        "\\footnotesize\\ttfamily\\raggedright\n"
+        f"{escaped}\n"
+        "\\end{minipage}\n"
+        "\\end{center}"
+    )
+
+
+def is_safe_display_math_latex(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if re.search(r"\\(?:frac|dfrac|tfrac)\s+(?!\{)", value):
+        return False
+    if re.search(r"\^\s*[-+]\s*[A-Za-z0-9]", value):
+        return False
+    if not _has_balanced_unescaped_braces(value):
+        return False
+    if len(re.findall(r"\\left\b|\\left(?=[\\.()\\[\\]{}|])", value)) != len(
+        re.findall(r"\\right\b|\\right(?=[\\.()\\[\\]{}|])", value)
+    ):
+        return False
+    begins = re.findall(r"\\begin\s*\{\s*([^{}]+?)\s*\}", value)
+    ends = re.findall(r"\\end\s*\{\s*([^{}]+?)\s*\}", value)
+    if begins or ends:
+        stack: list[str] = []
+        for match in re.finditer(r"\\(begin|end)\s*\{\s*([^{}]+?)\s*\}", value):
+            kind, env = match.group(1), match.group(2).strip()
+            if kind == "begin":
+                stack.append(env)
+            elif not stack or stack.pop() != env:
+                return False
+        if stack:
+            return False
+    return True
+
+
+def _has_balanced_unescaped_braces(text: str) -> bool:
+    depth = 0
+    escaped = False
+    for char in str(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def inject_display_math_label(latex: str, label: str | None) -> str:
@@ -1202,6 +1285,13 @@ def inject_display_math_label(latex: str, label: str | None) -> str:
 
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
 TRAILING_EQUATION_NUMBER_RE = re.compile(r"^(?P<body>.+?)\s*(?:\((?P<tag>[A-Za-z]?\d+(?:\.\d+)*)\))\s*$", re.DOTALL)
+SINGLE_EXPLICIT_TAG_RE = re.compile(r"^(?P<body>.+?)\s*\\tag\s*\{\s*(?P<tag>[^{}]+?)\s*\}\s*$", re.DOTALL)
+WIDE_DISPLAY_MATH_ENV_RE = re.compile(
+    r"\\begin\s*\{\s*(?:array|aligned|alignedat|split|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\s*\}",
+    re.DOTALL,
+)
+DISPLAY_MATH_SCALE_MIN_COMPACT_CHARS = 180
+DISPLAY_MATH_SCALE_MIN_ROW_CHARS = 150
 
 
 def render_multi_tag_equation(text: str) -> str | None:
@@ -1252,6 +1342,40 @@ def split_trailing_equation_number(text: str) -> tuple[str, str | None]:
     if not body or not tag:
         return stripped, None
     return body, tag
+
+
+def split_single_explicit_equation_tag(text: str) -> tuple[str, str | None]:
+    stripped = text.strip()
+    matches = list(TAG_RE.finditer(stripped))
+    if len(matches) != 1:
+        return stripped, None
+    match = SINGLE_EXPLICIT_TAG_RE.match(stripped)
+    if not match:
+        return stripped, None
+    body = match.group("body").strip()
+    tag = match.group("tag").strip()
+    if not body or not tag:
+        return stripped, None
+    return body, tag
+
+
+def scale_oversized_display_math_body(text: str) -> str:
+    body = str(text or "").strip()
+    if not should_scale_display_math_body(body):
+        return body
+    return rf"\resizebox{{\ifdim\width>\linewidth\linewidth\else\width\fi}}{{!}}{{$\displaystyle {body}$}}"
+
+
+def should_scale_display_math_body(text: str) -> bool:
+    body = str(text or "").strip()
+    if not body or r"\resizebox" in body:
+        return False
+    compact = re.sub(r"\s+", "", body)
+    rows = [row.strip() for row in re.split(r"\\\\|\n", body) if row.strip()]
+    max_row_len = max((len(re.sub(r"\s+", "", row)) for row in rows), default=len(compact))
+    if WIDE_DISPLAY_MATH_ENV_RE.search(body):
+        return len(compact) >= DISPLAY_MATH_SCALE_MIN_COMPACT_CHARS or max_row_len >= DISPLAY_MATH_SCALE_MIN_ROW_CHARS
+    return max_row_len >= 260
 
 
 def should_render_as_align(text: str) -> bool:

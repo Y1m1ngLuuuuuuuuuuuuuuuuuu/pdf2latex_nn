@@ -15,17 +15,16 @@ from pathlib import Path
 from src.generation.citations import CitationResolution, author_year_lookup, replace_citation_markers, strip_reference_label
 from src.generation.font_resolver import resolve_pdf_font
 from src.generation.front_matter import render_author_block_original_like, render_document_title_original_like
+from src.generation.ir_renderers import build_default_registry
+from src.generation.ir_renderers.context import DocumentNodeRenderContext, RenderContext
 from src.generation.latex_renderer import (
     clean_float_caption_text,
     escape_latex,
-    render_algorithm_block,
-    render_equation,
     render_figure_block,
     render_figure_minipage_group,
     render_inline_math,
     render_table_placeholder,
     render_text_with_inline_latex,
-    safe_verbatim_text,
     strip_list_marker,
 )
 from src.generation.source_float_layout import SourceFloatLayout, SourceTableLayout
@@ -36,8 +35,13 @@ from src.perception.title_features import strip_title_numbering
 CITE_COMMAND_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|ref|autoref|cref)\*?(?:\[[^\]]*\])?\{[^{}]+\}")
 LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+DECIMAL_HEADING_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+\S")
 NUMERIC_ID_RE = re.compile(r"\d+")
 APPENDIX_TITLE_PREFIX_RE = re.compile(r"^\s*(?:appendix\s+)?[A-Z](?:\.\d+)*\.?\s+", re.IGNORECASE)
+BALANCED_MULTICOLS_BEGIN = r"\begin{multicols}{2}"
+BALANCED_MULTICOLS_END = r"\end{multicols}"
+REFERENCE_MULTICOLS_BEGIN = r"\begin{multicols*}{2}"
+REFERENCE_MULTICOLS_END = r"\end{multicols*}"
 MERGE_TRAILING_HYPHEN_RE = re.compile(r"[-‐‑‒–—]\s*$")
 REQUIRED_RENDER_PACKAGES = [
     "amsmath",
@@ -85,6 +89,9 @@ class OriginalLikeIRLatexRenderer:
         self._active_notes: _NoteContext | None = None
         self._active_source_float_layout: SourceFloatLayout | None = None
         self._active_cross_refs: _CrossReferenceRegistry | None = None
+        self._rendered_float_groups: set[tuple[str, str]] = set()
+        self._consumed_float_caption_keys: set[str] = set()
+        self._render_registry = build_default_registry()
 
     def render(
         self,
@@ -98,10 +105,14 @@ class OriginalLikeIRLatexRenderer:
         previous_notes = self._active_notes
         previous_source_float_layout = self._active_source_float_layout
         previous_cross_refs = self._active_cross_refs
+        previous_rendered_float_groups = self._rendered_float_groups
+        previous_consumed_float_caption_keys = self._consumed_float_caption_keys
         self._active_style = style
         self._active_notes = _NoteContext.from_document(document)
         self._active_source_float_layout = source_float_layout
         self._active_cross_refs = _CrossReferenceRegistry.from_document(document)
+        self._rendered_float_groups = set()
+        self._consumed_float_caption_keys = set()
         try:
             return self._render_with_active_style(document, tree, style, citations)
         finally:
@@ -109,6 +120,8 @@ class OriginalLikeIRLatexRenderer:
             self._active_notes = previous_notes
             self._active_source_float_layout = previous_source_float_layout
             self._active_cross_refs = previous_cross_refs
+            self._rendered_float_groups = previous_rendered_float_groups
+            self._consumed_float_caption_keys = previous_consumed_float_caption_keys
 
     def _render_with_active_style(
         self,
@@ -128,6 +141,12 @@ class OriginalLikeIRLatexRenderer:
         if title and use_maketitle:
             lines.extend([rf"\title{{{escape_latex(title)}}}", r"\date{}", ""])
         lines.append(r"\begin{document}")
+        if self.config.render_header_footer and _header_footer_profile_enabled(style):
+            # Original-like rendering draws title/author blocks manually instead
+            # of using ``\maketitle``.  Without an explicit plain first page,
+            # repeated running headers are printed above the title and look like
+            # duplicated document text.  Keep running headers for later pages.
+            lines.append(r"\thispagestyle{plain}")
         if title and use_maketitle:
             lines.append(r"\maketitle")
             lines.append("")
@@ -155,16 +174,14 @@ class OriginalLikeIRLatexRenderer:
         document_nodes = {node.node_id: node for node in document.nodes}
         used_figure_groups = {
             group_id
-            for source_id in used_source_ids
-            for source in [document_nodes.get(source_id)]
+            for source in _expand_used_float_group_sources(used_source_ids, document_nodes, BlockType.FIGURE)
             if source is not None and source.node_type == BlockType.FIGURE
             for group_id in [_figure_group_id(source)]
             if group_id
         }
         used_table_groups = {
             str(source.metadata.get("table_group_id"))
-            for source_id in used_source_ids
-            for source in [document_nodes.get(source_id)]
+            for source in _expand_used_float_group_sources(used_source_ids, document_nodes, BlockType.TABLE)
             if source is not None
             and source.node_type == BlockType.TABLE
             and source.metadata.get("table_group_id") is not None
@@ -221,7 +238,18 @@ class OriginalLikeIRLatexRenderer:
                 )
             }
             render_id = f"full_v7_ref_float_{_safe_render_id(source.node_id)}"
-            if is_referenced_structural and label:
+            if is_visual_float:
+                # Visual floats must stay on the physical page flow recovered
+                # from full v7.  A textual reference such as "Figure 3" can
+                # occur well before/after the actual figure in LaTeX, and
+                # anchoring the missing float to the first reference makes the
+                # reconstructed layout drift.  Add the float at root level and
+                # let the renderer's reading-index sort place it where MinerU
+                # saw it.  If it lands between two paragraph fragments that are
+                # really one sentence, _defer_sentence_interrupting_floats()
+                # moves the float after that local stitch.
+                root_addition_ids.append(render_id)
+            elif is_referenced_structural and label:
                 anchor = registry.first_referencing_node(document, label)
                 anchor_render_id = source_to_render_id.get(anchor.node_id) if anchor is not None else None
                 if anchor is not None and anchor_render_id:
@@ -295,7 +323,8 @@ class OriginalLikeIRLatexRenderer:
             packages.append("fontspec")
         if self.config.render_header_footer and _header_footer_profile_enabled(style):
             packages.append("fancyhdr")
-        for package in _dedupe_preserve_order(packages):
+        deduped_packages = _dedupe_preserve_order(packages)
+        for package in deduped_packages:
             lines.append(_render_package(package))
         if citations is not None and citations.citation_style == "author_year":
             lines.append(r"\setcitestyle{round}")
@@ -361,75 +390,35 @@ class OriginalLikeIRLatexRenderer:
         *,
         depth: int,
     ) -> str:
-        role = node.role
         source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
         text = node.latex or node.text or self._source_text(source_nodes, citations)
         text = _clean_render_text(text)
+        if self._should_skip_consumed_float_caption(node, source_nodes, text):
+            return ""
 
-        if role in {RenderRole.ROOT}:
-            return self._render_children(node, render_nodes, document_nodes, citations, depth=depth)
-        if role in {RenderRole.DOCUMENT_TITLE}:
-            if self._use_original_like_front_matter():
-                return render_document_title_original_like(text, source_nodes, self._active_style)
-            if self.config.include_maketitle:
-                return ""
-            return render_text_with_citations(text)
-        if role in {RenderRole.AUTHOR_BLOCK}:
-            if self._use_original_like_front_matter():
-                return render_author_block_original_like(text, source_nodes, self._active_style)
-            return render_text_with_citations(text)
-        if role in {RenderRole.ABSTRACT}:
-            return self._render_abstract(node, render_nodes, document_nodes, citations, text, depth=depth)
-        if role in {RenderRole.SECTION, RenderRole.SUBSECTION, RenderRole.SUBSUBSECTION}:
-            command = {
-                RenderRole.SECTION: "section",
-                RenderRole.SUBSECTION: "subsection",
-                RenderRole.SUBSUBSECTION: "subsubsection",
-            }[role]
-            heading_text = _clean_appendix_heading_text(text) if node.attributes.get("appendix_heading") else _clean_heading_text(text)
-            heading = rf"\{command}{{{render_text_with_citations(heading_text)}}}" if heading_text else ""
-            children = self._render_children(node, render_nodes, document_nodes, citations, depth=depth + 1)
-            return "\n\n".join(part for part in [heading, children] if part)
-        if role in {RenderRole.DISPLAY_EQUATION}:
-            body = render_equation(text, label=self._cross_ref_label_for_render_node(node, document_nodes, "equation"))
-            children = self._render_children(node, render_nodes, document_nodes, citations, depth=depth + 1)
-            return "\n\n".join(part for part in [body, children] if part)
-        if role in {RenderRole.INLINE_MATH}:
-            return render_inline_math(text)
-        if role in {RenderRole.TABLE}:
-            return self._render_table(source_nodes, text)
-        if role in {RenderRole.FIGURE}:
-            return self._render_figure(source_nodes, text, citations, document_nodes=document_nodes)
-        if role in {RenderRole.ALGORITHM}:
-            return render_algorithm_block(text, label=self._cross_ref_label_for_render_node(node, document_nodes, "algorithm"))
-        if role in {RenderRole.CODE}:
-            return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}" if text else ""
-        if role in {RenderRole.FOOTNOTE}:
-            if self._active_notes is not None and source_nodes:
-                return ""
-            return self._render_standalone_note("footnote", text)
-        if role in {RenderRole.MARGIN_NOTE}:
-            if self._active_notes is not None and source_nodes:
-                return ""
-            return self._render_standalone_note("margin_note", text)
-        if role in {RenderRole.CAPTION}:
-            return render_text_with_citations(text)
-        if role in {RenderRole.TOC_PLACEHOLDER}:
-            return r"\tableofcontents"
-        if role in {RenderRole.REFERENCES}:
-            return self._render_bibliography_with_tail(citations, source_nodes, node, render_nodes, document_nodes, depth=depth)
-        if role in {RenderRole.LIST}:
-            return self._render_list(node, render_nodes, document_nodes, citations, ordered=False, depth=depth)
-        if role in {RenderRole.LIST_ITEM}:
-            body = self._render_source_nodes(source_nodes, citations, strip_leading_list_marker=True) or render_text_with_citations(strip_list_marker(text))
-            children = self._render_children(node, render_nodes, document_nodes, citations, depth=depth + 1)
-            return "\n".join(part for part in [body, children] if part)
-        if role in {RenderRole.RAW_LATEX}:
-            return text
+        context = RenderContext(
+            owner=self,
+            node=node,
+            render_nodes=render_nodes,
+            document_nodes=document_nodes,
+            citations=citations,
+            depth=depth,
+            source_nodes=source_nodes,
+            text=text,
+        )
+        return self._render_registry.render_tree_node(context)
 
-        body = self._render_source_nodes(source_nodes, citations) if source_nodes else self._render_body_text(text)
-        children = self._render_children(node, render_nodes, document_nodes, citations, depth=depth + 1)
-        return "\n\n".join(part for part in [body, children] if part)
+    def _render_text_with_citations(self, text: str, *, strip: bool = True) -> str:
+        return render_text_with_citations(text, strip=strip)
+
+    def _clean_heading_text(self, text: str) -> str:
+        return _clean_heading_text(text)
+
+    def _clean_appendix_heading_text(self, text: str) -> str:
+        return _clean_appendix_heading_text(text)
+
+    def _split_run_in_heading_source(self, source_nodes: list[DocumentNode]) -> tuple[str, str] | None:
+        return _split_run_in_heading_source(source_nodes)
 
     def _render_abstract(
         self,
@@ -444,6 +433,8 @@ class OriginalLikeIRLatexRenderer:
         child_ids = _sorted_child_ids(node.children, render_nodes, document_nodes)
         abstract_label = "" if _is_abstract_label(text) else render_text_with_citations(text)
         column_mode = _abstract_column_mode(node, child_ids, render_nodes, document_nodes)
+        if _style_column_mode(self._active_style) == "single":
+            column_mode = "full"
         if column_mode == "double":
             if self._mixed_column_stack > 0:
                 children = self._render_children_standard(
@@ -467,7 +458,7 @@ class OriginalLikeIRLatexRenderer:
                     self._mixed_column_stack -= 1
             body = "\n\n".join(part for part in [abstract_label, children] if part)
             if body and self._mixed_column_stack <= 0:
-                body = "\\begin{multicols}{2}\n" + body + "\n\\end{multicols}"
+                body = _wrap_balanced_two_columns(body)
         else:
             children = self._render_children_standard(
                 child_ids,
@@ -619,7 +610,7 @@ class OriginalLikeIRLatexRenderer:
             self._mixed_column_stack += 1
         if not rendered:
             return ""
-        return "\\end{multicols}\n\n" + rendered + "\n\n\\begin{multicols}{2}"
+        return f"{BALANCED_MULTICOLS_END}\n\n{rendered}\n\n{BALANCED_MULTICOLS_BEGIN}"
 
     def _render_children_with_mixed_columns(
         self,
@@ -649,7 +640,18 @@ class OriginalLikeIRLatexRenderer:
                     index += 1
                 if seen_references and not appendix_started and _run_starts_with_appendix(full_run, render_nodes, document_nodes):
                     parts.append("\\newpage\n\\appendix")
+                    appendix_tail_ids = full_run + child_ids[index:]
+                    appendix_tail = self._render_appendix_tail(
+                        appendix_tail_ids,
+                        render_nodes,
+                        document_nodes,
+                        citations,
+                        depth=depth,
+                    )
+                    if appendix_tail:
+                        parts.append(appendix_tail)
                     appendix_started = True
+                    break
                 rendered = self._render_children_standard(
                     full_run,
                     render_nodes,
@@ -675,7 +677,18 @@ class OriginalLikeIRLatexRenderer:
 
             if seen_references and not appendix_started and _run_starts_with_appendix(run, render_nodes, document_nodes):
                 parts.append("\\newpage\n\\appendix")
+                appendix_tail_ids = run + child_ids[index:]
+                appendix_tail = self._render_appendix_tail(
+                    appendix_tail_ids,
+                    render_nodes,
+                    document_nodes,
+                    citations,
+                    depth=depth,
+                )
+                if appendix_tail:
+                    parts.append(appendix_tail)
                 appendix_started = True
+                break
             self._mixed_column_stack += 1
             try:
                 body = self._render_children_standard(
@@ -688,7 +701,7 @@ class OriginalLikeIRLatexRenderer:
             finally:
                 self._mixed_column_stack -= 1
             if body:
-                parts.append("\\begin{multicols}{2}\n" + body + "\n\\end{multicols}")
+                parts.append(_wrap_balanced_two_columns(body))
             if any(self._is_reference_render_node(render_nodes[child_id], document_nodes) for child_id in run if child_id in render_nodes):
                 seen_references = True
         return "\n\n".join(part for part in parts if part)
@@ -829,6 +842,8 @@ class OriginalLikeIRLatexRenderer:
             text = " ".join(source.text for source in source_nodes)
             return _list_environment_for_text(text) or "itemize"
         text = node.text or node.latex or " ".join(source.text for source in source_nodes)
+        if _render_node_is_heading_candidate(node, source_nodes, text):
+            return None
         return _list_environment_for_text(text)
 
     def _render_source_nodes(
@@ -845,6 +860,7 @@ class OriginalLikeIRLatexRenderer:
                 strip_leading_list_marker=strip_leading_list_marker and index == 0,
             )
             for index, node in enumerate(nodes)
+            if not _document_node_no_render(node)
         ]
         return _merge_rendered_text_fragments(rendered)
 
@@ -875,27 +891,14 @@ class OriginalLikeIRLatexRenderer:
     ) -> str:
         text = citations.text_by_node_id.get(node.node_id, node.text) if citations else node.text
         text = _clean_render_text(text)
-        if strip_leading_list_marker:
-            text = strip_list_marker(text)
-        if node.node_type in {BlockType.FOOTNOTE, BlockType.MARGIN_NOTE}:
-            return ""
-        if node.node_type == BlockType.EQUATION:
-            return render_equation(text, label=self._cross_ref_label_for_document_node(node, "equation"))
-        if node.node_type == BlockType.INLINE_MATH:
-            return render_inline_math(text)
-        if node.node_type == BlockType.TABLE:
-            return self._render_table([node], text)
-        if node.node_type == BlockType.FIGURE:
-            return self._render_figure([node], text, citations)
-        if node.node_type == BlockType.ALGORITHM:
-            return render_algorithm_block(text, label=self._cross_ref_label_for_document_node(node, "algorithm"))
-        if node.node_type == BlockType.CODE:
-            return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}" if text else ""
-        if node.spans:
-            return self._render_spans(node, citations, strip_leading_list_marker=strip_leading_list_marker)
-        if citations and node.node_id in citations.text_by_node_id:
-            return self._render_body_text(text, node=node)
-        return self._render_body_text(text, node=node)
+        context = DocumentNodeRenderContext(
+            owner=self,
+            node=node,
+            citations=citations,
+            text=text,
+            strip_leading_list_marker=strip_leading_list_marker,
+        )
+        return self._render_registry.render_document_node(context)
 
     def _consume_notes_for_source_node(self, node_id: str) -> list["_ResolvedNote"]:
         if self._active_notes is None:
@@ -1035,11 +1038,18 @@ class OriginalLikeIRLatexRenderer:
     def _render_table(self, source_nodes: list[DocumentNode], text: str) -> str:
         if source_nodes:
             primary = _primary_table_node(source_nodes)
+            if primary.metadata.get("table_group_primary") is False:
+                return ""
+            render_key = _table_render_key(primary)
+            if render_key in self._rendered_float_groups:
+                return ""
+            self._rendered_float_groups.add(render_key)
             record = document_node_record(primary)
             source_layout = self._match_source_table_layout(primary, text)
             if source_layout is not None:
                 record["source_table_layout"] = source_layout.to_record()
             label = self._cross_ref_label_for_document_node(primary, "table")
+            self._remember_float_caption(text or primary.text, "table")
             return render_table_placeholder(
                 record,
                 text or primary.text,
@@ -1109,10 +1119,21 @@ class OriginalLikeIRLatexRenderer:
                     break
         if primary is not None:
             members = _figure_group_members(primary, source_nodes, document_nodes)
+            if not metadata_caption:
+                member_caption = _figure_caption_from_metadata(primary, members)
+                if member_caption:
+                    caption = member_caption
             if _is_nonprimary_figure_group_member(primary):
                 if not members or primary.node_id != members[0].node_id:
                     return ""
+            render_keys = {_figure_render_key(member) for member in members}
+            render_keys.add(_figure_render_key(primary))
+            if any(render_key in self._rendered_float_groups for render_key in render_keys):
+                return ""
+            self._rendered_float_groups.update(render_keys)
             caption = clean_float_caption_text(caption, "figure") or "Figure"
+            self._remember_float_caption(caption, "figure")
+            label_source = _figure_label_source_node(members, primary)
             if len(members) > 1 and _should_render_figure_minipages(members):
                 return render_figure_minipage_group(
                     [document_node_record(member) for member in members],
@@ -1122,11 +1143,12 @@ class OriginalLikeIRLatexRenderer:
                     asset_latex_prefix=self.config.figure_asset_latex_prefix,
                     rendered_caption=render_text_with_citations(caption),
                     as_nonfloat=self._mixed_column_stack > 0,
-                    label=self._cross_ref_label_for_document_node(primary, "figure"),
+                    label=self._cross_ref_label_for_document_node(label_source, "figure"),
                 )
         else:
             caption = clean_float_caption_text(caption, "figure") or "Figure"
         record = document_node_record(primary) if primary is not None else {"type": "figure", "text": caption}
+        self._remember_float_caption(caption, "figure")
         return render_figure_block(
             record,
             caption,
@@ -1137,6 +1159,27 @@ class OriginalLikeIRLatexRenderer:
             as_nonfloat=self._mixed_column_stack > 0,
             label=self._cross_ref_label_for_document_node(primary, "figure") if primary is not None else None,
         )
+
+    def _remember_float_caption(self, text: str, kind: str) -> None:
+        for key in _float_caption_dedup_keys(text, kind):
+            self._consumed_float_caption_keys.add(key)
+
+    def _should_skip_consumed_float_caption(
+        self,
+        node: RenderTreeNode,
+        source_nodes: list[DocumentNode],
+        text: str,
+    ) -> bool:
+        if not text or not self._consumed_float_caption_keys:
+            return False
+        if node.role in {RenderRole.FIGURE, RenderRole.TABLE}:
+            return False
+        if not _render_node_is_caption_like(node, source_nodes, text):
+            return False
+        for kind in ("figure", "table"):
+            if any(key in self._consumed_float_caption_keys for key in _float_caption_dedup_keys(text, kind)):
+                return True
+        return False
 
     def _render_bibliography(
         self,
@@ -1183,7 +1226,7 @@ class OriginalLikeIRLatexRenderer:
             return bibliography
         is_appendix_tail = _run_starts_with_appendix(tail_ids, render_nodes, document_nodes)
         if is_appendix_tail:
-            tail = self._render_children_with_mixed_columns(
+            tail = self._render_appendix_tail(
                 tail_ids,
                 render_nodes,
                 document_nodes,
@@ -1196,7 +1239,7 @@ class OriginalLikeIRLatexRenderer:
             if self._mixed_column_stack == 0 and use_double_columns:
                 self._mixed_column_stack += 1
                 try:
-                    tail = "\\begin{multicols}{2}\n" + tail + "\n\\end{multicols}"
+                    tail = _wrap_balanced_two_columns(tail)
                 finally:
                     self._mixed_column_stack -= 1
         if not tail:
@@ -1204,17 +1247,53 @@ class OriginalLikeIRLatexRenderer:
         marker = "\\newpage\n\\appendix" if is_appendix_tail else "\\newpage"
         return "\n\n".join(part for part in [bibliography, marker, tail] if part)
 
+    def _render_appendix_tail(
+        self,
+        child_ids: list[str],
+        render_nodes: dict[str, RenderTreeNode],
+        document_nodes: dict[str, DocumentNode],
+        citations: CitationResolution | None,
+        *,
+        depth: int,
+    ) -> str:
+        """Render appendix material using the appendix subtree's own layout.
+
+        References and the main body often use a different column regime from
+        appendices.  In particular, some papers switch from a two-column
+        bibliography back to single-column appendices.  Treating appendix tail
+        nodes as just another mixed-column run makes them inherit the preceding
+        physical band and keeps producing a double-column appendix.  Decide from
+        the appendix source bboxes first, and only enable mixed-column rendering
+        when the appendix itself looks columnar.
+        """
+
+        if _appendix_run_should_use_double_columns(child_ids, render_nodes, document_nodes, self._active_style):
+            return self._render_children_with_mixed_columns(
+                child_ids,
+                render_nodes,
+                document_nodes,
+                citations,
+                depth=depth,
+            )
+        return self._render_children_standard(
+            child_ids,
+            render_nodes,
+            document_nodes,
+            citations,
+            depth=depth,
+        )
+
     def _wrap_bibliography_columns(self, latex: str, source_nodes: list[DocumentNode]) -> str:
         body = str(latex or "").strip()
         if not body:
             return ""
-        if self._mixed_column_stack > 0 or r"\begin{multicols}" in body:
+        if self._mixed_column_stack > 0 or _contains_multicols_environment(body):
             return body
         style = self._active_style
         if style is not None and "twocolumn" in set(style.documentclass_options or []):
             return body
         if _bibliography_should_use_double_columns(source_nodes, style):
-            return "\\begin{multicols}{2}\n" + body + "\n\\end{multicols}"
+            return _wrap_unbalanced_two_columns(body)
         return body
 
     def _source_text(self, nodes: list[DocumentNode], citations: CitationResolution | None) -> str:
@@ -1274,6 +1353,40 @@ class OriginalLikeIRLatexRenderer:
         return bool(self.config.include_maketitle and not self._use_original_like_front_matter())
 
 
+def _expand_used_float_group_sources(
+    used_source_ids: set[str],
+    document_nodes: dict[str, DocumentNode],
+    node_type: BlockType,
+) -> list[DocumentNode]:
+    """Include group siblings of already-rendered figure/table sources.
+
+    A render-tree node can reference one primary float while the renderer expands
+    it into all members of a figure/table group.  Fallback injection must treat
+    those siblings as already consumed, or grouped subfigures appear twice.
+    """
+
+    used_nodes = [document_nodes[source_id] for source_id in used_source_ids if source_id in document_nodes]
+    expanded = {node.node_id: node for node in used_nodes}
+    figure_group_ids = {
+        _figure_group_id(node)
+        for node in used_nodes
+        if node.node_type == BlockType.FIGURE and _figure_group_id(node)
+    }
+    table_group_ids = {
+        str(node.metadata.get("table_group_id"))
+        for node in used_nodes
+        if node.node_type == BlockType.TABLE and node.metadata.get("table_group_id") is not None
+    }
+    for node in document_nodes.values():
+        if node.node_type != node_type:
+            continue
+        if node_type == BlockType.FIGURE and _figure_group_id(node) in figure_group_ids:
+            expanded[node.node_id] = node
+        if node_type == BlockType.TABLE and str(node.metadata.get("table_group_id")) in table_group_ids:
+            expanded[node.node_id] = node
+    return list(expanded.values())
+
+
 def render_text_with_citations(text: str, *, strip: bool = True) -> str:
     """Render text that may already contain semantic ``\\cite{...}`` commands."""
 
@@ -1319,6 +1432,146 @@ def _clean_appendix_heading_text(text: str) -> str:
         return ""
     stripped = APPENDIX_TITLE_PREFIX_RE.sub("", value, count=1).strip()
     return stripped or _clean_heading_text(value)
+
+
+def _wrap_unbalanced_two_columns(body: str) -> str:
+    value = str(body or "").strip()
+    if not value:
+        return ""
+    return f"{REFERENCE_MULTICOLS_BEGIN}\n{value}\n{REFERENCE_MULTICOLS_END}"
+
+
+def _wrap_balanced_two_columns(body: str) -> str:
+    """Wrap body-like mixed-column runs without forcing left-then-right fill.
+
+    ``multicols*`` is useful for bibliography material because references are
+    normally read as a left-column list followed by a right-column list when the
+    final page is not full.  Body text is different: if a figure/table appears in
+    the flow, unbalanced filling can strand almost an entire page around the
+    float.  Use balanced ``multicols`` for body, abstract, and appendix runs.
+    """
+
+    value = str(body or "").strip()
+    if not value:
+        return ""
+    return f"{BALANCED_MULTICOLS_BEGIN}\n{value}\n{BALANCED_MULTICOLS_END}"
+
+
+def _contains_multicols_environment(body: str) -> bool:
+    value = str(body or "")
+    return r"\begin{multicols}" in value or r"\begin{multicols*}" in value
+
+
+def _split_run_in_heading_source(source_nodes: list[DocumentNode]) -> tuple[str, str] | None:
+    if len(source_nodes) != 1:
+        return None
+    node = source_nodes[0]
+    if not (node.features.get("run_in_heading_level") or node.metadata.get("run_in_heading_level")):
+        return None
+    explicit_heading = node.features.get("run_in_heading_text") or node.metadata.get("run_in_heading_text")
+    explicit_body = node.features.get("run_in_heading_body") or node.metadata.get("run_in_heading_body")
+    if explicit_heading and explicit_body:
+        heading = str(explicit_heading).strip()
+        body = str(explicit_body).strip()
+        if heading and len(re.sub(r"\W+", "", body)) >= 8:
+            return heading, body
+    spans = [span for span in node.spans if str(span.text or "").strip()]
+    if len(spans) < 2:
+        return None
+    first_bold_index = next((index for index, span in enumerate(spans[:4]) if span.is_bold), None)
+    if first_bold_index is None:
+        return None
+    end = first_bold_index + 1
+    while end < len(spans) and spans[end].is_bold:
+        end += 1
+    if end >= len(spans):
+        return None
+    heading = _join_run_in_span_text(spans[:end])
+    body = _join_run_in_span_text(spans[end:])
+    if len(re.sub(r"\W+", "", body)) < 8:
+        return None
+    return heading, body
+
+
+def _join_run_in_span_text(spans: list[StyleSpan]) -> str:
+    text = ""
+    for span in spans:
+        part = str(span.text or "")
+        if not part:
+            continue
+        if text and _run_in_needs_space(text, part):
+            text += " "
+        text += part
+    return " ".join(text.split())
+
+
+def _run_in_needs_space(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left[-1].isspace() or right[0].isspace():
+        return False
+    if right[0] in ",.;:!?)]}%":
+        return False
+    if left[-1] in "([{":
+        return False
+    return True
+
+
+def _render_node_is_caption_like(node: RenderTreeNode, source_nodes: list[DocumentNode], text: str) -> bool:
+    if node.role == RenderRole.CAPTION:
+        return True
+    if any(_document_node_is_caption_like(source) for source in source_nodes):
+        return True
+    return bool(re.match(r"^\s*(?:Fig(?:ure)?|Table)\s*[\dA-ZIVXLCDM]", str(text or ""), re.IGNORECASE))
+
+
+def _document_node_is_caption_like(node: DocumentNode) -> bool:
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    if "caption" in role:
+        return True
+    for key in ("type", "raw_type", "canonical_type", "category", "block_type", "subtype"):
+        value = str(node.metadata.get(key) or "").casefold()
+        if "caption" in value:
+            return True
+    if any(
+        isinstance(node.metadata.get(key), str) and str(node.metadata.get(key)).strip()
+        for key in (
+            "figure_caption",
+            "image_caption",
+            "chart_caption",
+            "figure_group_caption",
+            "image_group_caption",
+            "table_caption",
+            "table_group_caption",
+        )
+    ):
+        return True
+    return False
+
+
+def _float_caption_dedup_keys(text: str, kind: str) -> set[str]:
+    keys: set[str] = set()
+    value = str(text or "").strip()
+    if not value:
+        return keys
+    candidates = {value, clean_float_caption_text(value, kind)}
+    for candidate in candidates:
+        key = _float_caption_dedup_key(candidate)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _float_caption_dedup_key(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(r"\\(?:cite|citep|citet|ref|autoref|cref)\*?(?:\[[^\]]*\])?\{[^{}]*\}", " ", value)
+    value = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", " ", value)
+    value = re.sub(r"[{}]", " ", value)
+    value = re.sub(r"[^0-9A-Za-z]+", " ", value).casefold()
+    words = value.split()
+    if len("".join(words)) < 18:
+        return ""
+    return " ".join(words[:80])
 
 
 def _merge_rendered_text_fragments(parts: list[str]) -> str:
@@ -1525,10 +1778,21 @@ class _CrossReferenceRegistry:
             kind = _cross_ref_kind_from_name(match.group("name"))
             number = _normalize_cross_ref_number(match.group("number"))
             label = self.labels_by_kind_number.get((kind, number.casefold()))
+            consumed_suffix = ""
+            if not label and len(number) > 1 and number[-1].isalpha():
+                fallback_number = number[:-1]
+                fallback_label = self.labels_by_kind_number.get((kind, fallback_number.casefold()))
+                if fallback_label:
+                    label = fallback_label
+                    consumed_suffix = number[-1]
             if not label:
                 return match.group(0)
             display = match.group("name").rstrip()
-            return rf"{display} \ref{{{label}}}"
+            if consumed_suffix:
+                suffix = " " + consumed_suffix
+            else:
+                suffix = " " if match.end() < len(value) and value[match.end()].isalpha() else ""
+            return rf"{display} \ref{{{label}}}{suffix}"
 
         return _CROSS_REF_TEXT_RE.sub(replacer, value)
 
@@ -1847,9 +2111,68 @@ def _remove_anchor_marker_from_rendered_text(rendered: str, marker: str | None) 
 
 def _list_environment_for_text(text: str) -> str | None:
     value = str(text or "")
+    if DECIMAL_HEADING_PREFIX_RE.match(value):
+        return None
     if not LIST_MARKER_RE.match(value):
         return None
     return "enumerate" if ORDERED_LIST_MARKER_RE.match(value) else "itemize"
+
+
+def _render_node_is_heading_candidate(
+    node: RenderTreeNode,
+    source_nodes: list[DocumentNode],
+    text: str,
+) -> bool:
+    if node.role in {RenderRole.SECTION, RenderRole.SUBSECTION, RenderRole.SUBSUBSECTION, RenderRole.DOCUMENT_TITLE}:
+        return True
+    if DECIMAL_HEADING_PREFIX_RE.match(str(text or "")):
+        return True
+    for source in source_nodes:
+        if source.node_type == BlockType.TITLE:
+            return True
+        role = str(source.metadata.get("layout_role") or "").casefold()
+        layer = str(source.metadata.get("layout_layer") or "").casefold()
+        raw_type = " ".join(
+            str(source.metadata.get(key) or "").casefold()
+            for key in ("type", "raw_type", "canonical_type", "category", "block_type", "subtype")
+        )
+        if any(token in role for token in ("title", "heading", "section")):
+            return True
+        if layer == "metadata_layer" and any(token in role for token in ("title", "abstract_title")):
+            return True
+        if any(token in raw_type for token in ("title", "heading", "section")):
+            return True
+        if source.features.get("heading_level") or source.features.get("run_in_heading_level"):
+            return True
+        if source.metadata.get("heading_level") or source.metadata.get("run_in_heading_level"):
+            return True
+        if _looks_like_bold_numbered_run_in_heading(source):
+            return True
+    return False
+
+
+def _looks_like_bold_numbered_run_in_heading(node: DocumentNode) -> bool:
+    text = str(node.text or "")
+    # Bold alone is not enough: many genuine list items start with a bold
+    # ``1. Term`` label.  Use the bold probe only for explicit multi-part
+    # section numbers such as ``0.1`` / ``3.2``; single ``1.`` headings are
+    # handled through MinerU/IR title metadata or heading_level.
+    if not DECIMAL_HEADING_PREFIX_RE.match(text):
+        return False
+    if node.node_type == BlockType.LIST:
+        return False
+    nonempty = [span for span in node.spans if str(span.text or "").strip()]
+    if not nonempty:
+        return False
+    first = nonempty[0]
+    # Treat bold numbered runs as heading candidates only when the leading bold
+    # phrase looks like a title segment rather than a short list marker.
+    bold_chars = sum(len(str(span.text or "").strip()) for span in nonempty if span.is_bold)
+    total_chars = sum(len(str(span.text or "").strip()) for span in nonempty)
+    first_text = str(first.text or "").strip()
+    if first.is_bold and (len(first_text) >= 8 or (total_chars and bold_chars / total_chars >= 0.45)):
+        return True
+    return False
 
 
 def _is_list_continuation_node(
@@ -1935,6 +2258,11 @@ def _appendix_run_should_use_double_columns(
     """
 
     source_nodes = _collect_render_subtree_source_nodes(child_ids, render_nodes, document_nodes)
+    center_mode = _bbox_center_column_mode(source_nodes)
+    if center_mode == "double":
+        return True
+    if center_mode == "single":
+        return False
     bbox_mode = _bbox_width_column_mode(source_nodes)
     if bbox_mode == "double":
         return True
@@ -1996,6 +2324,56 @@ def _bbox_width_column_mode(nodes: list[DocumentNode]) -> str | None:
         return "double"
     if wide_share >= 0.50 or median >= 0.65:
         return "full"
+    return None
+
+
+def _bbox_center_column_mode(nodes: list[DocumentNode]) -> str | None:
+    """Infer columns from left/right center clusters instead of line widths.
+
+    Short formulas and short proof lead-ins are narrow even in a single-column
+    appendix.  Width-only logic therefore tends to mistake a one-column appendix
+    for a two-column flow.  A true two-column appendix should expose both left
+    and right text clusters; centered equations or isolated right-side equation
+    numbers are not enough.
+    """
+
+    text_like = {BlockType.TEXT, BlockType.LIST, BlockType.ALGORITHM, BlockType.CODE}
+    excluded = {BlockType.FIGURE, BlockType.TABLE, BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE, BlockType.TOC}
+    candidates = [node for node in nodes if node.node_type in text_like and node.bboxes]
+    if not candidates:
+        candidates = [node for node in nodes if node.node_type not in excluded and node.node_type != BlockType.EQUATION and node.bboxes]
+    if not candidates:
+        return None
+
+    centers: list[float] = []
+    widths: list[float] = []
+    for node in candidates:
+        page_width = _page_width_for_nodes([node])
+        if page_width <= 0:
+            continue
+        for box in node.bboxes:
+            width_ratio = max(box.x1 - box.x0, 0.0) / page_width
+            if not 0.08 <= width_ratio <= 0.72:
+                continue
+            center_ratio = ((box.x0 + box.x1) / 2.0) / page_width
+            if 0.02 <= center_ratio <= 0.98:
+                centers.append(center_ratio)
+                widths.append(width_ratio)
+    if not centers:
+        return None
+
+    left = [value for value in centers if value < 0.46]
+    right = [value for value in centers if value > 0.54]
+    middle = [value for value in centers if 0.46 <= value <= 0.54]
+    total = len(centers)
+    if left and right and min(len(left), len(right)) / total >= 0.20:
+        return "double"
+    if right and not left and len(right) / total >= 0.60:
+        return None
+    if not right and (left or middle):
+        return "single"
+    if len(right) <= 1 and len(left) + len(middle) >= 2:
+        return "single"
     return None
 
 
@@ -2197,6 +2575,14 @@ def _document_node_is_author_block(node: DocumentNode) -> bool:
     return layer == "metadata_layer" and role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
 
 
+def _document_node_no_render(node: DocumentNode) -> bool:
+    if bool(node.flags.get("no_render") or node.flags.get("render_skip") or node.flags.get("duplicate_shadow")):
+        return True
+    if bool(node.metadata.get("no_render") or node.metadata.get("render_skip") or node.metadata.get("duplicate_shadow")):
+        return True
+    return False
+
+
 def _numeric_value(value: object) -> float | None:
     if isinstance(value, bool):
         return None
@@ -2214,6 +2600,20 @@ def _primary_table_node(nodes: list[DocumentNode]) -> DocumentNode:
         if node.metadata.get("table_group_primary") is True:
             return node
     return min(nodes, key=lambda node: node.reading_index)
+
+
+def _figure_render_key(node: DocumentNode) -> tuple[str, str]:
+    group_id = _figure_group_id(node)
+    if group_id:
+        return ("figure_group", group_id)
+    return ("figure_node", node.node_id)
+
+
+def _table_render_key(node: DocumentNode) -> tuple[str, str]:
+    group_id = node.metadata.get("table_group_id")
+    if group_id is not None:
+        return ("table_group", str(group_id))
+    return ("table_node", node.node_id)
 
 
 @dataclass(frozen=True)
@@ -2324,9 +2724,54 @@ def _infer_layout_band_mode(nodes: list[DocumentNode]) -> str | None:
     return None
 
 
+def _reference_column_mode_from_nodes(nodes: list[DocumentNode]) -> str | None:
+    """Infer reference section columns from per-item boxes, not the union box."""
+
+    boxes = [box for node in nodes for box in node.bboxes if max(box.x1 - box.x0, 0.0) >= 4.0]
+    if len(boxes) < 2:
+        return None
+    page_width = _page_width_for_nodes(nodes)
+    narrow = [box for box in boxes if max(box.x1 - box.x0, 0.0) < 0.72 * page_width]
+    full_span_count = len(boxes) - len(narrow)
+    if len(narrow) < 2:
+        return "full" if full_span_count else None
+    centers = sorted((((box.x0 + box.x1) / 2.0, box) for box in narrow), key=lambda item: item[0])
+    gaps = [(centers[index + 1][0] - centers[index][0], index) for index in range(len(centers) - 1)]
+    if not gaps:
+        return None
+    largest_gap, split_index = max(gaps)
+    if largest_gap < 0.12 * page_width:
+        return "full" if full_span_count > len(narrow) else "single"
+    left = [box for _center, box in centers[: split_index + 1]]
+    right = [box for _center, box in centers[split_index + 1 :]]
+    if not left or not right:
+        return None
+    gutter = max(min(box.x0 for box in right) - max(box.x1 for box in left), 0.0)
+    if gutter >= 0.02 * page_width:
+        return "double"
+    return "single"
+
+
 def _bibliography_should_use_double_columns(nodes: list[DocumentNode], style: StyleProfile | None) -> bool:
     """Use detected bibliography columns; otherwise follow the body column mode."""
 
+    node_mode = _reference_column_mode_from_nodes(nodes)
+    if node_mode == "double":
+        return True
+    if _compact_reference_chunks_should_follow_body_columns(nodes, style):
+        return True
+    if node_mode in {"single", "full"}:
+        return False
+    style_bibliography = {}
+    if style is not None and isinstance(style.renderer_options, dict):
+        maybe = style.renderer_options.get("bibliography")
+        if isinstance(maybe, dict):
+            style_bibliography = maybe
+    style_mode = str(style_bibliography.get("column_mode") or "").casefold()
+    if style_mode == "two_column":
+        return True
+    if style_mode == "single":
+        return False
     band_types = {_layout_band_type(node) for node in nodes}
     if "double_column" in band_types:
         return True
@@ -2338,6 +2783,26 @@ def _bibliography_should_use_double_columns(nodes: list[DocumentNode], style: St
     if inferred == "full":
         return False
     return _style_column_mode(style) in {"two_column", "mixed"}
+
+
+def _compact_reference_chunks_should_follow_body_columns(nodes: list[DocumentNode], style: StyleProfile | None) -> bool:
+    if _style_column_mode(style) not in {"two_column", "mixed"}:
+        return False
+    if not nodes:
+        return False
+    reference_items = 0
+    widths: list[float] = []
+    page_width = max(_page_width_for_nodes(nodes), 1.0)
+    for node in nodes:
+        items = node.metadata.get("reference_items")
+        reference_items += len(items) if isinstance(items, list) else (1 if node.text.strip() else 0)
+        widths.extend(max(box.x1 - box.x0, 0.0) for box in node.bboxes)
+    if reference_items < max(len(nodes) * 3, 8):
+        return False
+    if not widths:
+        return False
+    median_width = sorted(widths)[len(widths) // 2]
+    return median_width <= 0.58 * page_width
 
 
 def _page_width_for_nodes(nodes: list[DocumentNode]) -> float:
@@ -2488,9 +2953,82 @@ def _figure_group_members(
         if group_id and _figure_group_id(node) != group_id:
             continue
         candidates[node.node_id] = node
+    if document_nodes:
+        pool = [node for node in document_nodes.values() if node.node_type == BlockType.FIGURE]
+        changed = True
+        while changed:
+            changed = False
+            members = list(candidates.values()) or [primary]
+            for node in pool:
+                if node.node_id in candidates or node.node_id == primary.node_id:
+                    continue
+                if any(_is_implied_same_figure_group(member, node, pool) for member in members):
+                    candidates[node.node_id] = node
+                    changed = True
     if not candidates:
         return [primary]
     return sorted(candidates.values(), key=_figure_group_sort_key)
+
+
+FIGURE_CAPTION_LABEL_RE = re.compile(r"\b(?:fig\.?|figure)\s*\.?\s*([A-Za-z]?\d+(?:\.\d+)*)", re.IGNORECASE)
+
+
+def _figure_caption_identity(node: DocumentNode) -> tuple[str, str] | None:
+    raw = _figure_caption_from_metadata(node, [node]) or node.text
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    label_match = FIGURE_CAPTION_LABEL_RE.search(raw)
+    if label_match:
+        return ("label", label_match.group(1).casefold())
+    cleaned = clean_float_caption_text(raw, "figure")
+    normalized = re.sub(r"[^a-z0-9]+", "", cleaned.casefold())
+    if len(normalized) >= 10 and normalized not in {"figure", "image", "fig"}:
+        return ("text", normalized)
+    return None
+
+
+def _is_implied_same_figure_group(
+    left: DocumentNode,
+    right: DocumentNode,
+    page_figures: list[DocumentNode],
+) -> bool:
+    if left.node_id == right.node_id:
+        return False
+    if left.page_idx != right.page_idx:
+        return False
+    left_group = _figure_group_id(left)
+    right_group = _figure_group_id(right)
+    if left_group and right_group and left_group != right_group:
+        return False
+    left_box = _node_union_bbox(left)
+    right_box = _node_union_bbox(right)
+    if left_box is None or right_box is None:
+        return False
+    page_width = max(_page_width_for_nodes(page_figures), 1.0)
+    page_height = max(_page_height_for_nodes(page_figures), 1.0)
+    y_overlap = _bbox_y_overlap_ratio(left_box, right_box)
+    x_overlap = _bbox_x_overlap_ratio(left_box, right_box)
+    x_gap = max(0.0, max(left_box.x0, right_box.x0) - min(left_box.x1, right_box.x1))
+    y_gap = max(0.0, max(left_box.y0, right_box.y0) - min(left_box.y1, right_box.y1))
+    same_row_close = y_overlap >= 0.12 and x_gap <= 0.18 * page_width
+    stacked_close = x_overlap >= 0.18 and y_gap <= 0.10 * page_height
+    close = same_row_close or stacked_close
+    if not close:
+        return False
+    left_caption = _figure_caption_identity(left)
+    right_caption = _figure_caption_identity(right)
+    if left_caption and right_caption:
+        return left_caption == right_caption
+    if left_caption or right_caption:
+        return True
+    return same_row_close and _figure_reading_index_gap(left, right) <= 6
+
+
+def _figure_reading_index_gap(left: DocumentNode, right: DocumentNode) -> int:
+    try:
+        return abs(int(left.reading_index) - int(right.reading_index))
+    except (TypeError, ValueError):
+        return 9999
 
 
 def _figure_caption_from_metadata(primary: DocumentNode | None, source_nodes: list[DocumentNode]) -> str:
@@ -2518,6 +3056,13 @@ def _figure_group_sort_key(node: DocumentNode) -> tuple[int, float, float, int]:
     return (1, box.y0 if box else 0.0, box.x0 if box else 0.0, node.reading_index)
 
 
+def _figure_label_source_node(members: list[DocumentNode], fallback: DocumentNode) -> DocumentNode:
+    for node in members:
+        if _figure_caption_identity(node) is not None:
+            return node
+    return fallback
+
+
 def _should_render_figure_minipages(nodes: list[DocumentNode]) -> bool:
     if len(nodes) < 2:
         return False
@@ -2543,6 +3088,24 @@ def _bbox_y_overlap_ratio(left: BBox, right: BBox) -> float:
     intersection = max(0.0, min(left.y1, right.y1) - max(left.y0, right.y0))
     min_height = max(min(left.y1 - left.y0, right.y1 - right.y0), 1e-6)
     return intersection / min_height
+
+
+def _bbox_x_overlap_ratio(left: BBox, right: BBox) -> float:
+    intersection = max(0.0, min(left.x1, right.x1) - max(left.x0, right.x0))
+    min_width = max(min(left.x1 - left.x0, right.x1 - right.x0), 1e-6)
+    return intersection / min_width
+
+
+def _page_height_for_nodes(nodes: list[DocumentNode]) -> float:
+    for node in nodes:
+        for container in (node.features, node.metadata):
+            value = _numeric_value(container.get("page_height"))
+            if value and value > 0:
+                return value
+    boxes = [box for node in nodes for box in node.bboxes]
+    if boxes:
+        return max(max(box.y1 for box in boxes), 1000.0)
+    return 1000.0
 
 
 def _source_pdf_for_node(node: DocumentNode) -> str | None:
@@ -2628,7 +3191,8 @@ def _header_footer_commands(header_footer: object) -> list[str]:
     lines.extend(assignments)
     lines.append(r"\fancypagestyle{plain}{%")
     lines.append(r"\fancyhf{}")
-    lines.extend(assignments)
+    lines.append(r"\renewcommand{\headrulewidth}{0pt}")
+    lines.append(r"\renewcommand{\footrulewidth}{0pt}")
     lines.append(r"}")
     return lines
 

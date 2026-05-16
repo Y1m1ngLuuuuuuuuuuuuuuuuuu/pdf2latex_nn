@@ -78,7 +78,18 @@ LATEX_TOKEN_RE = re.compile(
 
 MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LIST_RE = re.compile(r"^\s*(?P<marker>(?:[-*+])|(?:\d+\.))\s+(?P<text>.+?)\s*$")
-CAPTION_TEXT_RE = re.compile(r"^\s*(?P<kind>fig(?:ure)?|table)\s*\.?\s*(?P<number>[A-Za-z0-9.:-]+)?\s*[:.\-]?\s*(?P<text>.*)$", re.I)
+CAPTION_TEXT_RE = re.compile(
+    r"^\s*(?P<kind>fig(?:ure)?|table|alg(?:orithm)?)\s*\.?\s*"
+    r"(?P<number>[A-Za-z0-9.:-]+)?\s*[:.\-]?\s*(?P<text>.*)$",
+    re.I,
+)
+MARKDOWN_LATEX_SECTION_RE = re.compile(
+    r"^\s*\\(?P<name>part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
+    r"\s*\{(?P<title>.*)\}\s*$"
+)
+MARKDOWN_LATEX_CAPTION_RE = re.compile(r"\\caption\*?\s*\{(?P<caption>.*?)\}", re.DOTALL)
+MARKDOWN_LATEX_BEGIN_RE = re.compile(r"^\s*\\begin\s*\{\s*(?P<name>[^}]+?)\s*\}")
+MARKDOWN_LATEX_END_TEMPLATE = r"\\end\s*\{\s*%s\s*\}"
 REFERENCE_HEADING_RE = re.compile(r"^(references|bibliography|参考文献)\s*$", re.I)
 ABSTRACT_HEADING_RE = re.compile(r"^abstract\s*$", re.I)
 REFERENCE_ITEM_RE = re.compile(r"^\s*(?:\[(?P<bracket>[A-Za-z0-9]+)\]|(?P<num>\d+)\.)\s*(?P<text>.+)")
@@ -446,8 +457,13 @@ class _MarkdownComparisonParser:
         self.next_id = 1
         self.paragraph: list[str] = []
         self.in_references = False
+        self.in_abstract = False
+        self.active_abstract_id: str | None = None
         self.active_list_id: str | None = None
         self.active_list_marker: str | None = None
+        self.markdown_heading_base: int | None = None
+        self.seen_document_title = False
+        self.has_nougat_abstract_heading = self.detect_nougat_abstract_heading()
 
     def parse(self) -> ComparisonDocument:
         index = 0
@@ -460,34 +476,62 @@ class _MarkdownComparisonParser:
                 self.active_list_marker = None
                 index += 1
                 continue
+            latex_heading = MARKDOWN_LATEX_SECTION_RE.match(line)
+            if latex_heading:
+                self.flush_paragraph()
+                self.active_list_id = None
+                self.active_list_marker = None
+                name = latex_heading.group("name")
+                level = SECTION_LEVELS[name]
+                text = latex_text(latex_heading.group("title"))
+                self.add_heading(text, level)
+                self.in_references = bool(REFERENCE_HEADING_RE.match(text))
+                self.in_abstract = False
+                self.active_abstract_id = None
+                index += 1
+                continue
             heading = MARKDOWN_HEADING_RE.match(line)
             if heading:
                 self.flush_paragraph()
                 self.active_list_id = None
                 self.active_list_marker = None
-                level = len(heading.group(1))
+                raw_level = len(heading.group(1))
                 text = strip_markdown_inline(heading.group(2))
+                if self.should_treat_as_document_title(raw_level, text):
+                    self.add_block("document_title", text, parent_id=ROOT_ID, marker="markdown_title")
+                    self.seen_document_title = True
+                    self.in_references = False
+                    self.in_abstract = False
+                    self.active_abstract_id = None
+                    index += 1
+                    continue
+                if ABSTRACT_HEADING_RE.match(text):
+                    block = self.add_block("abstract", "Abstract", level=1, parent_id=ROOT_ID, marker="markdown_abstract")
+                    self.in_abstract = True
+                    self.active_abstract_id = block.block_id
+                    self.in_references = False
+                    index += 1
+                    continue
+                level = self.normalized_markdown_heading_level(raw_level)
                 self.add_heading(text, level)
                 self.in_references = bool(REFERENCE_HEADING_RE.match(text))
+                self.in_abstract = False
+                self.active_abstract_id = None
                 index += 1
                 continue
-            if stripped.startswith("$$"):
+            if starts_markdown_display_math(stripped):
                 self.flush_paragraph()
                 self.active_list_id = None
                 self.active_list_marker = None
-                if stripped.count("$$") >= 2 and stripped != "$$":
-                    self.add_block("display_math", normalize_math_text(stripped), display_math_count=1)
-                    index += 1
-                    continue
-                math_lines = [stripped]
-                index += 1
-                while index < len(self.lines) and "$$" not in self.lines[index].strip():
-                    math_lines.append(self.lines[index].strip())
-                    index += 1
-                if index < len(self.lines):
-                    math_lines.append(self.lines[index].strip())
-                    index += 1
+                math_lines, index = collect_markdown_display_math(self.lines, index)
                 self.add_block("display_math", normalize_math_text("\n".join(math_lines)), display_math_count=1)
+                continue
+            latex_env = MARKDOWN_LATEX_BEGIN_RE.match(stripped)
+            if latex_env and latex_env.group("name").strip() in FIGURE_ENVS | TABLE_ENVS | ALGORITHM_ENVS:
+                self.flush_paragraph()
+                self.active_list_id = None
+                self.active_list_marker = None
+                index = self.handle_latex_environment(index, latex_env.group("name").strip())
                 continue
             if markdown_image_line(stripped):
                 self.flush_paragraph()
@@ -511,6 +555,16 @@ class _MarkdownComparisonParser:
             list_match = MARKDOWN_LIST_RE.match(line)
             if list_match:
                 self.flush_paragraph()
+                if self.in_references:
+                    marker = list_match.group("marker")
+                    reference_text = strip_markdown_inline(list_match.group("text"))
+                    ref_item = REFERENCE_ITEM_RE.match(reference_text)
+                    if ref_item:
+                        reference_text = strip_markdown_inline(ref_item.group("text"))
+                        marker = ref_item.group("bracket") or ref_item.group("num") or marker
+                    self.add_block("reference_item", reference_text, marker=marker)
+                    index += 1
+                    continue
                 marker = list_match.group("marker")
                 list_id = self.ensure_list_container("enumerate" if marker[0].isdigit() else "itemize")
                 self.add_block("list_item", strip_markdown_inline(list_match.group("text")), parent_id=list_id, marker=marker)
@@ -521,7 +575,13 @@ class _MarkdownComparisonParser:
                 self.flush_paragraph()
                 self.active_list_id = None
                 self.active_list_marker = None
-                kind = "figure" if caption.group("kind").lower().startswith("fig") else "table"
+                raw_kind = caption.group("kind").lower()
+                if raw_kind.startswith("fig"):
+                    kind = "figure"
+                elif raw_kind.startswith("alg"):
+                    kind = "algorithm"
+                else:
+                    kind = "table"
                 label = caption.group("number")
                 self.add_block("caption", strip_markdown_inline(stripped), marker=kind, label=label)
                 index += 1
@@ -552,13 +612,43 @@ class _MarkdownComparisonParser:
         if REFERENCE_HEADING_RE.match(text):
             self.add_heading(text, 1)
             self.in_references = True
+            self.in_abstract = False
+            self.active_abstract_id = None
             self.active_list_id = None
             self.active_list_marker = None
             return
         if ABSTRACT_HEADING_RE.match(text):
-            self.add_block("abstract", text, level=1)
+            block = self.add_block("abstract", "Abstract", level=1, parent_id=ROOT_ID, marker="markdown_abstract")
+            self.in_abstract = True
+            self.active_abstract_id = block.block_id
+            return
+        if self.in_abstract:
+            self.add_block("abstract", text, parent_id=self.active_abstract_id or ROOT_ID)
             return
         self.add_block("reference_item" if self.in_references else "paragraph", text)
+
+    def detect_nougat_abstract_heading(self) -> bool:
+        for line in self.lines[:80]:
+            heading = MARKDOWN_HEADING_RE.match(line)
+            if not heading:
+                continue
+            raw_level = len(heading.group(1))
+            text = strip_markdown_inline(heading.group(2))
+            if raw_level >= 5 and ABSTRACT_HEADING_RE.match(text):
+                return True
+        return False
+
+    def should_treat_as_document_title(self, raw_level: int, text: str) -> bool:
+        if self.seen_document_title or raw_level != 1 or not self.has_nougat_abstract_heading:
+            return False
+        if self.blocks:
+            return False
+        return not REFERENCE_HEADING_RE.match(text) and not ABSTRACT_HEADING_RE.match(text)
+
+    def normalized_markdown_heading_level(self, raw_level: int) -> int:
+        if self.markdown_heading_base is None:
+            self.markdown_heading_base = raw_level
+        return max(1, min(5, raw_level - self.markdown_heading_base + 1))
 
     def add_heading(self, text: str, level: int) -> ComparisonBlock:
         parent = self.section_parent(level)
@@ -608,6 +698,30 @@ class _MarkdownComparisonParser:
         self.blocks.append(block)
         return block
 
+    def handle_latex_environment(self, index: int, env_name: str) -> int:
+        env_lines = [self.lines[index]]
+        index += 1
+        end_pattern = re.compile(MARKDOWN_LATEX_END_TEMPLATE % re.escape(env_name))
+        while index < len(self.lines):
+            env_lines.append(self.lines[index])
+            if end_pattern.search(self.lines[index]):
+                index += 1
+                break
+            index += 1
+        raw = "\n".join(env_lines)
+        if env_name in FIGURE_ENVS:
+            float_block = self.add_block("figure", "", marker=env_name)
+        elif env_name in TABLE_ENVS:
+            float_block = self.add_block("table", latex_text(raw), marker=env_name)
+        else:
+            float_block = self.add_block("algorithm", latex_text(raw), marker=env_name)
+        caption_match = MARKDOWN_LATEX_CAPTION_RE.search(raw)
+        if caption_match:
+            caption_text = latex_text(caption_match.group("caption"))
+            kind, label = caption_kind_and_label(caption_text, float_block.block_type)
+            self.add_block("caption", caption_text, parent_id=float_block.block_id, marker=kind, label=label)
+        return index
+
     def current_parent_id(self) -> str:
         if self.section_stack:
             return self.section_stack[max(self.section_stack)]
@@ -631,6 +745,7 @@ def build_test_items(blocks: list[ComparisonBlock]) -> dict[str, Any]:
         "list_items": [block.block_id for block in blocks if block.block_type == "list_item"],
         "figures": [block.block_id for block in blocks if block.block_type == "figure"],
         "tables": [block.block_id for block in blocks if block.block_type == "table"],
+        "algorithms": [block.block_id for block in blocks if block.block_type == "algorithm"],
         "captions": [block.block_id for block in blocks if block.block_type == "caption"],
         "references": [block.block_id for block in blocks if block.block_type == "reference_item"],
         "display_math": [block.block_id for block in blocks if block.block_type == "display_math"],
@@ -645,6 +760,7 @@ def build_test_items(blocks: list[ComparisonBlock]) -> dict[str, Any]:
             "list_items": sum(1 for block in blocks if block.block_type == "list_item"),
             "figures": sum(1 for block in blocks if block.block_type == "figure"),
             "tables": sum(1 for block in blocks if block.block_type == "table"),
+            "algorithms": sum(1 for block in blocks if block.block_type == "algorithm"),
             "captions": sum(1 for block in blocks if block.block_type == "caption"),
             "references": sum(1 for block in blocks if block.block_type == "reference_item"),
             "display_math": sum(block.display_math_count for block in blocks),
@@ -807,8 +923,16 @@ def count_markdown_inline_math(text: str) -> int:
 def caption_kind_and_label(text: str, parent: str | None) -> tuple[str | None, str | None]:
     match = CAPTION_TEXT_RE.match(text)
     if match:
-        kind = "figure" if match.group("kind").lower().startswith("fig") else "table"
+        raw_kind = match.group("kind").lower()
+        if raw_kind.startswith("fig"):
+            kind = "figure"
+        elif raw_kind.startswith("alg"):
+            kind = "algorithm"
+        else:
+            kind = "table"
         return kind, match.group("number")
+    if parent in {"figure", "table", "algorithm"}:
+        return parent, None
     return None, parent
 
 
@@ -834,6 +958,52 @@ def is_markdown_table_start(lines: list[str], index: int) -> bool:
     if index + 1 >= len(lines):
         return False
     return "|" in lines[index] and bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[index + 1]))
+
+
+def starts_markdown_display_math(line: str) -> bool:
+    stripped = str(line or "").strip()
+    if stripped.startswith("$$") or stripped.startswith(r"\["):
+        return True
+    begin = MARKDOWN_LATEX_BEGIN_RE.match(stripped)
+    return bool(begin and begin.group("name").strip() in DISPLAY_MATH_ENVS)
+
+
+def collect_markdown_display_math(lines: list[str], index: int) -> tuple[list[str], int]:
+    first = lines[index].strip()
+    if first.startswith("$$"):
+        if first.count("$$") >= 2 and first != "$$":
+            return [first], index + 1
+        return collect_until_token(lines, index, "$$")
+    if first.startswith(r"\["):
+        if r"\]" in first and first != r"\[":
+            return [first], index + 1
+        return collect_until_token(lines, index, r"\]")
+    begin = MARKDOWN_LATEX_BEGIN_RE.match(first)
+    env_name = begin.group("name").strip() if begin else ""
+    if not env_name:
+        return [first], index + 1
+    end_pattern = re.compile(MARKDOWN_LATEX_END_TEMPLATE % re.escape(env_name))
+    collected = [lines[index].strip()]
+    index += 1
+    while index < len(lines):
+        collected.append(lines[index].strip())
+        if end_pattern.search(lines[index]):
+            index += 1
+            break
+        index += 1
+    return collected, index
+
+
+def collect_until_token(lines: list[str], index: int, token: str) -> tuple[list[str], int]:
+    collected = [lines[index].strip()]
+    index += 1
+    while index < len(lines):
+        collected.append(lines[index].strip())
+        if token in lines[index].strip():
+            index += 1
+            break
+        index += 1
+    return collected, index
 
 
 def write_comparison_json(document: ComparisonDocument, path: Path) -> None:

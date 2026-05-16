@@ -22,6 +22,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.perception.gnn_view_adapter import GNNViewAdapterConfig, build_gnn_view  # noqa: E402
 from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes  # noqa: E402
 from src.perception.schema import EDGE_ATTR_FIELDS, SCIBERT_DIM  # noqa: E402
 from src.reasoning.graph_builder import (  # noqa: E402
@@ -230,10 +231,37 @@ def load_graph_items(content_json: Path, graph: Any) -> list[dict[str, Any]]:
     items = payload.get("items")
     if not isinstance(items, list):
         raise ValueError(f"Expected items list in {content_json}")
-    graph_items = filter_graph_content_items([item for item in items if isinstance(item, dict)])
-    if bool(getattr(graph, "micro_fusion_applied", False)):
-        graph_items = fuse_micro_nodes(graph_items)
-    return graph_items
+    records = [item for item in items if isinstance(item, dict)]
+    expected = int(graph.num_nodes)
+    micro_fusion_applied = bool(getattr(graph, "micro_fusion_applied", False))
+
+    view = build_gnn_view(
+        records,
+        config=GNNViewAdapterConfig(fuse_micro_nodes=micro_fusion_applied),
+    )
+    if len(view.gnn_items) == expected:
+        return view.gnn_items
+
+    fallback_view = build_gnn_view(
+        records,
+        config=GNNViewAdapterConfig(fuse_micro_nodes=not micro_fusion_applied),
+    )
+    if len(fallback_view.gnn_items) == expected:
+        return fallback_view.gnn_items
+
+    # Legacy fallback for pre-adapter graphs.  New adapter-aware graphs should
+    # match above; this branch keeps old caches refreshable without changing
+    # their schema.
+    graph_items = filter_graph_content_items(records)
+    if micro_fusion_applied:
+        fused_items = fuse_micro_nodes(graph_items)
+        if len(fused_items) == expected:
+            return fused_items
+    if len(graph_items) == expected:
+        return graph_items
+    if len(records) == expected:
+        return records
+    raise ValueError(f"content node count ({len(view.gnn_items)}) != graph.num_nodes ({expected})")
 
 
 def select_reading_order(items: list[dict[str, Any]], *, source: str) -> list[int]:

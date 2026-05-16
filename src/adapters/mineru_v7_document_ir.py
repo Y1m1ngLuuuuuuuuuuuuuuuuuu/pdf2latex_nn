@@ -27,6 +27,7 @@ from src.ir.serialization import write_json
 from src.ir.validators import validate_document_ir
 from src.generation.table_assets import annotate_table_group_records
 from src.perception.reading_order import annotate_duplicate_contained_continuations, is_duplicate_shadow_record
+from src.perception.title_features import title_numbering_info
 from src.pipeline.v7_contract import assert_v7_content_json, read_json_payload
 
 
@@ -167,8 +168,11 @@ class MinerUV7DocumentIRAdapter:
             item.get("global_order"),
             int_value(item.get("layout_flow_order"), int_value(item.get("column_fix_global_order"), position)),
         )
-        text = text_from_v7_item(item)
+        text, text_repairs = clean_node_text_ocr_debris(text_from_v7_item(item))
         metadata = metadata_from_v7_item(item, include_raw_block=self.config.include_raw_block, include_raw_item=self.config.include_raw_item)
+        if text_repairs:
+            metadata["ocr_text_repairs"] = text_repairs
+            metadata["original_ocr_text"] = text_from_v7_item(item)
         if source_path is not None:
             metadata.setdefault("source_json", str(source_path))
             metadata.setdefault("source_json_dir", str(source_path.parent))
@@ -176,7 +180,20 @@ class MinerUV7DocumentIRAdapter:
         if pdf_path is not None:
             metadata.setdefault("source_pdf", str(pdf_path))
         features = features_from_v7_item(item)
+        numbering = title_numbering_info(text)
+        if bool(numbering.get("has_numbering")):
+            features["title_numbering_level"] = int(numbering["level"]) if numbering.get("level") is not None else None
+            features["title_numbering_style"] = str(numbering.get("style") or "none")
+            features["title_numbering_token"] = str(numbering.get("token") or "")
+            metadata["title_numbering"] = {
+                **numbering,
+                "path": list(numbering.get("path") or ()),
+            }
         spans = [style_span_from_v7(span) for span in item.get("style_spans", []) if isinstance(span, dict)]
+        spans, span_repairs = clean_style_spans_for_node(spans, node_text=text)
+        if span_repairs:
+            metadata["style_span_repairs"] = span_repairs
+            metadata["noisy_style_span_repaired"] = True
         source_refs = [
             SourceRef(
                 path=str(source_path) if source_path is not None else None,
@@ -500,6 +517,192 @@ def style_span_from_v7(span: dict[str, Any]) -> StyleSpan:
     )
 
 
+SPLIT_LETTER_NOISE_PREFIX_RE = re.compile(r"^\s*(?:[a-z]\s+){1,8}(?=[A-Z0-9(⋆\u2022\u25E6])")
+PUNCT_SPLIT_LETTER_NUMBERING_PREFIX_RE = re.compile(
+    r"^\s*[,.;:(){}\[\]\\/\-–—]*\s*(?:[a-z]\s*){1,10}[\s,.;:(){}\[\]\\/\-–—]*(?=(?:[IVXLCDM]+|[A-Z]|\d+(?:\.\d+)*)\.?\s*)",
+    re.IGNORECASE,
+)
+SPLIT_LETTER_DEBRIS_RE = re.compile(r"^\s*(?:[a-z]\s*){1,12}\s*$")
+SPLIT_LETTER_WITH_SPACES_RE = re.compile(r"^\s*(?:[A-Za-z]\s+){1,12}[A-Za-z]?\s*$")
+LOWERCASE_PUNCT_DEBRIS_RE = re.compile(r"^[a-z]{1,4}\W+$")
+NODE_SPLIT_LETTER_NOISE_PREFIX_RE = re.compile(r"^\s*(?P<prefix>(?:[a-z]\s+){1,8})(?P<body>[A-Z0-9(⋆\u2022\u25E6].*)$", re.DOTALL)
+NODE_TRAILING_SPLIT_LETTER_NOISE_RE = re.compile(
+    r"^(?P<body>.*[.!?;:])\s*(?P<suffix>(?:[a-z]\s*){1,4})\s*$",
+    re.DOTALL,
+)
+
+
+def clean_node_text_ocr_debris(text: str) -> tuple[str, list[dict[str, str]]]:
+    """Remove only high-confidence OCR debris from a MinerU node text field.
+
+    The canonical MinerU text is usually cleaner than PyMuPDF spans, so this
+    function is intentionally narrow: strip split lowercase prefixes before a
+    normal sentence/list marker and split lowercase tails after a completed
+    sentence.  Full raw text is preserved in metadata by the caller.
+    """
+
+    value = str(text or "")
+    repairs: list[dict[str, str]] = []
+    match = NODE_SPLIT_LETTER_NOISE_PREFIX_RE.match(value)
+    if match and len(match.group("body").strip()) >= 20:
+        removed = match.group("prefix").strip()
+        value = match.group("body").lstrip()
+        repairs.append({"kind": "node_split_letter_ocr_prefix", "removed": removed})
+    match = NODE_TRAILING_SPLIT_LETTER_NOISE_RE.match(value)
+    if match and len(match.group("body").strip()) >= 40:
+        suffix = match.group("suffix").strip()
+        # Do not strip common one-letter sentence endings in math prose unless
+        # the suffix is visually separated from the terminal punctuation.
+        if suffix and _is_split_letter_debris(suffix):
+            value = match.group("body").rstrip()
+            repairs.append({"kind": "node_split_letter_ocr_suffix", "removed": suffix})
+    return value, repairs
+
+
+def strip_split_letter_ocr_noise_prefix(text: str, *, node_text: str = "") -> tuple[str, str | None]:
+    """Remove short split-letter OCR debris prepended to otherwise clean text.
+
+    PyMuPDF spans occasionally include visual leftovers such as ``"y p p p g
+    Although ..."`` while the MinerU block text is already clean
+    (``"Although ..."``).  Keep the node and style span, but drop the prefix so
+    the renderer does not faithfully print OCR debris.
+    """
+
+    value = str(text or "")
+    aligned = _strip_prefix_by_node_alignment(value, node_text=node_text)
+    if aligned is not None:
+        stripped, removed = aligned
+        return stripped, removed
+    match = SPLIT_LETTER_NOISE_PREFIX_RE.match(value)
+    if not match:
+        match = PUNCT_SPLIT_LETTER_NUMBERING_PREFIX_RE.match(value)
+        if not match:
+            return value, None
+    prefix = match.group(0)
+    stripped = value[match.end() :]
+    normalized_node = _compact_alignment_text(node_text)
+    normalized_stripped = _compact_alignment_text(stripped)
+    if normalized_node and not normalized_node.startswith(normalized_stripped[: min(len(normalized_stripped), 80)]):
+        return value, None
+    return stripped.lstrip(), prefix.strip()
+
+
+def _strip_prefix_by_node_alignment(text: str, *, node_text: str = "") -> tuple[str, str] | None:
+    """Drop short OCR prefixes when the rest of the span aligns to node text.
+
+    MinerU's block text is often clean while PyMuPDF spans include visual
+    leftovers from math/formula glyphs, e.g. ``, pp y g p Another ...`` or
+    ``) g We can ...``.  Regexes alone are brittle here, so use the clean node
+    text as an anchor and only remove a prefix when the remaining compact text
+    starts exactly like the node.
+    """
+
+    value = str(text or "")
+    compact_node = _compact_alignment_text(node_text)
+    compact_value = _compact_alignment_text(value)
+    if len(compact_node) < 12 or len(compact_value) <= len(compact_node[:12]):
+        return None
+    if compact_value.startswith(compact_node[: min(len(compact_node), 24)]):
+        return None
+    anchor_index: int | None = None
+    for anchor_len in (28, 24, 20, 16, 12):
+        if len(compact_node) < anchor_len:
+            continue
+        index = compact_value.find(compact_node[:anchor_len])
+        if 0 < index <= 14:
+            anchor_index = index
+            break
+    if anchor_index is None:
+        return None
+    char_index = _original_offset_for_compact_index(value, anchor_index)
+    if char_index is None or char_index <= 0 or char_index > min(36, max(1, len(value) // 3)):
+        return None
+    removed = value[:char_index].strip()
+    stripped = value[char_index:].lstrip()
+    if not removed or len(_compact_alignment_text(removed)) > 14:
+        return None
+    if len(stripped) < 20:
+        return None
+    return stripped, removed
+
+
+def _original_offset_for_compact_index(text: str, compact_index: int) -> int | None:
+    seen = 0
+    for position, char in enumerate(text):
+        if char.isalnum():
+            if seen == compact_index:
+                return position
+            seen += 1
+    return None
+
+
+def _compact_alignment_text(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "", str(text or "")).casefold()
+
+
+def _is_split_letter_debris(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    compact = _compact_alignment_text(value)
+    if not compact or len(compact) > 12:
+        return False
+    if SPLIT_LETTER_WITH_SPACES_RE.match(value):
+        return True
+    if LOWERCASE_PUNCT_DEBRIS_RE.match(value):
+        return True
+    if len(compact) == 1 and re.fullmatch(r"\W*[a-z]\W*", value):
+        return True
+    # Single lowercase OCR leftovers such as ``g`` or ``i`` are common around
+    # italic/math boundaries.  Keep real short words such as ``and`` or math
+    # fragments such as ``30%`` even when local span alignment is imperfect.
+    return len(compact) == 1 and value == value.lower() and bool(SPLIT_LETTER_DEBRIS_RE.match(value))
+
+
+def _span_aligns_after_cursor(compact_node_text: str, compact_span_text: str, cursor: int) -> tuple[bool, int]:
+    if not compact_span_text:
+        return True, cursor
+    index = compact_node_text.find(compact_span_text, max(cursor, 0))
+    if index < 0:
+        # Small OCR hyphenation differences can move a span a little behind the
+        # monotonic cursor.  Allow a tiny backoff, but do not globally search the
+        # whole node because that would preserve trailing one-letter debris just
+        # because the same letter appeared earlier in the paragraph.
+        index = compact_node_text.find(compact_span_text, max(cursor - 8, 0))
+    if index < 0:
+        return False, cursor
+    return True, max(cursor, index + len(compact_span_text))
+
+
+def clean_style_spans_for_node(spans: list[StyleSpan], *, node_text: str) -> tuple[list[StyleSpan], list[dict[str, str]]]:
+    cleaned: list[StyleSpan] = []
+    repairs: list[dict[str, str]] = []
+    compact_node = _compact_alignment_text(node_text)
+    cursor = 0
+    for span in spans:
+        text, removed = strip_split_letter_ocr_noise_prefix(span.text, node_text=node_text)
+        if removed:
+            repairs.append({"kind": "split_letter_ocr_prefix", "removed": removed, "original": span.text[:160]})
+            span = replace(span, text=text)
+        compact_span = _compact_alignment_text(text)
+        if compact_node and not compact_span and re.fullmatch(r"\W+", str(text or "").strip()):
+            repairs.append({"kind": "punctuation_ocr_span", "removed": text.strip(), "original": span.text[:160]})
+            continue
+        if compact_node and compact_span and _is_split_letter_debris(text):
+            local_start = max(cursor - 2, 0)
+            local_end = min(len(compact_node), cursor + max(4, len(compact_span) + 3))
+            if compact_span not in compact_node[local_start:local_end]:
+                repairs.append({"kind": "split_letter_ocr_span", "removed": text.strip(), "original": span.text[:160]})
+                continue
+        aligns, next_cursor = _span_aligns_after_cursor(compact_node, compact_span, cursor)
+        if compact_node and not aligns and _is_split_letter_debris(text):
+            repairs.append({"kind": "split_letter_ocr_span", "removed": text.strip(), "original": span.text[:160]})
+            continue
+        cursor = next_cursor
+        cleaned.append(span)
+    return cleaned, repairs
+
+
 def flags_from_v7_item(item: dict[str, Any]) -> dict[str, bool]:
     flags: dict[str, bool] = {}
     for key in (
@@ -509,6 +712,9 @@ def flags_from_v7_item(item: dict[str, Any]) -> dict[str, bool]:
         "is_title_candidate",
         "is_toc",
         "is_noise",
+        "no_render",
+        "render_skip",
+        "duplicate_shadow",
     ):
         value = item.get(key)
         if isinstance(value, bool):

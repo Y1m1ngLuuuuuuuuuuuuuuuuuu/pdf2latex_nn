@@ -523,6 +523,29 @@ def test_refresh_content_v7_attaches_float_caption_to_nearby_figure_group():
     assert figure["figure_group_caption"] == "Figure 1: Example architecture."
 
 
+def test_refresh_content_v7_groups_adjacent_figure_fragments_with_shared_caption():
+    payload = {
+        "items": [
+            {"type": "image", "page_idx": 0, "bbox": [90, 140, 390, 320], "text_for_embedding": ""},
+            {"type": "image", "page_idx": 0, "bbox": [420, 150, 760, 315], "text_for_embedding": ""},
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "bbox": [90, 330, 760, 370],
+                "text_for_embedding": "Figure 4: Mask iteration examples.",
+            },
+        ]
+    }
+
+    refreshed = refresh_content_v7_layout_metadata(payload)
+    figures = [item for item in refreshed["items"] if item["type"] == "image"]
+
+    assert len(figures) == 2
+    assert figures[0]["figure_group_id"] == figures[1]["figure_group_id"]
+    assert figures[0]["figure_group_size"] == 2
+    assert figures[1]["figure_group_caption"] == "Figure 4: Mask iteration examples."
+
+
 def test_fix_columnar_reading_order_keeps_center_crossing_short_title_as_full_span_separator():
     nodes = [
         {"type": "paragraph", "text_for_embedding": "left before", "bbox": [80, 100, 450, 150]},

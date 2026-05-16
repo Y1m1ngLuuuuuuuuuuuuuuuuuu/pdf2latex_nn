@@ -88,7 +88,7 @@ class StyleProfileExtractor:
             "paragraph_spacing": paragraph_spacing,
             "display_math_spacing": display_spacing,
             "list_spacing": list_spacing,
-            "bibliography": self._extract_bibliography_style(document, body_font_size),
+            "bibliography": self._extract_bibliography_style(document, body_font_size, page_layout),
             "header_footer": self._extract_header_footer_style(document),
             "column_mode": page_layout.get("column_mode"),
             "column_gap": page_layout.get("column_gap"),
@@ -189,11 +189,11 @@ class StyleProfileExtractor:
                 column_count = max(column_count, 2)
         column_mode = "single"
         mixed_band_ratio = (mixed_band_pages / len(column_counts)) if column_counts else 0.0
-        if mixed_band_pages:
-            column_mode = "mixed"
-        elif two_column_ratio >= self.config.stable_two_column_min_pages_ratio:
-            column_mode = "two_column"
+        if two_column_ratio >= self.config.stable_two_column_min_pages_ratio:
+            column_mode = "mixed" if mixed_band_pages else "two_column"
         elif two_column_ratio >= self.config.two_column_min_pages_ratio:
+            column_mode = "mixed"
+        elif mixed_band_ratio >= self.config.two_column_min_pages_ratio:
             column_mode = "mixed"
 
         margins = _median_margins(margins_by_page)
@@ -448,14 +448,21 @@ class StyleProfileExtractor:
             "topsep": body_font_size * 0.5 if body_font_size else None,
         }
 
-    def _extract_bibliography_style(self, document: DocumentIR, body_font_size: float | None) -> dict[str, object]:
+    def _extract_bibliography_style(
+        self,
+        document: DocumentIR,
+        body_font_size: float | None,
+        page_layout: dict[str, object],
+    ) -> dict[str, object]:
         reference_nodes = [node for node in document.nodes if node.node_type == BlockType.REFERENCE]
         sizes = [size for node in reference_nodes for size, _weight in _iter_span_sizes(node, 1)]
+        column_layout = _estimate_reference_column_layout(reference_nodes, page_layout)
         return {
             "font_size": _safe_median(sizes, body_font_size),
             "label_style": "numeric",
             "strip_source_labels": True,
             "citation_key_strategy": "source_key_or_ref_number",
+            **column_layout,
         }
 
     def _extract_header_footer_style(self, document: DocumentIR) -> dict[str, object]:
@@ -654,7 +661,24 @@ def _is_body_style_node(node: DocumentNode) -> bool:
     role = str(node.metadata.get("layout_role") or "").casefold()
     if layer in {"metadata_layer", "noise_layer", "float_layer"}:
         return False
-    if role in {"caption", "figure_caption", "table_caption", "abstract_title", "author", "affiliation"}:
+    if role in {
+        "abstract",
+        "abstract_body",
+        "abstract_title",
+        "author",
+        "authors",
+        "affiliation",
+        "caption",
+        "correspondence",
+        "date",
+        "email",
+        "figure_caption",
+        "front_matter",
+        "index_terms",
+        "keywords",
+        "metadata",
+        "table_caption",
+    }:
         return False
     if node.flags.get("is_noise") or node.node_type in {BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE}:
         return False
@@ -671,7 +695,7 @@ def _estimate_page_body_text_geometry(
         for node in nodes
         if _is_body_style_node(node)
         and node.bboxes
-        and 4.0 <= max(node.bboxes[0].x1 - node.bboxes[0].x0, 0.0) < full_width_threshold * max(page_width, 1.0)
+        and 4.0 <= max(node.bboxes[0].x1 - node.bboxes[0].x0, 0.0)
     ]
     if not boxes:
         return {}
@@ -712,6 +736,121 @@ def _split_body_text_columns(boxes: list[BBox], page_width: float) -> list[list[
     return [left, right]
 
 
+def _estimate_reference_column_layout(
+    reference_nodes: list[DocumentNode],
+    page_layout: dict[str, object],
+) -> dict[str, object]:
+    """Estimate bibliography columns from individual reference boxes.
+
+    A full reference section often has a union bbox that spans the page even
+    when the actual items live in two columns.  This helper therefore clusters
+    per-node/per-line boxes by x center instead of using the section envelope.
+    """
+
+    page_width = _float_or_none(page_layout.get("page_width")) or 1000.0
+    boxes_by_page: dict[int, list[BBox]] = defaultdict(list)
+    for node in reference_nodes:
+        for box in node.bboxes:
+            width = max(box.x1 - box.x0, 0.0)
+            height = max(box.y1 - box.y0, 0.0)
+            if width >= 4.0 and height >= 1.0:
+                boxes_by_page[node.page_idx].append(box)
+
+    two_column_pages = 0
+    single_column_pages = 0
+    column_widths: list[float] = []
+    column_gaps: list[float] = []
+    narrow_box_count = 0
+    full_span_box_count = 0
+    reference_item_count = sum(_reference_item_count(node) for node in reference_nodes)
+    compact_reference_chunks = bool(reference_nodes) and reference_item_count >= max(len(reference_nodes) * 3, 8)
+
+    for boxes in boxes_by_page.values():
+        if not boxes:
+            continue
+        narrow_boxes = [box for box in boxes if max(box.x1 - box.x0, 0.0) < 0.72 * page_width]
+        full_span_box_count += len(boxes) - len(narrow_boxes)
+        narrow_box_count += len(narrow_boxes)
+        columns = _split_body_text_columns(narrow_boxes, page_width)
+        if len(columns) == 2 and all(columns):
+            left, right = columns
+            left_centers = [(box.x0 + box.x1) / 2.0 for box in left]
+            right_centers = [(box.x0 + box.x1) / 2.0 for box in right]
+            center_gap = min(right_centers) - max(left_centers)
+            left_max = max(box.x1 for box in left)
+            right_min = min(box.x0 for box in right)
+            gutter = max(right_min - left_max, 0.0)
+            if center_gap >= 0.12 * page_width and gutter >= 0.02 * page_width:
+                two_column_pages += 1
+                column_gaps.append(gutter)
+                column_widths.extend(
+                    [
+                        _safe_median([max(box.x1 - box.x0, 0.0) for box in left], 0.0),
+                        _safe_median([max(box.x1 - box.x0, 0.0) for box in right], 0.0),
+                    ]
+                )
+                continue
+        if boxes:
+            single_column_pages += 1
+
+    considered_pages = two_column_pages + single_column_pages
+    if considered_pages == 0:
+        column_mode = "unknown"
+        confidence = 0.0
+    else:
+        two_ratio = two_column_pages / considered_pages
+        if two_column_pages > 0 and two_ratio >= 0.35:
+            column_mode = "two_column"
+            confidence = two_ratio
+        elif full_span_box_count > narrow_box_count:
+            column_mode = "single"
+            confidence = single_column_pages / considered_pages
+        else:
+            column_mode = "single"
+            confidence = max(single_column_pages / considered_pages, 1.0 - two_ratio)
+
+    body_column_mode = str(page_layout.get("column_mode") or "").casefold()
+    page_width = max(page_width, 1.0)
+    median_ref_width = _safe_median(
+        [max(box.x1 - box.x0, 0.0) for boxes in boxes_by_page.values() for box in boxes],
+        None,
+    )
+    narrow_reference_chunks = median_ref_width is not None and median_ref_width <= 0.58 * page_width
+    if (
+        column_mode == "single"
+        and compact_reference_chunks
+        and narrow_reference_chunks
+        and body_column_mode in {"two_column", "mixed"}
+    ):
+        # MinerU sometimes compresses an entire two-column bibliography page
+        # into one or two reference_list nodes whose bbox only covers a single
+        # column.  In that case the per-node cluster is under-observed, so
+        # inherit the body column prior instead of forcing single-column refs.
+        column_mode = "two_column"
+        confidence = max(float(confidence), 0.55)
+
+    return {
+        "column_mode": column_mode,
+        "column_count": 2 if column_mode == "two_column" else (1 if column_mode == "single" else None),
+        "column_confidence": round(float(confidence), 4),
+        "column_pages": {"two_column": two_column_pages, "single": single_column_pages},
+        "column_width": _safe_median(column_widths, None),
+        "column_gap": _safe_median(column_gaps, None),
+        "reference_item_count": reference_item_count,
+        "compact_reference_chunks": compact_reference_chunks,
+        "column_detection_reason": "compact_reference_body_column_fallback"
+        if compact_reference_chunks and column_mode == "two_column" and two_column_pages == 0
+        else "reference_bbox_clusters",
+    }
+
+
+def _reference_item_count(node: DocumentNode) -> int:
+    items = node.metadata.get("reference_items")
+    if isinstance(items, list):
+        return len(items)
+    return 1 if str(node.text or "").strip() else 0
+
+
 def _estimate_page_columns(
     nodes: list[DocumentNode],
     page_width: float,
@@ -720,7 +859,7 @@ def _estimate_page_columns(
     text_boxes = [
         node.bboxes[0]
         for node in nodes
-        if node.node_type in {BlockType.TEXT, BlockType.LIST, BlockType.REFERENCE}
+        if _is_body_style_node(node)
         and node.bboxes
         and (node.bboxes[0].x1 - node.bboxes[0].x0) < full_width_threshold * page_width
     ]

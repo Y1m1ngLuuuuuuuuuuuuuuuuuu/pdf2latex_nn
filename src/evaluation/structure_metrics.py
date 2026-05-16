@@ -19,7 +19,7 @@ from typing import Any
 
 ROOT_ID = "ROOT"
 TEXT_LIKE_TYPES = {"paragraph", "abstract", "list_item", "reference_item", "caption"}
-CONTENT_TYPES = {"paragraph", "abstract", "list_item", "display_math", "figure", "table", "caption"}
+CONTENT_TYPES = {"paragraph", "abstract", "list_item", "display_math", "figure", "table", "caption", "algorithm"}
 COMPARABLE_TYPES = {
     "document_title",
     "author_block",

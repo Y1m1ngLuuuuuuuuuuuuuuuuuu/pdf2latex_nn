@@ -132,6 +132,29 @@ def test_load_v7_document_ir_from_file_and_round_trip(tmp_path):
     assert loaded.nodes[1].source_refs[0].path == str(content_path)
 
 
+def test_title_numbering_features_are_preserved_for_multiple_numbering_systems():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {"type": "title", "page_idx": 0, "global_order": 0, "bbox": [10, 10, 900, 30], "text": "1. Introduction", "style_spans": []},
+            {"type": "title", "page_idx": 0, "global_order": 1, "bbox": [10, 40, 900, 60], "text": "2.3 Method", "style_spans": []},
+            {"type": "title", "page_idx": 0, "global_order": 2, "bbox": [10, 70, 900, 90], "text": "IV. Experiments", "style_spans": []},
+            {"type": "title", "page_idx": 0, "global_order": 3, "bbox": [10, 100, 900, 120], "text": "一、引言", "style_spans": []},
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="numbered-headings")
+    by_text = {node.text: node for node in document.nodes}
+
+    assert by_text["1. Introduction"].features["title_numbering_style"] == "arabic"
+    assert by_text["1. Introduction"].features["title_numbering_level"] == 1
+    assert by_text["2.3 Method"].features["title_numbering_style"] == "decimal"
+    assert by_text["2.3 Method"].features["title_numbering_level"] == 2
+    assert by_text["IV. Experiments"].features["title_numbering_style"] == "roman"
+    assert by_text["一、引言"].features["title_numbering_style"] == "chinese"
+    assert by_text["一、引言"].metadata["title_numbering"]["path"] == ["一"]
+
+
 def test_table_fragments_are_grouped_by_union_bbox_metadata():
     records = annotate_table_group_records(
         [
@@ -325,3 +348,204 @@ def test_duplicate_shadow_nodes_are_not_rendered_in_document_ir():
     assert [node.text for node in document.nodes] == [
         "All experiments used an NVIDIA RTX 8000 GPU with 48GB memory."
     ]
+
+
+def test_split_letter_ocr_noise_prefix_is_removed_from_style_span():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "Although these methods demonstrate effectiveness.",
+                "layout_layer": "main_text_flow",
+                "style_spans": [
+                    {
+                        "text": "y p p p g Although these methods demonstrate effectiveness.",
+                        "font_name": "Times-Roman",
+                        "font_size": 10,
+                    }
+                ],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="ocr-prefix")
+
+    assert document.nodes[0].text == "Although these methods demonstrate effectiveness."
+    assert document.nodes[0].spans[0].text == "Although these methods demonstrate effectiveness."
+    assert document.nodes[0].metadata["noisy_style_span_repaired"] is True
+
+
+def test_unaligned_split_letter_style_spans_are_dropped():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "Index Terms---Multimodal, Token Pruning, Compression",
+                "layout_layer": "metadata_layer",
+                "layout_role": "front_matter",
+                "style_spans": [
+                    {"text": "q y p", "font_name": "Times-Bold", "font_size": 9, "is_bold": True},
+                    {"text": "Index Terms", "font_name": "Times-Italic", "font_size": 9, "is_italic": True},
+                    {"text": "---Multimodal, Token Pruning, Compression", "font_name": "Times-Roman", "font_size": 9},
+                ],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="ocr-split-span")
+
+    assert [span.text for span in document.nodes[0].spans] == [
+        "Index Terms",
+        "---Multimodal, Token Pruning, Compression",
+    ]
+    assert document.nodes[0].metadata["noisy_style_span_repaired"] is True
+
+
+def test_short_trailing_style_noise_is_dropped_after_aligned_text():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "Our work is here to address the challenge.",
+                "layout_layer": "main_text_flow",
+                "layout_role": "body_text",
+                "style_spans": [
+                    {"text": "Our work is here to address the challenge.", "font_name": "Times-Roman", "font_size": 10},
+                    {"text": "i", "font_name": "Times-Italic", "font_size": 10, "is_italic": True},
+                ],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="ocr-trailing-span")
+
+    assert [span.text for span in document.nodes[0].spans] == ["Our work is here to address the challenge."]
+    assert document.nodes[0].metadata["noisy_style_span_repaired"] is True
+
+
+def test_node_text_trailing_split_letter_noise_is_removed():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "Our work is here to address the challenge. i",
+                "layout_layer": "main_text_flow",
+                "layout_role": "body_text",
+                "style_spans": [
+                    {"text": "Our work is here to address the challenge.", "font_name": "Times-Roman", "font_size": 10},
+                    {"text": "i", "font_name": "Times-Italic", "font_size": 10, "is_italic": True},
+                ],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="ocr-node-tail")
+
+    assert document.nodes[0].text == "Our work is here to address the challenge."
+    assert [span.text for span in document.nodes[0].spans] == ["Our work is here to address the challenge."]
+    assert document.nodes[0].metadata["ocr_text_repairs"][0]["kind"] == "node_split_letter_ocr_suffix"
+
+
+def test_punctuation_split_letter_prefix_before_numbered_item_is_removed_from_span():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": "II. MNIST. This dataset contains 28 × 28 grayscale images.",
+                "layout_layer": "main_text_flow",
+                "layout_role": "list_item",
+                "style_spans": [
+                    {"text": ",,", "font_name": "cmmi10", "font_size": 10, "is_inline_math": True},
+                    {"text": ") p y p p y p g () II.", "font_name": "Times-Roman", "font_size": 10},
+                    {"text": "MNIST", "font_name": "Times-Bold", "font_size": 10, "is_bold": True},
+                    {"text": ". This dataset contains 28 × 28 grayscale images.", "font_name": "Times-Roman", "font_size": 10},
+                ],
+            }
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="punct-split-prefix")
+
+    assert [span.text for span in document.nodes[0].spans] == [
+        "II.",
+        "MNIST",
+        ". This dataset contains 28 × 28 grayscale images.",
+    ]
+    assert document.nodes[0].metadata["noisy_style_span_repaired"] is True
+
+
+def test_style_span_uses_clean_node_text_as_anchor_to_strip_ocr_formula_debris():
+    payload = {
+        "schema_version": "content_v7_columnfix_listmarkers_with_styles",
+        "items": [
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 0,
+                "bbox": [100, 100, 450, 180],
+                "text": (
+                    "Another issue to consider, which is easily avoided in the construction, "
+                    "is that the states are deterministic."
+                ),
+                "layout_layer": "main_text_flow",
+                "layout_role": "body_text",
+                "style_spans": [
+                    {
+                        "text": (
+                            ", pp y g p Another issue to consider, which is easily avoided "
+                            "in the construction, is that the states are deterministic."
+                        ),
+                        "font_name": "Times-Roman",
+                        "font_size": 10,
+                    }
+                ],
+            },
+            {
+                "type": "paragraph",
+                "page_idx": 0,
+                "global_order": 1,
+                "bbox": [100, 200, 450, 280],
+                "text": "We can have the same distinction for the problem of transducer construction.",
+                "layout_layer": "main_text_flow",
+                "layout_role": "body_text",
+                "style_spans": [
+                    {"text": ") g,(", "font_name": "cmmi10", "font_size": 10, "is_inline_math": True},
+                    {
+                        "text": ") g We can have the same distinction for the problem of transducer construction.",
+                        "font_name": "Times-Roman",
+                        "font_size": 10,
+                    },
+                ],
+            },
+        ],
+    }
+
+    document = convert_v7_payload_to_document_ir(payload, doc_id="ocr-formula-prefix")
+
+    assert document.nodes[0].spans[0].text.startswith("Another issue")
+    assert document.nodes[0].spans[0].text == document.nodes[0].text
+    assert [span.text for span in document.nodes[1].spans] == [
+        "We can have the same distinction for the problem of transducer construction."
+    ]
+    assert document.nodes[0].metadata["noisy_style_span_repaired"] is True
+    assert document.nodes[1].metadata["noisy_style_span_repaired"] is True

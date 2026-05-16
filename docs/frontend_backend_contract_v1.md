@@ -162,6 +162,7 @@ Canonical renderer:
 
 ```text
 src/generation/ir_renderer.py
+src/generation/ir_renderers/
 ```
 
 Legacy renderer:
@@ -171,6 +172,27 @@ src/generation/latex_renderer.py
 ```
 
 The legacy renderer is compatibility-only. New behavior should go into the IR renderer and its helpers.
+
+`OriginalLikeIRLatexRenderer` remains the production entrypoint, but role and
+block rendering is now dispatched through a registry:
+
+```text
+OriginalLikeIRLatexRenderer
+  -> IRRendererRegistry
+    -> FrontMatterRenderer
+    -> HeadingRenderer
+    -> TextRenderer
+    -> MathRenderer / AlgorithmCodeRenderer
+    -> FigureRenderer
+    -> TableRenderer
+    -> ListRenderer
+    -> ReferenceRenderer
+    -> NoteRenderer
+```
+
+The registry layer is intentionally behavior-preserving: mature helper logic can
+still live on `OriginalLikeIRLatexRenderer`, while new feature work should be
+implemented in the specialized renderer for its `RenderRole` / `BlockType`.
 
 ## Invariants
 

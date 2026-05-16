@@ -107,6 +107,10 @@ The current canonical generator is the IR renderer:
 
 ```text
 OriginalLikeIRLatexRenderer
+  -> IRRendererRegistry
+    -> FrontMatterRenderer / HeadingRenderer / TextRenderer
+    -> MathRenderer / FigureRenderer / TableRenderer
+    -> ListRenderer / ReferenceRenderer / NoteRenderer
 ```
 
 It supports:

@@ -566,6 +566,7 @@ def fix_columnar_reading_order(
         ordered_nodes.append(node)
     _annotate_float_groups(ordered_nodes)
     _annotate_float_caption_groups(ordered_nodes)
+    _annotate_adjacent_figure_fragments(ordered_nodes)
     return ordered_nodes
 
 
@@ -1098,6 +1099,179 @@ def _annotate_float_caption_groups(nodes: list[dict[str, Any]]) -> None:
             caption_node["image_group_id"] = group_id
             caption_node["image_group_caption"] = caption_text
             caption_node["image_group_bbox"] = union
+
+
+def _annotate_adjacent_figure_fragments(nodes: list[dict[str, Any]]) -> None:
+    figure_indexes = [
+        index
+        for index, node in enumerate(nodes)
+        if _is_groupable_figure_node(node)
+    ]
+    if len(figure_indexes) < 2:
+        return
+    parent = {index: index for index in figure_indexes}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for offset, left_index in enumerate(figure_indexes):
+        for right_index in figure_indexes[offset + 1 :]:
+            if _should_group_adjacent_figure_nodes(nodes[left_index], nodes[right_index], nodes):
+                union(left_index, right_index)
+
+    components: dict[int, list[int]] = {}
+    for index in figure_indexes:
+        components.setdefault(find(index), []).append(index)
+    for component_number, indexes in enumerate(components.values()):
+        if len(indexes) < 2:
+            continue
+        ordered = sorted(indexes, key=lambda index: _figure_fragment_sort_key(nodes[index], index))
+        boxes = [_first_bbox(nodes[index].get("bbox")) for index in ordered]
+        boxes = [box for box in boxes if box is not None]
+        if not boxes:
+            continue
+        primary = _figure_fragment_primary(nodes, ordered)
+        page_idx = _numeric_or_none(nodes[primary].get("page_idx")) or 0
+        existing_group_id = next((str(nodes[index].get("figure_group_id")) for index in ordered if nodes[index].get("figure_group_id")), None)
+        group_id = existing_group_id or f"figure_group_p{page_idx:04d}_adj_{component_number:04d}"
+        union_box = [
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        ]
+        caption = _figure_fragment_caption(nodes[primary])
+        member_ids = [str(nodes[index].get("global_order", nodes[index].get("original_index", index))) for index in ordered]
+        for member_index, index in enumerate(ordered):
+            nodes[index].update(
+                {
+                    "figure_group_id": group_id,
+                    "image_group_id": group_id,
+                    "figure_group_member_ids": member_ids,
+                    "image_group_member_ids": member_ids,
+                    "figure_group_member_index": member_index,
+                    "image_group_member_index": member_index,
+                    "figure_group_size": len(ordered),
+                    "image_group_size": len(ordered),
+                    "figure_group_primary": index == primary,
+                    "image_group_primary": index == primary,
+                    "figure_group_bbox": union_box,
+                    "image_group_bbox": union_box,
+                    "figure_group_caption": caption,
+                    "image_group_caption": caption,
+                    "figure_group_render_strategy": "union_pdf_crop",
+                    "image_group_render_strategy": "union_pdf_crop",
+                }
+            )
+
+
+def _is_groupable_figure_node(node: dict[str, Any]) -> bool:
+    if str(node.get("layout_role") or "").casefold().endswith("_caption"):
+        return False
+    return infer_layout_layer(node) == LAYOUT_LAYER_FLOAT and _layout_raw_type(node) in {"figure", "image", "chart"}
+
+
+def _should_group_adjacent_figure_nodes(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    page_nodes: list[dict[str, Any]],
+) -> bool:
+    left_page = _numeric_or_none(left.get("page_idx")) or 0
+    right_page = _numeric_or_none(right.get("page_idx")) or 0
+    if left_page != right_page:
+        return False
+    left_group = str(left.get("figure_group_id") or left.get("image_group_id") or "")
+    right_group = str(right.get("figure_group_id") or right.get("image_group_id") or "")
+    if left_group and right_group and left_group != right_group:
+        return False
+    left_box = _first_bbox(left.get("bbox"))
+    right_box = _first_bbox(right.get("bbox"))
+    if left_box is None or right_box is None:
+        return False
+    page_width, page_height = _page_extent_for_items(page_nodes, page_idx=left_page)
+    y_overlap = _y_overlap_ratio(left_box, right_box)
+    x_overlap = _x_overlap_ratio(left_box, right_box)
+    x_gap = max(0.0, max(left_box[0], right_box[0]) - min(left_box[2], right_box[2]))
+    y_gap = max(0.0, max(left_box[1], right_box[1]) - min(left_box[3], right_box[3]))
+    same_row_close = y_overlap >= 0.12 and x_gap <= 0.18 * max(page_width, 1.0)
+    stacked_close = x_overlap >= 0.18 and y_gap <= 0.10 * max(page_height, 1.0)
+    if not (same_row_close or stacked_close):
+        return False
+    left_caption = _figure_fragment_caption_identity(left)
+    right_caption = _figure_fragment_caption_identity(right)
+    if left_caption and right_caption:
+        return left_caption == right_caption
+    if left_caption or right_caption:
+        return True
+    order_gap = abs((_numeric_or_none(left.get("global_order")) or 0) - (_numeric_or_none(right.get("global_order")) or 0))
+    return same_row_close and order_gap <= 6
+
+
+FIGURE_FRAGMENT_LABEL_RE = re.compile(r"\b(?:fig\.?|figure)\s*\.?\s*([A-Za-z]?\d+(?:\.\d+)*)", re.IGNORECASE)
+
+
+def _figure_fragment_caption_identity(node: dict[str, Any]) -> tuple[str, str] | None:
+    text = _figure_fragment_caption(node)
+    if not text:
+        return None
+    label_match = FIGURE_FRAGMENT_LABEL_RE.search(text)
+    if label_match:
+        return ("label", label_match.group(1).casefold())
+    cleaned = re.sub(r"[^a-z0-9]+", "", text.casefold())
+    if len(cleaned) >= 10 and cleaned not in {"figure", "image", "fig"}:
+        return ("text", cleaned)
+    return None
+
+
+def _figure_fragment_caption(node: dict[str, Any]) -> str:
+    for key in ("figure_group_caption", "image_group_caption", "figure_caption", "image_caption", "caption"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    return _float_caption_text(node)
+
+
+def _figure_fragment_primary(nodes: list[dict[str, Any]], indexes: list[int]) -> int:
+    captioned = [index for index in indexes if _figure_fragment_caption_identity(nodes[index])]
+    if captioned:
+        return min(captioned, key=lambda index: _figure_fragment_sort_key(nodes[index], index))
+    return min(indexes, key=lambda index: _figure_fragment_sort_key(nodes[index], index))
+
+
+def _figure_fragment_sort_key(node: dict[str, Any], fallback: int) -> tuple[int, float, float, int]:
+    member_index = _numeric_or_none(node.get("figure_group_member_index") or node.get("image_group_member_index"))
+    box = _first_bbox(node.get("bbox")) or (0.0, 0.0, 0.0, 0.0)
+    if member_index is not None:
+        return (0, float(member_index), box[0], fallback)
+    return (1, box[1], box[0], fallback)
+
+
+def _page_extent_for_items(nodes: list[dict[str, Any]], *, page_idx: int) -> tuple[float, float]:
+    boxes = [
+        box
+        for node in nodes
+        if (_numeric_or_none(node.get("page_idx")) or 0) == page_idx
+        for box in [_first_bbox(node.get("bbox"))]
+        if box is not None
+    ]
+    if not boxes:
+        return 1000.0, 1000.0
+    return max(max(box[2] for box in boxes), 1000.0), max(max(box[3] for box in boxes), 1000.0)
+
+
+def _y_overlap_ratio(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    intersection = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    min_height = max(1.0, min(left[3] - left[1], right[3] - right[1]))
+    return intersection / min_height
 
 
 def _nearest_float_for_caption(nodes: list[dict[str, Any]], caption_index: int, *, caption_kind: str) -> int | None:

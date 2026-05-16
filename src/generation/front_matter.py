@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 
 from src.generation.latex_renderer import escape_latex, render_text_with_inline_latex
-from src.ir import BBox, DocumentNode, StyleProfile, StyleSpan
+from src.ir import BBox, BlockType, DocumentNode, StyleProfile, StyleSpan
 
 
 EMAIL_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.[A-Za-z]{2,}")
@@ -53,10 +53,11 @@ def render_document_title_original_like(
     if not value:
         return ""
     font_size = _front_matter_font_size(source_nodes, style, multiplier=1.65, minimum=14.0)
+    line_height = font_size * 1.28
     return "\n".join(
         [
             r"\begin{center}",
-            rf"{{\fontsize{{{font_size:.2f}pt}}{{{(font_size * 1.15):.2f}pt}}\selectfont\bfseries {render_text_with_inline_latex(value)}}}",
+            rf"{{\fontsize{{{font_size:.2f}pt}}{{{line_height:.2f}pt}}\selectfont\bfseries\begin{{minipage}}{{0.94\textwidth}}\centering {render_text_with_inline_latex(value)}\par\end{{minipage}}}}",
             r"\end{center}",
         ]
     )
@@ -67,11 +68,12 @@ def render_author_block_original_like(
     source_nodes: list[DocumentNode],
     style: StyleProfile | None = None,
 ) -> str:
-    grid = _render_author_grid(source_nodes, style)
+    author_nodes = [node for node in source_nodes if _classify_node_as_author_box(node)]
+    grid = _render_author_grid(author_nodes, style)
     if grid:
         return grid
 
-    lines = author_lines_from_nodes(source_nodes)
+    lines = author_lines_from_nodes(author_nodes)
     if not lines:
         lines = author_lines_from_text(text)
     if not lines:
@@ -117,8 +119,12 @@ def _render_author_grid(source_nodes: list[DocumentNode], style: StyleProfile | 
 
 
 def _classify_node_as_author_box(node: DocumentNode) -> bool:
+    if node.node_type == BlockType.TITLE:
+        return False
     layer = str(node.metadata.get("layout_layer") or "").casefold()
     role = str(node.metadata.get("layout_role") or "").casefold()
+    if role in {"title", "document_title", "paper_title"}:
+        return False
     if layer == "metadata_layer" and role in {"affiliation", "author", "authors", "date", "email", "correspondence"}:
         return True
     return _classify_author_line(node.text) in {"author", "affiliation", "email", "correspondence"}

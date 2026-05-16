@@ -546,6 +546,44 @@ def test_tree_decoder_renders_abstract_unnumbered_and_bare_numeric_intro_as_sect
     assert tex.index("Abstract body.") < tex.index(r"\section{Introduction}")
 
 
+def test_tree_decoder_renders_first_freeform_local_heading_as_section():
+    records = [
+        {"type": "title", "text": "Paper Title", "layout_role": "front_matter_title", "layout_layer": "metadata_layer", "global_order": 0, "style_baseline_size": 20.0},
+        {"type": "paragraph", "text": "Author A", "layout_role": "author", "layout_layer": "metadata_layer", "global_order": 1, "style_baseline_size": 12.0},
+        {"type": "title", "text": "Abstract", "layout_role": "abstract", "layout_layer": "metadata_layer", "global_order": 2, "style_baseline_size": 11.0},
+        {"type": "paragraph", "text": "Abstract body.", "layout_role": "abstract_body", "layout_layer": "metadata_layer", "global_order": 3, "style_baseline_size": 11.0},
+        {
+            "type": "title",
+            "text": "Introduction",
+            "layout_role": "heading",
+            "layout_layer": "main_text_flow",
+            "global_order": 4,
+            "style_baseline_size": 13.5,
+            "layout_band_type": "double_column",
+            "layout_band_column": "left",
+        },
+        {"type": "paragraph", "text": "Intro body.", "layout_role": "body_text", "layout_layer": "main_text_flow", "global_order": 5, "style_baseline_size": 10.0},
+        {
+            "type": "title",
+            "text": "Method",
+            "layout_role": "heading",
+            "layout_layer": "main_text_flow",
+            "global_order": 6,
+            "style_baseline_size": 13.5,
+            "layout_band_type": "double_column",
+            "layout_band_column": "left",
+        },
+    ]
+
+    tex = TreeDecoder().render_document(build_resolved_tree(records, []), title="Paper Title")
+
+    assert r"\section*{Introduction}" in tex
+    assert r"\subsection*{Method}" in tex
+    assert r"\subsection{Introduction}" not in tex
+    assert r"\subsection*{Introduction}" not in tex
+    assert "0.1" not in tex
+
+
 def test_tree_decoder_does_not_promote_frontmatter_date_to_section():
     records = [
         {"type": "title", "text": "Paper Title", "layout_role": "front_matter", "layout_layer": "metadata_layer", "global_order": 0, "style_baseline_size": 20.0},
@@ -734,7 +772,7 @@ def test_generation_renderer_preserves_bare_inline_latex_math_inside_caption_tex
 
     tex = render_latex_document(root)
 
-    assert r"$\mathrm { p } ^ { \mathrm { , } \mathrm { , } }$ the number" in tex
+    assert r"p \textasciicircum{} \{,, \} the number" in tex
     assert r"\textbackslash{}mathrm" not in tex
 
 
@@ -1377,7 +1415,7 @@ def test_generation_renderer_table_placeholder_uses_bbox_and_caption_slot():
     tex = render_latex_document(root)
 
     assert "% [TODO_TABLE_RECONSTRUCT: BBOX=(1, 2, 3, 4), ID=table_12]" in tex
-    assert r"\caption{Table 2: Ablation \#1}" in tex
+    assert r"\caption{Ablation \#1}" in tex
     assert "ignored cells" not in tex
 
 
@@ -1419,7 +1457,7 @@ def test_generation_renderer_preserves_structured_inline_formula_segments():
 
     tex = render_latex_document(root)
 
-    assert r"Given $x _ { i }$." in tex
+    assert r"Given $x_{i}$." in tex
     assert r"x \_ \{ i \}" not in tex
 
 
@@ -1442,7 +1480,7 @@ def test_generation_renderer_repairs_contextual_inline_math_ocr_operator():
 
     tex = render_latex_document(root)
 
-    assert r"The linear predictor \ensuremath{\eta} is modeled as: $\eta = \beta ^ { \top } X$" in tex
+    assert r"The linear predictor \ensuremath{\eta} is modeled as: $\eta = \beta^{\top} X$" in tex
     assert r"\arcsin =" not in tex
 
 

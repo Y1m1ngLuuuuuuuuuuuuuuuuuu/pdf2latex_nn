@@ -77,17 +77,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--render-crops",
+        dest="render_table_crops",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate table and figure crop images in each QA output assets/ "
+            "directory. Enabled by default so visual QA PDFs include all "
+            "recoverable floats; use --no-render-crops to disable."
+        ),
+    )
+    parser.add_argument(
         "--render-table-crops",
-        action="store_true",
-        help="Generate table and figure crop images in each QA output assets/ directory. Disabled by default to save disk.",
+        dest="render_table_crops",
+        action=argparse.BooleanOptionalAction,
+        help=argparse.SUPPRESS,
     )
     return parser
 
 
 def main() -> int:
+    args = build_arg_parser().parse_args()
     import torch
 
-    args = build_arg_parser().parse_args()
     if args.clean_output_dir and args.output_dir.exists():
         shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +162,7 @@ def main() -> int:
         "require_merge_argmax": args.require_merge_argmax,
         "require_parent_argmax": args.require_parent_argmax,
         "renderer": args.renderer,
+        "render_crops": args.render_table_crops,
         "documents": summary,
     }
     write_json(args.output_dir / "qa_manifest.json", payload)
@@ -530,9 +543,13 @@ def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> Ren
     if not metadata_nodes:
         return tree
 
-    title_nodes = [node for node in metadata_nodes if _document_node_is_title(node)]
-    author_nodes = [node for node in metadata_nodes if _document_node_is_author_like(node)]
     abstract_label = next((node for node in metadata_nodes if _document_node_is_abstract_label(node)), None)
+    title_nodes = [node for node in metadata_nodes if _document_node_is_title(node)]
+    author_nodes = [
+        node
+        for node in metadata_nodes
+        if _document_node_is_author_like(node) or _metadata_front_matter_before_abstract(node, abstract_label)
+    ]
     abstract_body_nodes = _front_matter_abstract_body_nodes(metadata_nodes, abstract_label=abstract_label)
 
     injected: list[RenderTreeNode] = []
@@ -635,6 +652,26 @@ def _document_node_is_title(node: DocumentNode) -> bool:
 def _document_node_is_author_like(node: DocumentNode) -> bool:
     role = str(node.metadata.get("layout_role") or "").casefold()
     return role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
+
+
+def _metadata_front_matter_before_abstract(node: DocumentNode, abstract_label: DocumentNode | None) -> bool:
+    """Treat unclassified pre-abstract front matter as author/affiliation grid.
+
+    MinerU sometimes labels a complete visual author cell as generic
+    ``front_matter`` instead of ``author``/``affiliation``.  If it appears after
+    the document title but before the abstract label, it belongs to the front
+    matter grid, not the abstract body.
+    """
+
+    if abstract_label is None:
+        return False
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    layer = str(node.metadata.get("layout_layer") or "").casefold()
+    if layer != "metadata_layer" or role not in {"front_matter", ""}:
+        return False
+    if node.reading_index >= abstract_label.reading_index:
+        return False
+    return bool((node.text or "").strip())
 
 
 def _document_node_is_abstract_label(node: DocumentNode) -> bool:

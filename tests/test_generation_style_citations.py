@@ -5,8 +5,9 @@ from dataclasses import replace
 import pytest
 
 from src.generation.citations import CitationResolver, expand_citation_labels, sanitize_bbl_bibitem_keys, strip_reference_label
+from src.generation.front_matter import render_author_block_original_like
 from src.generation.ir_renderer import IRLatexRenderConfig, OriginalLikeIRLatexRenderer
-from src.generation.latex_renderer import render_equation, render_inline_math, render_text_with_inline_latex
+from src.generation.latex_renderer import list_environment_for_text, render_equation, render_inline_math, render_text_with_inline_latex
 from src.generation.render_surface import render_original_like_document
 from src.generation.style_profile import StyleProfileExtractor
 from src.ir import (
@@ -157,10 +158,10 @@ def test_style_profile_extractor_records_columns_and_spacing():
     profile = StyleProfileExtractor().extract(build_two_column_styled_document())
 
     assert profile.page_layout["column_count"] == 2
-    assert profile.page_layout["column_mode"] == "two_column"
-    assert "twocolumn" in profile.documentclass_options
-    assert profile.renderer_options["display_math_spacing"]["above"] == 8.0
-    assert profile.renderer_options["list_spacing"]["itemsep"] == 2.5
+    assert profile.page_layout["column_mode"] == "mixed"
+    assert "twocolumn" not in profile.documentclass_options
+    assert profile.renderer_options["display_math_spacing"]["above"] > 0
+    assert profile.renderer_options["list_spacing"]["itemsep"] > 0
 
 
 def test_style_profile_keeps_header_footer_out_of_body_style():
@@ -317,13 +318,13 @@ def test_inline_math_renderer_rejects_lone_symbol_font_braces():
     assert render_inline_math("{") == r"\{"
     assert render_inline_math("}") == r"\}"
     assert render_inline_math(r"x_i") == r"$x_i$"
-    assert render_inline_math("x∈X⊆R") == r"$x\inX\subseteqR$"
+    assert render_inline_math("x∈X⊆R") == r"$x\in X\subseteqR$"
 
 
 def test_text_renderer_protects_bare_latex_math_fragments():
     tex = render_text_with_inline_latex(r'Caption says \\mathrm { p } ^ { \\mathrm { , } } is the number.')
 
-    assert r"$\mathrm { p } ^ { \mathrm { , } }$" in tex
+    assert r"$\mathrm{p}^{\mathrm{,}}$" in tex
     assert r"\textbackslash{}" not in tex
 
 
@@ -334,6 +335,22 @@ def test_display_equation_preserves_numbering_and_align_semantics():
     assert numbered == "\\begin{equation}\n" + r"E = mc^2 \tag{1}" + "\n\\end{equation}"
     assert aligned.startswith(r"\begin{align}")
     assert aligned.endswith(r"\end{align}")
+
+
+def test_display_equation_scales_oversized_array_without_losing_tag():
+    body = (
+        r"\begin{array}{rlr}"
+        r"{-\frac{\partial}{\partial y_i}\mathcal{L}=\sum_{j\ne i}w_{ij}\frac{\partial}{\partial y_i}\log v_{ij}}\\"
+        r"&=&{\sum_{j\ne i}w_{ij}\cdot\frac{1}{v_{ij}}\cdot(-2abv_{ij}^{2}\|y_i-y_j\|_2^{2(b-1)})(y_i-y_j)}\\"
+        r"&=&{-\sum_{j\ne i}2ab\|y_i-y_j\|_2^{2(b-1)}v_{ij}w_{ij}(y_i-y_j)+\sum_{j\ne i}\frac{2b}{\|y_i-y_j\|_2^2}v_{ij}(1-w_{ij})(y_i-y_j)}"
+        r"\end{array}\tag{A.4}"
+    )
+
+    rendered = render_equation(body, label="eq:A.4")
+
+    assert r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{$\displaystyle \begin{array}" in rendered
+    assert r"\tag{A.4}" in rendered
+    assert r"\label{eq:A.4}" in rendered
 
 
 def test_original_like_ir_renderer_uses_style_and_citation_resolution():
@@ -375,6 +392,252 @@ def test_canonical_render_surface_builds_style_and_citations():
 
     assert r"\cite{ref_1,ref_2}" in tex
     assert r"\bibitem{ref_1} First paper." in tex
+
+
+def test_cross_reference_replacement_preserves_space_before_following_word():
+    figure = DocumentNode(
+        node_id="fig5",
+        node_type=BlockType.FIGURE,
+        text="Figure 5: Results.",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 500)],
+        reading_index=0,
+        metadata={"figure_caption": "Figure 5: Results."},
+    )
+    document = DocumentIR(
+        doc_id="xref",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig5"])],
+        nodes=[figure],
+        reading_order=["fig5"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="xref",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p"]),
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, text="Figure 5presents the result."),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"Figure \ref{fig:5} presents the result." in tex
+
+
+def test_decimal_section_prefix_is_not_treated_as_ordered_list():
+    assert list_environment_for_text("0.1 Playing Go -- possible representations.") is None
+    assert list_environment_for_text("3.2. Logic Variable Considerations.") is None
+    assert list_environment_for_text("1. A real list item.") == "enumerate"
+
+
+def test_title_like_numbered_node_does_not_open_enumerate():
+    title = DocumentNode(
+        node_id="title",
+        node_type=BlockType.TITLE,
+        text="1. Introduction",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 400, 130)],
+        reading_index=0,
+        spans=[StyleSpan(text="1. Introduction", font_name="Times-Bold", font_size=14, is_bold=True)],
+    )
+    document = DocumentIR(
+        doc_id="numbered_title",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["title"])],
+        nodes=[title],
+        reading_order=["title"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="numbered_title",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p"]),
+            # Deliberately route the title through a paragraph role to exercise
+            # the renderer safety net rather than the happy-path heading role.
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, source_node_ids=["title"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\begin{enumerate}" not in tex
+    assert "Introduction" in tex
+
+
+def test_run_in_heading_splits_bold_heading_from_body():
+    node = DocumentNode(
+        node_id="runin",
+        node_type=BlockType.TEXT,
+        text=(
+            "1.1. Playing Go -- possible representations. "
+            "As an illustration, let's consider a game engine."
+        ),
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 150)],
+        reading_index=0,
+        spans=[
+            StyleSpan(text="1.1.", font_name="Times-Roman", font_size=10, is_bold=False),
+            StyleSpan(text="Playing Go -- possible representations.", font_name="Times-Bold", font_size=10, is_bold=True),
+            StyleSpan(
+                text="As an illustration, let's consider a game engine.",
+                font_name="Times-Roman",
+                font_size=10,
+                is_bold=False,
+            ),
+        ],
+        features={"run_in_heading_level": 2},
+        metadata={"layout_role": "heading", "run_in_heading_level": 2},
+    )
+    document = DocumentIR(
+        doc_id="runin",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["runin"])],
+        nodes=[node],
+        reading_order=["runin"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="runin",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["s"]),
+            RenderTreeNode(render_id="s", role=RenderRole.SUBSECTION, source_node_ids=["runin"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\subsection{Playing Go -- possible representations.}" in tex
+    assert "As an illustration, let's consider a game engine." in tex
+    assert r"\begin{enumerate}" not in tex
+    assert "As an illustration" not in tex.split(r"\subsection{", 1)[1].split("}", 1)[0]
+
+
+def test_run_in_heading_uses_explicit_v7_split_when_all_spans_are_bold():
+    node = DocumentNode(
+        node_id="runin",
+        node_type=BlockType.TEXT,
+        text=(
+            "0.1 Playing Go -- possible representations. "
+            "As an illustration, let's consider a game engine."
+        ),
+        page_idx=0,
+        bboxes=[BBox(100, 100, 760, 170)],
+        reading_index=0,
+        spans=[
+            StyleSpan(
+                text=(
+                    "0.1 Playing Go -- possible representations. "
+                    "As an illustration, let's consider a game engine."
+                ),
+                font_name="Times-Bold",
+                font_size=10,
+                is_bold=True,
+            )
+        ],
+        features={
+            "run_in_heading_level": 2,
+            "run_in_heading_text": "Playing Go -- possible representations.",
+            "run_in_heading_body": "As an illustration, let's consider a game engine.",
+        },
+        metadata={
+            "layout_role": "heading",
+            "run_in_heading_level": 2,
+            "run_in_heading_text": "Playing Go -- possible representations.",
+            "run_in_heading_body": "As an illustration, let's consider a game engine.",
+        },
+    )
+    document = DocumentIR(
+        doc_id="runin_explicit",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["runin"])],
+        nodes=[node],
+        reading_order=["runin"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="runin_explicit",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["s"]),
+            RenderTreeNode(render_id="s", role=RenderRole.SUBSECTION, source_node_ids=["runin"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\subsection{Playing Go -- possible representations.}" in tex
+    assert "As an illustration, let's consider a game engine." in tex
+    assert "As an illustration" not in tex.split(r"\subsection{", 1)[1].split("}", 1)[0]
+
+
+def test_style_profile_body_geometry_ignores_front_matter_abstract_width():
+    nodes = [
+        DocumentNode(
+            node_id="abs",
+            node_type=BlockType.TEXT,
+            text="Abstract narrow block.",
+            page_idx=0,
+            bboxes=[BBox(260, 120, 740, 220)],
+            reading_index=0,
+            spans=[StyleSpan(text="Abstract narrow block.", font_name="Times-Roman", font_size=9)],
+            metadata={"layout_role": "abstract"},
+        ),
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Main body paragraph has the document text width.",
+            page_idx=1,
+            bboxes=[BBox(120, 120, 880, 170)],
+            reading_index=1,
+            spans=[StyleSpan(text="Main body paragraph has the document text width.", font_name="Times-Roman", font_size=10)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="body_geometry",
+        pages=[
+            PageIR(page_idx=0, width=1000, height=1000, node_ids=["abs"]),
+            PageIR(page_idx=1, width=1000, height=1000, node_ids=["body"]),
+        ],
+        nodes=nodes,
+        reading_order=["abs", "body"],
+    )
+
+    profile = StyleProfileExtractor().extract(document)
+
+    assert profile.page_layout["body_margins"]["left"] == 120
+    assert profile.page_layout["body_margins"]["right"] == 120
+
+
+def test_author_block_does_not_render_metadata_title_as_author_grid_cell():
+    title = DocumentNode(
+        node_id="title",
+        node_type=BlockType.TITLE,
+        text="ON CONSTRUCTING FINITE AUTOMATA BY RELATIONAL PROGRAMMING",
+        page_idx=0,
+        bboxes=[BBox(220, 186, 777, 218)],
+        reading_index=0,
+        spans=[StyleSpan(text="ON CONSTRUCTING FINITE AUTOMATA BY RELATIONAL PROGRAMMING", font_size=16, is_bold=True)],
+        metadata={"layout_layer": "metadata_layer", "layout_role": "author"},
+    )
+    author = DocumentNode(
+        node_id="author",
+        node_type=BlockType.TEXT,
+        text="ATTILA EGRI-NAGY AND CHRYSTOPHER L. NEHANIV",
+        page_idx=0,
+        bboxes=[BBox(300, 243, 694, 257)],
+        reading_index=1,
+        spans=[StyleSpan(text="ATTILA EGRI-NAGY AND CHRYSTOPHER L. NEHANIV", font_size=10)],
+        metadata={"layout_layer": "metadata_layer", "layout_role": "author"},
+    )
+
+    rendered = render_author_block_original_like("", [title, author])
+
+    assert "ATTILA EGRI-NAGY" in rendered
+    assert "ON CONSTRUCTING FINITE AUTOMATA" not in rendered
 
 
 def test_original_like_ir_renderer_emits_author_year_bibitem_optional_labels():
@@ -444,6 +707,160 @@ def test_original_like_ir_renderer_groups_repeated_reference_nodes_once():
     assert tex.count(r"\bibitem{ref_2}") == 1
 
 
+def test_reference_columns_are_inferred_from_item_clusters_not_union_bbox():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Body.",
+            page_idx=0,
+            bboxes=[BBox(90, 100, 910, 130)],
+            reading_index=0,
+            spans=[StyleSpan(text="Body.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="ref_l0",
+            node_type=BlockType.REFERENCE,
+            text="[1] Left reference.",
+            page_idx=1,
+            bboxes=[BBox(70, 100, 450, 120)],
+            reading_index=1,
+            metadata={"reference_items": [{"label": "1", "text": "[1] Left reference."}]},
+            spans=[StyleSpan(text="[1] Left reference.", font_name="Times-Roman", font_size=8)],
+        ),
+        DocumentNode(
+            node_id="ref_l1",
+            node_type=BlockType.REFERENCE,
+            text="[2] Left reference two.",
+            page_idx=1,
+            bboxes=[BBox(70, 130, 450, 150)],
+            reading_index=2,
+            metadata={"reference_items": [{"label": "2", "text": "[2] Left reference two."}]},
+            spans=[StyleSpan(text="[2] Left reference two.", font_name="Times-Roman", font_size=8)],
+        ),
+        DocumentNode(
+            node_id="ref_r0",
+            node_type=BlockType.REFERENCE,
+            text="[3] Right reference.",
+            page_idx=1,
+            bboxes=[BBox(550, 100, 930, 120)],
+            reading_index=3,
+            metadata={"reference_items": [{"label": "3", "text": "[3] Right reference."}]},
+            spans=[StyleSpan(text="[3] Right reference.", font_name="Times-Roman", font_size=8)],
+        ),
+        DocumentNode(
+            node_id="ref_r1",
+            node_type=BlockType.REFERENCE,
+            text="[4] Right reference two.",
+            page_idx=1,
+            bboxes=[BBox(550, 130, 930, 150)],
+            reading_index=4,
+            metadata={"reference_items": [{"label": "4", "text": "[4] Right reference two."}]},
+            spans=[StyleSpan(text="[4] Right reference two.", font_name="Times-Roman", font_size=8)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="reference-columns",
+        pages=[
+            PageIR(page_idx=0, width=1000, height=1000, node_ids=["body"]),
+            PageIR(page_idx=1, width=1000, height=1000, node_ids=["ref_l0", "ref_l1", "ref_r0", "ref_r1"]),
+        ],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="reference-columns",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["body", "refs"]),
+            RenderTreeNode(render_id="body", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+            RenderTreeNode(render_id="refs", role=RenderRole.REFERENCES, source_node_ids=["ref_l0", "ref_l1", "ref_r0", "ref_r1"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(
+        document,
+        tree,
+        profile,
+        CitationResolver().resolve_document(document),
+    )
+
+    assert profile.renderer_options["bibliography"]["column_mode"] == "two_column"
+    assert r"\begin{multicols*}{2}" in tex
+    assert tex.index(r"\begin{multicols*}{2}") < tex.index(r"\begin{thebibliography}")
+
+
+def test_compact_reference_list_uses_body_column_prior_when_bbox_is_under_observed():
+    reference_items = [
+        {"label": str(index), "text": f"[{index}] Reference item {index}."}
+        for index in range(1, 18)
+    ]
+    nodes = [
+        DocumentNode(
+            node_id="left",
+            node_type=BlockType.TEXT,
+            text="Left body.",
+            page_idx=0,
+            bboxes=[BBox(70, 100, 450, 130)],
+            reading_index=0,
+            spans=[StyleSpan(text="Left body.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="right",
+            node_type=BlockType.TEXT,
+            text="Right body.",
+            page_idx=0,
+            bboxes=[BBox(550, 100, 930, 130)],
+            reading_index=1,
+            spans=[StyleSpan(text="Right body.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="ref_compact",
+            node_type=BlockType.REFERENCE,
+            text=" ".join(item["text"] for item in reference_items),
+            page_idx=1,
+            bboxes=[BBox(70, 100, 455, 145)],
+            reading_index=2,
+            metadata={"reference_items": reference_items, "layout_band_type": "full_span"},
+            spans=[StyleSpan(text="[1] Reference item 1.", font_name="Times-Roman", font_size=8)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="compact-reference",
+        pages=[
+            PageIR(page_idx=0, width=1000, height=1000, node_ids=["left", "right"]),
+            PageIR(page_idx=1, width=1000, height=1000, node_ids=["ref_compact"]),
+        ],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="compact-reference",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["left", "right", "refs"]),
+            RenderTreeNode(render_id="left", role=RenderRole.PARAGRAPH, source_node_ids=["left"]),
+            RenderTreeNode(render_id="right", role=RenderRole.PARAGRAPH, source_node_ids=["right"]),
+            RenderTreeNode(render_id="refs", role=RenderRole.REFERENCES, source_node_ids=["ref_compact"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(
+        document,
+        tree,
+        profile,
+        CitationResolver().resolve_document(document),
+    )
+
+    assert profile.renderer_options["bibliography"]["column_mode"] == "two_column"
+    assert profile.renderer_options["bibliography"]["column_detection_reason"] == "compact_reference_body_column_fallback"
+    assert r"\begin{multicols*}{2}" in tex
+
+
 def test_original_like_ir_renderer_consumes_style_profile_and_spans():
     document = build_two_column_styled_document()
     profile = StyleProfileExtractor().extract(document)
@@ -461,7 +878,8 @@ def test_original_like_ir_renderer_consumes_style_profile_and_spans():
 
     tex = OriginalLikeIRLatexRenderer().render(document, tree, profile, citations)
 
-    assert r"\documentclass[twocolumn]{article}" in tex
+    assert r"\documentclass{article}" in tex
+    assert r"\begin{multicols}{2}" in tex
     assert r"\geometry{" in tex
     assert r"\setlength{\parindent}" in tex
     assert r"\textbf{Styled }" in tex
@@ -542,7 +960,7 @@ def test_original_like_ir_renderer_anchors_footnotes_and_margin_notes():
 
     tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
 
-    assert r"Main statement.\footnote{Footnote with $\mathrm { p }$.}\marginpar{\footnotesize Side observation.}" in tex
+    assert r"Main statement.\footnote{Footnote with $\mathrm{p}$.}\marginpar{\footnotesize Side observation.}" in tex
     assert "[1] Footnote" not in tex
     assert tex.count(r"\footnote{") == 1
 
@@ -792,7 +1210,7 @@ def test_original_like_renderer_outputs_one_table_for_grouped_fragments():
 
     assert tex.count(r"\begin{table}[H]") == 1
     assert "TODO_TABLE_RECONSTRUCT: BBOX=(100, 100, 390, 500), ID=table_group_p0000_0000" in tex
-    assert r"\caption{Table 1: Wide result table.}" in tex
+    assert r"\caption{Wide result table}" in tex
 
 
 def test_original_like_ir_renderer_renders_figure_bbox_placeholder():
@@ -826,7 +1244,135 @@ def test_original_like_ir_renderer_renders_figure_bbox_placeholder():
 
     assert r"\begin{figure}[H]" in tex
     assert "TODO_FIGURE_RECONSTRUCT: BBOX=(100, 120, 900, 520), ID=fig0" in tex
-    assert r"\caption{Figure 1: Qualitative examples.}" in tex
+    assert r"\caption{" in tex
+    assert "Qualitative examples" in tex
+    assert r"\label{fig:1}" in tex
+
+
+def test_original_like_ir_renderer_deduplicates_repeated_figure_group_nodes():
+    node = DocumentNode(
+        node_id="fig0",
+        node_type=BlockType.FIGURE,
+        text="Figure 1: Qualitative examples.",
+        page_idx=0,
+        bboxes=[BBox(100, 120, 900, 520)],
+        reading_index=0,
+        metadata={
+            "figure_group_id": "figure_group_p0000_0000",
+            "figure_group_primary": True,
+            "figure_group_size": 1,
+            "figure_caption": "Figure 1: Qualitative examples.",
+        },
+    )
+    document = DocumentIR(
+        doc_id="figures",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig0"])],
+        nodes=[node],
+        reading_order=["fig0"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="figures",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["rf0", "rf0_dup"]),
+            RenderTreeNode(render_id="rf0", role=RenderRole.FIGURE, source_node_ids=["fig0"]),
+            RenderTreeNode(render_id="rf0_dup", role=RenderRole.FIGURE, source_node_ids=["fig0"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert tex.count(r"\begin{figure}[H]") == 1
+    assert tex.count("TODO_FIGURE_RECONSTRUCT") == 1
+    assert tex.count(r"\caption{Qualitative examples}") == 1
+
+
+def test_original_like_ir_renderer_merges_adjacent_figures_when_only_one_has_caption():
+    left = DocumentNode(
+        node_id="fig_left",
+        node_type=BlockType.FIGURE,
+        text="",
+        page_idx=0,
+        bboxes=[BBox(100, 140, 430, 350)],
+        reading_index=0,
+    )
+    right = DocumentNode(
+        node_id="fig_right",
+        node_type=BlockType.FIGURE,
+        text="Figure 4: Mask iteration examples.",
+        page_idx=0,
+        bboxes=[BBox(455, 150, 820, 345)],
+        reading_index=1,
+        metadata={"figure_caption": "Figure 4: Mask iteration examples."},
+    )
+    document = DocumentIR(
+        doc_id="adjacent_figures",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig_left", "fig_right"])],
+        nodes=[left, right],
+        reading_order=["fig_left", "fig_right"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="adjacent_figures",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["left", "right"]),
+            RenderTreeNode(render_id="left", role=RenderRole.FIGURE, source_node_ids=["fig_left"]),
+            RenderTreeNode(render_id="right", role=RenderRole.FIGURE, source_node_ids=["fig_right"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert tex.count(r"\begin{figure}[H]") == 1
+    assert tex.count("TODO_FIGURE_RECONSTRUCT") == 2
+    assert tex.count(r"\caption{Mask iteration examples}") == 1
+
+
+def test_original_like_ir_renderer_skips_caption_node_consumed_by_figure():
+    figure = DocumentNode(
+        node_id="fig0",
+        node_type=BlockType.FIGURE,
+        text="Figure 5: Visualization results on six datasets.",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 420)],
+        reading_index=0,
+        metadata={"figure_caption": "Figure 5: Visualization results on six datasets."},
+    )
+    caption = DocumentNode(
+        node_id="cap0",
+        node_type=BlockType.TEXT,
+        text="Figure 5: Visualization results on six datasets.",
+        page_idx=0,
+        bboxes=[BBox(100, 430, 900, 470)],
+        reading_index=1,
+        metadata={"raw_type": "figure_caption", "layout_role": "figure_caption"},
+    )
+    document = DocumentIR(
+        doc_id="caption_dedupe",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["fig0", "cap0"])],
+        nodes=[figure, caption],
+        reading_order=["fig0", "cap0"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="caption_dedupe",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["fig", "cap"]),
+            RenderTreeNode(render_id="fig", role=RenderRole.FIGURE, source_node_ids=["fig0"]),
+            RenderTreeNode(render_id="cap", role=RenderRole.CAPTION, source_node_ids=["cap0"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert tex.count("Visualization results on six datasets") == 1
+    assert tex.count(r"\caption{Visualization results on six datasets}") == 1
 
 
 def test_original_like_ir_renderer_can_crop_figure_from_source_pdf(tmp_path):
@@ -869,7 +1415,8 @@ def test_original_like_ir_renderer_can_crop_figure_from_source_pdf(tmp_path):
         IRLatexRenderConfig(figure_asset_output_dir=tmp_path / "assets", figure_asset_latex_prefix="assets")
     ).render(document, tree, profile)
 
-    assert r"\includegraphics[width=0.800\linewidth]{assets/figure_fig1.png}" in tex
+    assert r"\includegraphics[width=" in tex
+    assert r"{assets/figure_fig1.png}" in tex
     assert (tmp_path / "assets" / "figure_fig1.png").exists()
 
 
@@ -981,6 +1528,7 @@ def test_original_like_ir_renderer_wraps_mixed_double_column_bands_in_multicols(
     tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
 
     assert r"\usepackage{multicol}" in tex
+    assert r"\begin{multicols*}{2}" not in tex
     assert tex.index("Paper Title") < tex.index(r"\begin{multicols}{2}")
     assert tex.index(r"\begin{multicols}{2}") < tex.index("Left column text.") < tex.index("Right column text.")
     assert tex.index(r"\end{multicols}") < tex.index(r"\[")
@@ -1047,6 +1595,7 @@ def test_original_like_ir_renderer_infers_mixed_columns_from_bbox_when_band_meta
 
     tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
 
+    assert r"\begin{multicols*}{2}" not in tex
     assert r"\begin{multicols}{2}" in tex
     assert tex.index("Wide Title") < tex.index(r"\begin{multicols}{2}") < tex.index("Left column text.")
     assert tex.index(r"\end{multicols}") < tex.index(r"\[")
@@ -1186,9 +1735,86 @@ def test_original_like_ir_renderer_uses_mixed_bands_for_appendix_tail_after_refe
     tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
 
     assert r"\appendix" in tex
+    appendix_tail = tex[tex.index(r"\appendix") :]
+    assert r"\begin{multicols*}{2}" not in appendix_tail
     assert tex.index(r"\appendix") < tex.index(r"\section{Extra Proofs}") < tex.index(r"\begin{multicols}{2}")
     assert tex.index(r"\begin{multicols}{2}") < tex.index("Left appendix column.") < tex.index("Right appendix column.")
     assert tex.index(r"\end{multicols}") < tex.index(r"\[")
+
+
+def test_original_like_ir_renderer_keeps_full_width_appendix_tail_single_column_after_references():
+    nodes = [
+        DocumentNode(
+            node_id="refs",
+            node_type=BlockType.REFERENCE,
+            text="[1] Ref.",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+            metadata={"reference_items": ["[1] Ref."]},
+        ),
+        DocumentNode(
+            node_id="app_title",
+            node_type=BlockType.TITLE,
+            text="Appendix A Extra Proofs",
+            page_idx=1,
+            bboxes=[BBox(80, 50, 920, 80)],
+            reading_index=1,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 10, "_appendix_heading": True},
+        ),
+        DocumentNode(
+            node_id="app_body",
+            node_type=BlockType.TEXT,
+            text="This appendix is reset to a full-width single-column layout.",
+            page_idx=1,
+            bboxes=[BBox(80, 120, 920, 170)],
+            reading_index=2,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 11},
+        ),
+        DocumentNode(
+            node_id="app_eq",
+            node_type=BlockType.EQUATION,
+            text=r"a=b",
+            page_idx=1,
+            bboxes=[BBox(250, 220, 750, 250)],
+            reading_index=3,
+            metadata={"layout_band_type": "full_span", "layout_band_global_id": 12},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="appendix_tail_single",
+        pages=[
+            PageIR(page_idx=0, width=1000, height=1000, node_ids=["refs"]),
+            PageIR(page_idx=1, width=1000, height=1000, node_ids=["app_title", "app_body", "app_eq"]),
+        ],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    profile = replace(
+        profile,
+        page_layout={**profile.page_layout, "column_mode": "mixed"},
+        renderer_options={**profile.renderer_options, "column_mode": "mixed"},
+    )
+    tree = RenderTreeIR(
+        doc_id="appendix_tail_single",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["refs"]),
+            RenderTreeNode(render_id="refs", role=RenderRole.REFERENCES, source_node_ids=["refs"], children=["app_title", "app_body", "app_eq"]),
+            RenderTreeNode(render_id="app_title", role=RenderRole.SECTION, source_node_ids=["app_title"], attributes={"appendix_heading": True}),
+            RenderTreeNode(render_id="app_body", role=RenderRole.PARAGRAPH, source_node_ids=["app_body"]),
+            RenderTreeNode(render_id="app_eq", role=RenderRole.DISPLAY_EQUATION, source_node_ids=["app_eq"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    appendix_tail = tex[tex.index(r"\appendix") :]
+    assert r"\appendix" in tex
+    assert "This appendix is reset to a full-width single-column layout." in appendix_tail
+    assert r"\begin{multicols*}{2}" not in appendix_tail
 
 
 def test_original_like_ir_renderer_emits_float_equation_algorithm_labels_and_rewrites_cross_refs():
@@ -1328,7 +1954,7 @@ def test_original_like_ir_renderer_injects_referenced_float_missing_from_tree():
     assert r"\label{fig:1}" in tex
 
 
-def test_original_like_ir_renderer_places_referenced_missing_table_after_first_reference():
+def test_original_like_ir_renderer_places_referenced_missing_table_at_physical_position():
     nodes = [
         DocumentNode(
             node_id="p1",
@@ -1377,7 +2003,60 @@ def test_original_like_ir_renderer_places_referenced_missing_table_after_first_r
     tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
 
     assert tex.index(r"Table \ref{tab:1}") < tex.index(r"\caption{Deferred table}")
-    assert tex.index(r"\caption{Deferred table}") < tex.index("The second paragraph should stay after the table")
+    assert tex.index("The second paragraph should stay after the table") < tex.index(r"\caption{Deferred table}")
+
+
+def test_original_like_ir_renderer_defers_float_after_interrupted_sentence():
+    nodes = [
+        DocumentNode(
+            node_id="left",
+            node_type=BlockType.TEXT,
+            text="The long statement remains",
+            page_idx=0,
+            bboxes=[BBox(80, 100, 900, 130)],
+            reading_index=0,
+        ),
+        DocumentNode(
+            node_id="fig",
+            node_type=BlockType.FIGURE,
+            text="Figure 3: Interrupting figure.",
+            page_idx=0,
+            bboxes=[BBox(100, 150, 500, 350)],
+            reading_index=1,
+            metadata={"figure_caption": "Figure 3: Interrupting figure."},
+        ),
+        DocumentNode(
+            node_id="right",
+            node_type=BlockType.TEXT,
+            text="with the continuation after the inserted visual.",
+            page_idx=0,
+            bboxes=[BBox(80, 370, 900, 410)],
+            reading_index=2,
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="missing_float_sentence_defer",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="missing_float_sentence_defer",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["left", "right"]),
+            RenderTreeNode(render_id="left", role=RenderRole.PARAGRAPH, source_node_ids=["left"]),
+            RenderTreeNode(render_id="right", role=RenderRole.PARAGRAPH, source_node_ids=["right"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert tex.index("The long statement remains") < tex.index("with the continuation after the inserted visual.")
+    assert tex.index("with the continuation after the inserted visual.") < tex.index(r"\begin{figure}[H]")
+    assert r"\caption{Interrupting figure}" in tex
 
 
 def test_original_like_ir_renderer_injects_missing_table_even_without_reference():

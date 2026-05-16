@@ -88,6 +88,11 @@ def parse_layout_state_machine(
             continue
         effective_pos += 1
 
+        if token_layout_layer(token) == "main_text_flow":
+            while heading_stack and token_layout_layer(tokens[heading_stack[-1][1]]) != "main_text_flow":
+                popped = heading_stack.pop()
+                result.events.append(f"{node_id}:close-frontmatter-heading {popped[1]}")
+
         current_scope = heading_stack[-1][1] if heading_stack else None
         current_heading_level = heading_stack[-1][0] if heading_stack else 0
 
@@ -191,7 +196,11 @@ def classify_heading_token(
     if token.block_type != "title" and not looks_like_standalone_heading(token.text):
         return None
     if token.role == "heading" and is_local_subheading_layout(token.record):
-        level = max(2, min(current_heading_level + 1 if current_heading_level else 2, 3))
+        # Local column/band headings are usually lower-level headings only
+        # after a section is already open.  If the heading stack is empty, this
+        # is the first body heading after front matter; rendering it as a
+        # subsection makes LaTeX number it as "0.1".  Open a real section first.
+        level = 1 if current_heading_level <= 0 else max(2, min(current_heading_level + 1, 3))
         return (level, {"_heading_unnumbered": True, "_layout_state_locked": True}, "local-heading")
     if token.role == "heading" or token.block_type == "title":
         level = heading_level_from_style(token.record, body_font_size=body_font_size, effective_pos=effective_pos, text=token.text)
@@ -290,6 +299,10 @@ def canonical_type(record: dict[str, Any]) -> str:
 
 def layout_role(record: dict[str, Any]) -> str:
     return str(record.get("layout_role") or record.get("role") or record.get("semantic_role") or "").casefold()
+
+
+def token_layout_layer(token: LayoutToken) -> str:
+    return str(token.record.get("layout_layer") or "").casefold()
 
 
 def node_order_key(record: dict[str, Any], node_id: int) -> tuple[int, float, float, str]:

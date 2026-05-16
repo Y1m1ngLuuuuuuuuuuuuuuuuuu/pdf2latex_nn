@@ -33,9 +33,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
-    parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table union-bbox crops")
+    parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table/figure crops")
     parser.add_argument("--source-tex", type=Path, help="Optional source TeX used for citation/float style sidecars")
-    parser.add_argument("--asset-dir", type=Path, help="Directory for generated table crop assets")
+    parser.add_argument("--asset-dir", type=Path, help="Directory for generated table/figure crop assets")
     parser.add_argument("--asset-latex-prefix", default="assets", help="LaTeX path prefix for generated assets")
     parser.add_argument(
         "--renderer",
@@ -47,9 +47,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--render-crops",
+        dest="render_table_crops",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate visual crop images for tables and figures from "
+            "--source-pdf or the v7 content JSON source PDF. Enabled by "
+            "default; use --no-render-crops to disable."
+        ),
+    )
+    parser.add_argument(
         "--render-table-crops",
-        action="store_true",
-        help="Generate visual crop images for tables and figures from --source-pdf. Disabled by default to save disk.",
+        dest="render_table_crops",
+        action=argparse.BooleanOptionalAction,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -63,6 +75,7 @@ def main() -> int:
     assert_v7_graph_data(data, args.graph)
     if args.content_json is not None:
         assert_v7_content_json(args.content_json, require_styles=True)
+    resolved_source_pdf = args.source_pdf or (source_pdf_from_content_json(args.content_json) if args.content_json else None)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
     state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -84,15 +97,15 @@ def main() -> int:
             merge_threshold=args.merge_threshold,
             parent_threshold=args.parent_threshold,
             sibling_threshold=args.sibling_threshold,
-            source_pdf=str(args.source_pdf) if args.render_table_crops and args.source_pdf else None,
+            source_pdf=str(resolved_source_pdf) if args.render_table_crops and resolved_source_pdf else None,
             table_asset_output_dir=(
                 str(args.asset_dir or (args.output_tex.parent / "assets"))
-                if args.render_table_crops and args.source_pdf
+                if args.render_table_crops and resolved_source_pdf
                 else None
             ),
             figure_asset_output_dir=(
                 str(args.asset_dir or (args.output_tex.parent / "assets"))
-                if args.render_table_crops and args.source_pdf
+                if args.render_table_crops and resolved_source_pdf
                 else None
             ),
             table_asset_latex_prefix=args.asset_latex_prefix,
@@ -110,7 +123,7 @@ def main() -> int:
             root,
             node_records=node_records,
             content_json=args.content_json,
-            pdf_path=args.source_pdf or source_pdf_from_content_json(args.content_json),
+            pdf_path=resolved_source_pdf,
             source_tex_path=args.source_tex,
             document_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem),
             title=document_title,
