@@ -11,6 +11,7 @@ from src.generation.citations import strip_reference_label
 from src.generation.table_assets import ensure_figure_asset, ensure_table_pdf_crop, table_caption_text
 from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
+from src.reasoning.heading_skeleton import collect_heading_evidence, learn_heading_style_profile
 from src.reasoning.layout_state_machine import parse_layout_state_machine
 
 
@@ -236,6 +237,7 @@ class TreeDecoderConfig:
     figure_asset_output_dir: str | None = None
     table_asset_latex_prefix: str = "assets"
     figure_asset_latex_prefix: str = "assets"
+    heading_skeleton_mode: str = "legacy"
 
 
 @dataclass
@@ -304,12 +306,12 @@ class TreeDecoder:
         """Decode model edge scores directly into a ROOT-backed tree."""
 
         probs = self.edge_probabilities(scores)
-        raw_skeleton = build_heading_skeleton(
-            {
-                index: ResolvedNode(node_id=index, record=dict(record), merged_node_ids=[index])
-                for index, record in enumerate(node_records)
-            }
-        )
+        heading_mode = normalize_heading_skeleton_mode(self.config.heading_skeleton_mode)
+        raw_nodes = {
+            index: ResolvedNode(node_id=index, record=dict(record), merged_node_ids=[index])
+            for index, record in enumerate(node_records)
+        }
+        raw_skeleton = None if heading_mode == "off" else build_heading_skeleton(raw_nodes, mode=heading_mode)
         contracted = self.contract_merge_nodes(
             node_records,
             edge_index,
@@ -317,7 +319,10 @@ class TreeDecoder:
             raw_skeleton=raw_skeleton,
         )
         contracted = self.semantic_title_deduplication(contracted)
-        skeleton = build_heading_skeleton(contracted.nodes)
+        if heading_mode == "off":
+            parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=None)
+            return self.build_tree(contracted, parent_edges)
+        skeleton = build_heading_skeleton(contracted.nodes, mode=heading_mode)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=skeleton)
         return self.build_skeleton_tree(contracted, skeleton, parent_edges)
 
@@ -757,21 +762,24 @@ class TreeDecoder:
             if edge.target not in best_parent_edge or edge.score > best_parent_edge[edge.target].score:
                 best_parent_edge[edge.target] = edge
 
+        if normalize_heading_skeleton_mode(self.config.heading_skeleton_mode) == "stack":
+            self.apply_strict_scope_defaults(nodes, parent_of, skeleton)
+
         for target_id, edge in best_parent_edge.items():
-            if target_id in parent_of:
-                continue
             if target_id in skeleton.heading_ids:
+                continue
+            if normalize_heading_skeleton_mode(self.config.heading_skeleton_mode) == "stack":
+                if not stack_mode_allows_local_parent(edge, nodes, skeleton):
+                    continue
+                current_parent = parent_of.get(target_id)
+                current_scope = skeleton.scope_by_node.get(target_id)
+                if current_parent is not None and current_parent != current_scope:
+                    continue
+            elif target_id in parent_of:
                 continue
             parent_of[target_id] = edge.source
 
-        for node_id in nodes:
-            if node_id in parent_of or node_id in skeleton.heading_ids:
-                continue
-            if is_page_noise_node(nodes[node_id]):
-                continue
-            scope_id = skeleton.scope_by_node.get(node_id)
-            if scope_id in nodes:
-                parent_of[node_id] = int(scope_id)
+        self.apply_scope_fallbacks(nodes, parent_of, skeleton)
 
         apply_float_caption_grouping(nodes, parent_of, skeleton)
         enforce_numbered_list_parent_continuity(nodes, parent_of)
@@ -786,6 +794,45 @@ class TreeDecoder:
                 root.children.append(nodes[node_id])
         sort_tree_children(root)
         return root
+
+    def apply_strict_scope_defaults(
+        self,
+        nodes: dict[int, ResolvedNode],
+        parent_of: dict[int, int],
+        skeleton: HeadingSkeleton,
+    ) -> None:
+        """Attach body nodes to the active heading before local GNN edges.
+
+        In stack mode, the global heading state machine owns section scope.
+        GNN parent edges may still refine local non-heading relations, but they
+        do not get first chance to steal paragraphs across the outline.
+        """
+
+        for node_id in nodes:
+            if node_id in parent_of or node_id in skeleton.heading_ids:
+                continue
+            if is_page_noise_node(nodes[node_id]):
+                continue
+            scope_id = skeleton.scope_by_node.get(node_id)
+            if scope_id in nodes and scope_id != node_id:
+                parent_of[node_id] = int(scope_id)
+
+    def apply_scope_fallbacks(
+        self,
+        nodes: dict[int, ResolvedNode],
+        parent_of: dict[int, int],
+        skeleton: HeadingSkeleton,
+    ) -> None:
+        """Attach any remaining body nodes to their physical heading scope."""
+
+        for node_id in nodes:
+            if node_id in parent_of or node_id in skeleton.heading_ids:
+                continue
+            if is_page_noise_node(nodes[node_id]):
+                continue
+            scope_id = skeleton.scope_by_node.get(node_id)
+            if scope_id in nodes and scope_id != node_id:
+                parent_of[node_id] = int(scope_id)
 
     def build_tree(self, contracted: ContractedGraph, decoded_edges: list[DecodedEdge]) -> ResolvedNode:
         """Attach contracted nodes under the arborescence, adding virtual ROOT."""
@@ -1177,11 +1224,48 @@ def sort_tree_children(node: ResolvedNode) -> None:
         sort_tree_children(child)
 
 
-def build_heading_skeleton(nodes: dict[int, ResolvedNode]) -> HeadingSkeleton:
+def normalize_heading_skeleton_mode(mode: str | None) -> str:
+    value = str(mode or "legacy").casefold().replace("-", "_")
+    aliases = {
+        "none": "off",
+        "disabled": "off",
+        "disable": "off",
+        "old": "off",
+        "current": "legacy",
+        "default": "legacy",
+        "strict": "stack",
+        "stack_strict": "stack",
+    }
+    value = aliases.get(value, value)
+    if value not in {"off", "legacy", "stack"}:
+        raise ValueError(f"Unknown heading skeleton mode: {mode!r}")
+    return value
+
+
+def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legacy") -> HeadingSkeleton:
     """Build a deterministic heading tree from physical reading order."""
 
     if not nodes:
         return HeadingSkeleton(frozenset(), {}, {}, {})
+    mode = normalize_heading_skeleton_mode(mode)
+    if mode == "off":
+        return HeadingSkeleton(frozenset(), {}, {}, {})
+
+    records_by_id = {node_id: node.record for node_id, node in nodes.items()}
+    text_by_id = {node_id: node.text for node_id, node in nodes.items()}
+    evidence_by_id = collect_heading_evidence(records_by_id, text_by_id=text_by_id)
+    profile = learn_heading_style_profile(
+        evidence_by_id,
+        body_font_size=infer_body_font_size_from_nodes(nodes.values()),
+    )
+    for node_id, evidence in evidence_by_id.items():
+        if node_id in nodes:
+            nodes[node_id].record["_heading_evidence_score"] = round(float(evidence.score), 4)
+            nodes[node_id].record["_heading_numbering_style"] = evidence.numbering_style
+            if evidence.numbering_level is not None:
+                nodes[node_id].record["_heading_numbering_level"] = evidence.numbering_level
+    for node in nodes.values():
+        node.record["_heading_profile_body_font_size"] = round(float(profile.body_font_size), 4)
 
     if has_layout_state_signals(node.record for node in nodes.values()):
         layout_result = parse_layout_state_machine(
@@ -1727,6 +1811,36 @@ def violates_structural_parent_child(source: ResolvedNode, target: ResolvedNode,
     if target_type == "title":
         return True
     return skeleton.scope_by_node.get(source_id) != skeleton.scope_by_node.get(target_id)
+
+
+def stack_mode_allows_local_parent(
+    edge: DecodedEdge,
+    nodes: dict[int, ResolvedNode],
+    skeleton: HeadingSkeleton,
+) -> bool:
+    """Return true when a GNN parent edge is a local refinement, not outline structure."""
+
+    source = nodes.get(edge.source)
+    target = nodes.get(edge.target)
+    if source is None or target is None:
+        return False
+    source_id = source.node_id
+    target_id = target.node_id
+    if source_id in skeleton.heading_ids or target_id in skeleton.heading_ids:
+        return False
+    if skeleton.scope_by_node.get(source_id) != skeleton.scope_by_node.get(target_id):
+        return False
+
+    source_type = canonical_render_type(source.record)
+    target_type = canonical_render_type(target.record)
+    target_caption_kind = float_caption_kind(target)
+    if source_type in {"figure", "table"} and target_caption_kind == source_type:
+        return True
+    if target_type in {"equation", "inline_math", "algorithm", "code"} and source_type in {"text", "list", "reference"}:
+        return True
+    if source_type == "list" and target_type in {"text", "equation", "inline_math"}:
+        return True
+    return False
 
 
 class UnionFind:

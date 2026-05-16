@@ -1178,6 +1178,30 @@ def test_tree_decoder_renders_run_in_heading_as_scope_with_body():
     assert "3.1. Implementation" not in tex
 
 
+def test_stack_heading_mode_keeps_text_parent_edges_from_stealing_section_scope():
+    if not has_torch():
+        return
+    import torch
+
+    records = [
+        {"type": "title", "text": "1 Introduction", "global_order": 0, "style_baseline_size": 16.0},
+        {"type": "paragraph", "text": "First paragraph.", "global_order": 1, "style_baseline_size": 10.0},
+        {"type": "paragraph", "text": "Second paragraph.", "global_order": 2, "style_baseline_size": 10.0},
+        {"type": "title", "text": "2 Method", "global_order": 3, "style_baseline_size": 16.0},
+        {"type": "paragraph", "text": "Method paragraph.", "global_order": 4, "style_baseline_size": 10.0},
+    ]
+    edge_index = torch.tensor([[1], [2]], dtype=torch.long)
+    scores = torch.tensor([[0.0, 0.99, 0.01]], dtype=torch.float32)
+
+    stack_root = TreeDecoder(TreeDecoderConfig(parent_threshold=0.5, heading_skeleton_mode="stack")).decode(
+        records,
+        edge_index,
+        scores,
+    )
+    intro_stack = next(child for child in stack_root.children if child.text == "1 Introduction")
+    assert [child.text for child in intro_stack.children] == ["First paragraph.", "Second paragraph."]
+
+
 def test_tree_decoder_keeps_consistent_freeform_title_style_structural():
     records = [
         {"type": "title", "text": "Introduction", "style_baseline_size": 14.0, "global_order": 0},

@@ -92,6 +92,18 @@ scripts/pipeline/step5_generate_tex.py --renderer ir
 debugging the legacy TreeDecoder renderer and must not be used for current
 quality reports.
 
+Decoder heading modes:
+
+```text
+--heading-skeleton-mode legacy   current production decoder behavior
+--heading-skeleton-mode stack    deterministic global heading stack owns section scope;
+                                 GNN parent edges only refine local non-heading relations
+--heading-skeleton-mode off      no heading skeleton; regression/debug baseline only
+```
+
+Use `stack` for the new section-scope A/B experiments. It does not require
+MinerU reruns, graph rebuilds, relabeling, or model retraining.
+
 ## Current Manifest Families
 
 Current active trainable clean set:

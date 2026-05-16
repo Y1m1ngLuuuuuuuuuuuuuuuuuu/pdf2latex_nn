@@ -60,6 +60,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.53)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--heading-skeleton-mode",
+        choices=["legacy", "stack", "off"],
+        default="legacy",
+        help=(
+            "legacy keeps the current decoder behavior; stack makes the global "
+            "heading state machine own section scope and lets GNN edges refine "
+            "only local non-heading relations; off disables the skeleton for "
+            "old-decoder regression comparisons."
+        ),
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex")
     parser.add_argument("--compile-runs", type=int, default=2)
@@ -116,6 +127,7 @@ def main() -> int:
             parent_threshold=args.parent_threshold,
             require_merge_argmax=args.require_merge_argmax,
             require_parent_argmax=args.require_parent_argmax,
+            heading_skeleton_mode=args.heading_skeleton_mode,
         )
     )
 
@@ -161,6 +173,7 @@ def main() -> int:
         "parent_threshold": args.parent_threshold,
         "require_merge_argmax": args.require_merge_argmax,
         "require_parent_argmax": args.require_parent_argmax,
+        "heading_skeleton_mode": args.heading_skeleton_mode,
         "renderer": args.renderer,
         "render_crops": args.render_table_crops,
         "documents": summary,
@@ -267,6 +280,7 @@ def run_one_document(
             parent_threshold=decoder.config.parent_threshold,
             require_merge_argmax=decoder.config.require_merge_argmax,
             require_parent_argmax=decoder.config.require_parent_argmax,
+            heading_skeleton_mode=decoder.config.heading_skeleton_mode,
             source_pdf=str(pdf_path) if render_table_crops else None,
             table_asset_output_dir=str(doc_dir / "assets") if render_table_crops else None,
             figure_asset_output_dir=str(doc_dir / "assets") if render_table_crops else None,

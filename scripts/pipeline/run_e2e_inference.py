@@ -85,6 +85,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.53)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="legacy")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex", help="pdflatex or xelatex executable")
     parser.add_argument("--compile-runs", type=int, default=2)
@@ -130,6 +131,7 @@ def main() -> int:
             parent_threshold=args.parent_threshold,
             require_merge_argmax=args.require_merge_argmax,
             require_parent_argmax=args.require_parent_argmax,
+            heading_skeleton_mode=args.heading_skeleton_mode,
         )
     )
 

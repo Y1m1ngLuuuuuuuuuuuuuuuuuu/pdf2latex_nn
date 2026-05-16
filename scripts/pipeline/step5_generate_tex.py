@@ -31,6 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-threshold", type=float, default=0.5)
     parser.add_argument("--parent-threshold", type=float, default=0.0)
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="legacy")
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
     parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table/figure crops")
@@ -97,6 +98,7 @@ def main() -> int:
             merge_threshold=args.merge_threshold,
             parent_threshold=args.parent_threshold,
             sibling_threshold=args.sibling_threshold,
+            heading_skeleton_mode=args.heading_skeleton_mode,
             source_pdf=str(resolved_source_pdf) if args.render_table_crops and resolved_source_pdf else None,
             table_asset_output_dir=(
                 str(args.asset_dir or (args.output_tex.parent / "assets"))
