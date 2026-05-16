@@ -100,6 +100,43 @@ hard cases: 10 / 10 compiled
 test30: 30 / 30 compiled
 ```
 
+## Nougat Structure Comparison, 100-Document Pilot
+
+The current comparison evaluates generated documents through the neutral
+comparison-structure IR.  It is a structure/layout benchmark, not an OCR text
+accuracy benchmark.
+
+Current best decoder variant:
+
+```text
+model: M07_y_network_plus_gaussian_edge_feature
+decoder: --heading-skeleton-mode stack
+postprocess variant: layout-heading candidates + global stack scope + false-heading filters
+report: data/09_eval_reports/ours_vs_nougat_compare100_no20_filteredstack_m07_20260516/summary.json
+local copy: local_outputs/final_eval_20260516/nougat_compare/ours_vs_nougat_compare100_no20_filteredstack_m07_20260516/summary.json
+documents: 100
+compile success: 100 / 100
+```
+
+| metric | ours | Nougat | delta |
+| --- | ---: | ---: | ---: |
+| macro_structure_score | 0.7289 | 0.7455 | -0.0166 |
+| heading_tree_accuracy | 0.6337 | 0.7315 | -0.0978 |
+| reading_order_accuracy | 0.9565 | 0.9835 | -0.0271 |
+| paragraph_merge_f1 | 0.6048 | 0.5777 | +0.0271 |
+| section_attachment_f1 | 0.6608 | 0.7403 | -0.0795 |
+| reference_section_completeness | 0.8713 | 0.7256 | +0.1456 |
+| float_caption_attachment_accuracy | 0.3798 | 0.5134 | -0.1336 |
+| generated_structure_validity | 0.9952 | 0.9461 | +0.0491 |
+| layout_similarity | 0.8104 | n/a | n/a |
+
+Interpretation: our strongest comparative wins are references, paragraph
+merge, generated structure validity, and direct LaTeX/PDF compilability.  The
+remaining large gap is outline/caption structure, especially heading tree and
+float-caption attachment.  The stack decoder improved heading accuracy over
+the prior stack run (`0.6222 -> 0.6337`) but does not yet close the Nougat
+heading gap.
+
 Local E2E output folders:
 
 ```text

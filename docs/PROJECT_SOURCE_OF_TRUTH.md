@@ -95,14 +95,19 @@ quality reports.
 Decoder heading modes:
 
 ```text
---heading-skeleton-mode legacy   current production decoder behavior
---heading-skeleton-mode stack    deterministic global heading stack owns section scope;
-                                 GNN parent edges only refine local non-heading relations
+--heading-skeleton-mode legacy   baseline decoder behavior
+--heading-skeleton-mode stack    current production candidate: layout heading detector supplies
+                                 candidates/hints; deterministic stack owns heading parentage
+                                 and section scope; GNN parent edges only refine local
+                                 non-heading relations
 --heading-skeleton-mode off      no heading skeleton; regression/debug baseline only
 ```
 
-Use `stack` for the new section-scope A/B experiments. It does not require
-MinerU reruns, graph rebuilds, relabeling, or model retraining.
+Use `stack` for section-scope A/B experiments and current E2E generation. It
+does not require MinerU reruns, graph rebuilds, relabeling, or model
+retraining.  The stack mode now explicitly filters false heading evidence such
+as front-matter paper titles and long math/OCR fragments before building the
+outline.
 
 ## Current Manifest Families
 
