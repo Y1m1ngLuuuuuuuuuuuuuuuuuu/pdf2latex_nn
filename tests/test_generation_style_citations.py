@@ -61,6 +61,54 @@ def build_document() -> DocumentIR:
     )
 
 
+def render_single_heading(text: str, role: RenderRole = RenderRole.SECTION, *, attrs: dict | None = None) -> str:
+    node = DocumentNode(
+        node_id="h0",
+        node_type=BlockType.TITLE,
+        text=text,
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 140)],
+        reading_index=0,
+    )
+    document = DocumentIR(
+        doc_id="heading_policy",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["h0"])],
+        nodes=[node],
+        reading_order=["h0"],
+    )
+    tree = RenderTreeIR(
+        doc_id="heading_policy",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["h0"]),
+            RenderTreeNode(render_id="h0", role=role, source_node_ids=["h0"], attributes=attrs or {}),
+        ],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    return OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+
+def test_original_like_ir_renderer_does_not_invent_numbering_for_unnumbered_headings():
+    tex = render_single_heading("Introduction")
+
+    assert r"\section*{Introduction}" in tex
+    assert r"\section{Introduction}" not in tex
+
+
+def test_original_like_ir_renderer_lets_latex_own_default_decimal_heading_numbers():
+    tex = render_single_heading("1.1 Method", role=RenderRole.SUBSECTION)
+
+    assert r"\subsection{Method}" in tex
+    assert "1.1 Method" not in tex
+
+
+def test_original_like_ir_renderer_preserves_nondefault_visible_heading_prefixes():
+    tex = render_single_heading("0.1 Playing Go -- possible representations.", role=RenderRole.SUBSECTION)
+
+    assert r"\subsection*{0.1 Playing Go -- possible representations.}" in tex
+
+
 def build_two_column_styled_document() -> DocumentIR:
     nodes = [
         DocumentNode(
@@ -162,6 +210,102 @@ def test_style_profile_extractor_records_columns_and_spacing():
     assert "twocolumn" not in profile.documentclass_options
     assert profile.renderer_options["display_math_spacing"]["above"] > 0
     assert profile.renderer_options["list_spacing"]["itemsep"] > 0
+
+
+def test_style_profile_ignores_metadata_when_detecting_mixed_columns():
+    nodes = [
+        DocumentNode(
+            node_id="title",
+            node_type=BlockType.TITLE,
+            text="Wide Metadata Title",
+            page_idx=0,
+            bboxes=[BBox(80, 40, 920, 80)],
+            reading_index=0,
+            spans=[StyleSpan(text="Wide Metadata Title", font_name="Times-Bold", font_size=16, is_bold=True)],
+            metadata={"layout_layer": "metadata_layer", "layout_role": "document_title"},
+        ),
+        DocumentNode(
+            node_id="author_left",
+            node_type=BlockType.TEXT,
+            text="Alice",
+            page_idx=0,
+            bboxes=[BBox(160, 95, 420, 115)],
+            reading_index=1,
+            spans=[StyleSpan(text="Alice", font_name="Times-Roman", font_size=10)],
+            metadata={"layout_layer": "metadata_layer", "layout_role": "author"},
+        ),
+        DocumentNode(
+            node_id="author_right",
+            node_type=BlockType.TEXT,
+            text="Bob",
+            page_idx=0,
+            bboxes=[BBox(580, 95, 840, 115)],
+            reading_index=2,
+            spans=[StyleSpan(text="Bob", font_name="Times-Roman", font_size=10)],
+            metadata={"layout_layer": "metadata_layer", "layout_role": "author"},
+        ),
+        DocumentNode(
+            node_id="left",
+            node_type=BlockType.TEXT,
+            text="Left body.",
+            page_idx=0,
+            bboxes=[BBox(70, 180, 450, 205)],
+            reading_index=3,
+            spans=[StyleSpan(text="Left body.", font_name="Times-Roman", font_size=10)],
+        ),
+        DocumentNode(
+            node_id="right",
+            node_type=BlockType.TEXT,
+            text="Right body.",
+            page_idx=0,
+            bboxes=[BBox(550, 180, 930, 205)],
+            reading_index=4,
+            spans=[StyleSpan(text="Right body.", font_name="Times-Roman", font_size=10)],
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="metadata_not_mixed",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=[node.node_id for node in nodes])],
+        nodes=nodes,
+        reading_order=[node.node_id for node in nodes],
+    )
+
+    profile = StyleProfileExtractor().extract(document)
+
+    assert profile.page_layout["column_count"] == 2
+    assert profile.page_layout["column_mode"] == "two_column"
+
+
+def test_math_renderer_strips_span_fontsize_artifacts():
+    rendered = render_inline_math(r"x{\fontsize{7.00pt}{8.40pt}\selectfont 1}")
+
+    assert r"\fontsize" not in rendered
+    assert r"\selectfont" not in rendered
+    assert rendered == "$x1$"
+
+
+def test_math_renderer_strips_unbalanced_left_right_delimiters():
+    rendered = render_inline_math(r"\boldsymbol{W} \right\}")
+
+    assert r"\right" not in rendered
+    assert rendered == r"$\boldsymbol{W} \}$"
+
+
+def test_display_math_fallback_rejects_structural_commands_and_unmatched_dollars():
+    rendered = render_equation(r"A$ bad \subsection{Experiments}")
+
+    assert r"\[" not in rendered
+    assert r"\begin{equation}" not in rendered
+    assert r"\subsection{Experiments}" not in rendered
+    assert r"\textbackslash{}subsection" in rendered
+
+
+def test_text_renderer_strips_fontsize_artifacts_before_inline_scan():
+    rendered = render_text_with_inline_latex(r"score {\fontsize{7.00pt}{8.40pt}\selectfont 1} is $x$")
+
+    assert r"\fontsize" not in rendered
+    assert r"\selectfont" not in rendered
+    assert "score 1 is $x$" == rendered
 
 
 def test_style_profile_keeps_header_footer_out_of_body_style():
@@ -1015,6 +1159,54 @@ def test_original_like_ir_renderer_replaces_superscript_marker_with_matching_foo
     assert r"\footnotetext" not in tex
 
 
+def test_original_like_ir_renderer_anchors_full_ir_footnote_when_note_is_not_in_tree():
+    nodes = [
+        DocumentNode(
+            node_id="body",
+            node_type=BlockType.TEXT,
+            text="Claim1",
+            page_idx=0,
+            bboxes=[BBox(100, 100, 700, 120)],
+            reading_index=0,
+            spans=[
+                StyleSpan(text="Claim", font_name="Times-Roman", font_size=10, bbox=BBox(100, 100, 150, 120)),
+                StyleSpan(text="1", font_name="Times-Roman", font_size=6, bbox=BBox(151, 95, 157, 103)),
+            ],
+            features={"style_baseline_size": 10.0},
+        ),
+        DocumentNode(
+            node_id="fn",
+            node_type=BlockType.FOOTNOTE,
+            text="1 Full IR note kept outside the GNN render tree.",
+            page_idx=0,
+            bboxes=[BBox(100, 910, 700, 930)],
+            reading_index=1,
+            metadata={"note_marker": "1"},
+        ),
+    ]
+    document = DocumentIR(
+        doc_id="full_ir_note",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["body", "fn"])],
+        nodes=nodes,
+        reading_order=["body", "fn"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="full_ir_note",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["p"]),
+            RenderTreeNode(render_id="p", role=RenderRole.PARAGRAPH, source_node_ids=["body"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer().render(document, tree, profile)
+
+    assert r"Claim\footnote{Full IR note kept outside the GNN render tree.}" in tex
+    assert r"\footnotetext" not in tex
+
+
 def test_original_like_ir_renderer_keeps_unanchored_footnote_as_footnotetext():
     nodes = [
         DocumentNode(
@@ -1418,6 +1610,55 @@ def test_original_like_ir_renderer_can_crop_figure_from_source_pdf(tmp_path):
     assert r"\includegraphics[width=" in tex
     assert r"{assets/figure_fig1.png}" in tex
     assert (tmp_path / "assets" / "figure_fig1.png").exists()
+
+
+def test_original_like_ir_renderer_crops_algorithm_from_source_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "source.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    page.draw_rect(fitz.Rect(30, 50, 170, 145), color=(0, 0, 1), fill=(0.9, 0.9, 1.0))
+    page.insert_text((40, 70), "Algorithm 1: Demo")
+    doc.save(pdf_path)
+    doc.close()
+
+    node = DocumentNode(
+        node_id="alg1",
+        node_type=BlockType.ALGORITHM,
+        text="Algorithm 1: Demo\nInput: x\nreturn x",
+        page_idx=0,
+        bboxes=[BBox(150, 250, 850, 725)],
+        reading_index=0,
+        metadata={"source_pdf": str(pdf_path)},
+    )
+    document = DocumentIR(
+        doc_id="algorithm_crop",
+        source_pdf=str(pdf_path),
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["alg1"])],
+        nodes=[node],
+        reading_order=["alg1"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="algorithm_crop",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["ra1"]),
+            RenderTreeNode(render_id="ra1", role=RenderRole.ALGORITHM, source_node_ids=["alg1"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(
+        IRLatexRenderConfig(figure_asset_output_dir=tmp_path / "assets", figure_asset_latex_prefix="assets")
+    ).render(document, tree, profile)
+
+    assert r"\begin{algorithm}[H]" in tex
+    assert r"\begin{algorithmic}" not in tex
+    assert r"\includegraphics[width=1.000\linewidth]{assets/algorithm_alg1.png}" in tex
+    assert r"{assets/algorithm_alg1.png}" in tex
+    assert r"\label{alg:1}" in tex
+    assert (tmp_path / "assets" / "algorithm_alg1.png").exists()
 
 
 def test_original_like_ir_renderer_prefers_existing_mineru_figure_asset(tmp_path):
@@ -2157,3 +2398,47 @@ def test_original_like_ir_renderer_groups_list_siblings_and_keeps_equation_insid
     assert "1. Euclidean" not in tex
     assert "2. Cosine" not in tex
     assert tex.index("Euclidean distance") < tex.index(r"\[") < tex.index("Cosine distance")
+
+
+def test_original_like_ir_renderer_uses_canonical_text_when_spans_are_partial():
+    node = DocumentNode(
+        node_id="item",
+        node_type=BlockType.TEXT,
+        text=(
+            "• The framework introduces a novel episodic training approach that mitigates "
+            "the effects of data imbalance, enabling better generalization to unseen attack types "
+            "(Sun et al. 2024)."
+        ),
+        page_idx=0,
+        bboxes=[BBox(100, 100, 900, 120)],
+        reading_index=1,
+        spans=[
+            StyleSpan(
+                text="• The framework introduces a novel episodic training ap-",
+                font_name="Times-Roman",
+                font_size=10,
+            )
+        ],
+    )
+    document = DocumentIR(
+        doc_id="partial_span",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["item"])],
+        nodes=[node],
+        reading_order=["item"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="partial_span",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["ri"]),
+            RenderTreeNode(render_id="ri", role=RenderRole.PARAGRAPH, source_node_ids=["item"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert "approach that mitigates" in tex
+    assert "Sun et al. 2024" in tex
+    assert "training ap-" not in tex

@@ -1,6 +1,6 @@
 # Ablation Plan
 
-**Last updated**: 2026-05-16
+**Last updated**: 2026-05-18
 
 This is the current ablation protocol for the v7 graph-relation model. The
 filename remains `ablation_plan_v2.md`, but the active locked results now come
@@ -32,6 +32,19 @@ Current expected manifest:
 data/00_manifests/v7_registry_adapteraware_20260515_181724_labeled.json
 ```
 
+Current experimental manifest family under construction:
+
+```text
+tag: v7_floatproxy_adapter_20260516_205926
+input: data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json
+rebuild output: data/00_manifests/v7_floatproxy_adapter_20260516_205926_rebuilt.json
+label output: data/00_manifests/v7_floatproxy_adapter_20260516_205926_labeled.json
+raw edge_attr_dim: 26
+```
+
+Do not mix this family with the locked 22-dimensional checkpoints. It needs
+fresh training and ablation commands after relabeling passes validation.
+
 Generate commands:
 
 ```bash
@@ -60,6 +73,7 @@ F02_no_v7_reading_flow             remove repaired v7 flow cues
 E00_no_punctuation                 remove terminal punctuation and hyphen probes
 E01_no_gutter_overlap              remove overlap/gutter features
 M07_y_network_gaussian_edge_feature runtime gaussian proximity edge feature
+N00_float_proxy_adapter             new float-proxy graph/schema family, compared against locked M07 after retraining
 ```
 
 ## Current Adapter-Aware Relabel Snapshot

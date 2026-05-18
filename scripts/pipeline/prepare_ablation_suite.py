@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate reproducible train/calibration commands for the v7 ablation matrix.
+"""Generate reproducible train/calibration commands for the current ablation matrix.
 
 This script does not train models and does not mutate graph data.  It turns the
 JSON matrix into a shell script so the same experiment set can be launched on
@@ -20,9 +20,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--matrix", type=Path, default=REPO_ROOT / "configs/ablation_matrix_v3.json")
-    parser.add_argument("--output-sh", type=Path, default=REPO_ROOT / "data/08_runs/run_ablation_matrix_v3.sh")
-    parser.add_argument("--output-json", type=Path, default=REPO_ROOT / "data/09_eval_reports/ablation_matrix_v3_commands.json")
+    parser.add_argument("--matrix", type=Path, default=REPO_ROOT / "configs/ablation_matrix_current.json")
+    parser.add_argument("--output-sh", type=Path, default=REPO_ROOT / "data/08_runs/run_ablation_matrix_current.sh")
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=REPO_ROOT / "data/09_eval_reports/ablation_matrix_current_commands.json",
+    )
     parser.add_argument("--only", default="", help="Comma-separated experiment names to include.")
     parser.add_argument("--output-root", help="Optional override for common.output_root in the matrix.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without writing files.")

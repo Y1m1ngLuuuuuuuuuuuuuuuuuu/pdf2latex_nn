@@ -1,6 +1,6 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This repository is the source-control home for the v7 PDF-to-LaTeX system. AutoDL is the runtime home for datasets, MinerU outputs, graph tensors, checkpoints, generated PDFs, and long-running jobs.
 
@@ -34,12 +34,30 @@ https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
 
 ## Production Pipeline
 
+Canonical target:
+
+```text
+layout-aware, block-structure-preserving, compilable LaTeX reconstruction
+from rendered scientific PDFs
+```
+
+Non-goal:
+
+```text
+recovering the author's original source-level TeX AST
+```
+
+All future model, decoder, renderer, and evaluation changes must respect this
+target definition.  The detailed rationale and metric contract are documented in
+`docs/layout_aware_reconstruction_target.md`.
+
 The production pipeline is v7-only:
 
 ```text
 compiled PDF + matching TeX
   -> MinerU content_v2
   -> content_v7 + style spans
+  -> GNNViewAdapter
   -> graph.pt
   -> TeX AST alignment labels
   -> GATv2/Y-Network training / inference
@@ -49,6 +67,28 @@ compiled PDF + matching TeX
 ```
 
 Old v3/v4/v5 JSON variants are historical experiments. Do not feed them into training or evaluation.
+
+The full v7 JSON is the complete fact layer. It must not delete or rewrite
+metadata, figures, tables, footnotes, headers, captions, or references just
+because the GNN does not consume them directly. The graph-visible view is built
+separately by `src/perception/gnn_view_adapter.py`.
+
+Current model/data tracks:
+
+```text
+locked baseline/results:
+  tag: v7_registry_adapteraware_20260515_181724
+  raw edge_attr_dim: 22
+  keep all reports/checkpoints/generator outputs
+
+active experimental rebuild:
+  tag: v7_floatproxy_adapter_20260516_205926
+  raw edge_attr_dim: 26
+  float proxy + skip-over-float features
+```
+
+Do not delete previous test results or weights while the new path is being
+validated.
 
 ## Active Entrypoints
 
@@ -88,18 +128,42 @@ scripts/pipeline/run_e2e_inference.py --renderer ir
 scripts/pipeline/step5_generate_tex.py --renderer ir
 ```
 
-`--renderer ir` is the production surface. `--renderer tree` is kept only for
-debugging the legacy TreeDecoder renderer and must not be used for current
-quality reports.
+Experimental float-proxy rebuild/relabel:
+
+```bash
+TAG=v7_floatproxy_adapter_$(date +%Y%m%d_%H%M%S) \
+INPUT_MANIFEST=data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json \
+WORKERS=4 \
+PYTHON_BIN=/root/miniconda3/envs/pdf2latex/bin/python \
+EMBEDDING_DEVICE=cpu \
+bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
+```
+
+`--renderer ir` is the only production surface exposed by current E2E scripts.
+The legacy TreeDecoder renderer remains in code only for historical unit tests
+and low-level helper compatibility; production scripts no longer accept
+`--renderer tree`.
+
+Generator module ownership and the current full-v7/GNN-view/render-tree bridge
+are frozen in:
+
+```text
+docs/generator_logic_audit_2026_05_17.md
+```
+
+When generator behavior looks inconsistent, check that document before changing
+`ir_renderer.py`; most failures come from crossing the full-v7 render facts with
+the filtered GNN view.
 
 Decoder heading modes:
 
 ```text
 --heading-skeleton-mode legacy   baseline decoder behavior
 --heading-skeleton-mode stack    current production candidate: layout heading detector supplies
-                                 candidates/hints; deterministic stack owns heading parentage
-                                 and section scope; GNN parent edges only refine local
-                                 non-heading relations
+                                 candidates/hints; deterministic stack provides
+                                 outline priors and section-scope safety gates;
+                                 GNN parent edges remain part of the relation
+                                 bridge under physical/heading constraints
 --heading-skeleton-mode off      no heading skeleton; regression/debug baseline only
 ```
 
@@ -111,18 +175,65 @@ outline.
 
 ## Current Manifest Families
 
-Current active trainable clean set:
+Locked baseline trainable set and checkpoint family:
 
 ```text
-data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
-data/06_graph_features/v7_adapteraware_20260514_2109_labeled_graphs
+data/00_manifests/v7_registry_adapteraware_20260515_181724_labeled.json
+data/06_graph_features/v7_registry_adapteraware_20260515_181724_labeled_graphs
+data/09_eval_reports/ablations_v7_registry_adapteraware_20260515_181724/
 ```
 
-Current ablation matrix expects:
+Active experimental float-proxy set:
 
 ```text
-data/00_manifests/v7_adapteraware_20260514_2109_clean_trainable.json
+data/00_manifests/v7_floatproxy_adapter_20260516_205926_rebuilt.json
+data/00_manifests/v7_floatproxy_adapter_20260516_205926_labeled.json
+data/00_manifests/v7_floatproxy_adapter_20260516_205926_trainable_recall98.json
+data/06_graph_features/v7_floatproxy_adapter_20260516_205926_graphs
+data/06_graph_features/v7_floatproxy_adapter_20260516_205926_labeled_graphs
+data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_summary.json
 ```
+
+Current paper-facing evaluation suite:
+
+```text
+configs/ablation_matrix_current.json
+scripts/pipeline/run_current_full_eval_suite.py
+scripts/pipeline/collect_current_eval_results.py
+
+data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current/
+data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current_summary.json
+data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current_summary.csv
+data/09_eval_reports/current_e2e_comparison_hard20_floatcaption_rerun_20260518_132615/
+data/09_eval_reports/nougat_current_paired_hard20_floatcaption_rerun_20260518_132615/
+data/09_eval_reports/current_eval_rollup_hard20_floatcaption_rerun_20260518_132615_cleanmetrics/
+```
+
+`run_current_full_eval_suite.py` is the reproducible top-level command for
+collecting the current model/generator results.  It can skip completed stages
+and reuse outputs.  `collect_current_eval_results.py` is read-only and can be
+run at any time to generate a pending or final rollup.
+
+The ablation matrix filename still contains `20260514` for reproducibility, but
+new experiments must pass an explicit manifest and graph root. Do not infer the
+current data family from the matrix filename alone.
+
+Current float-proxy status:
+
+```text
+rebuild/relabel complete
+trainable docs: 1829
+edge_attr_dim: 26
+best ablation by positive macro F1: M06_y_network_plus_merge_gate
+M06 positive macro F1: 0.7532
+M06 MERGE F1: 0.5739
+M06 PARENT_CHILD F1: 0.9325
+M06 E2E smoke: 20 / 20 compiled
+```
+
+The float-proxy path is a valid experimental schema and should remain separate
+from the locked registry-adapter M07 baseline until heading-tree and
+float-caption E2E quality are improved.
 
 Current locked relation model direction:
 
@@ -134,6 +245,29 @@ M05 keeps type-aware GAT message passing for PARENT_CHILD while bypassing it
 for MERGE, using raw projected edge-pair features for the MERGE logit.  The
 hard MERGE gate is part of the current main path, not a separate post-hoc
 cleanup.
+
+## Evaluation Contract
+
+Evaluation is layered.  Do not use raw source-AST section attachment as the sole
+definition of success.
+
+Primary structural/reporting families:
+
+```text
+compile_success / layout_similarity
+paragraph_text_coverage
+paragraph_boundary_f1
+heading_tree_accuracy over section/subsection/subsubsection only
+section_attachment_body_no_float_f1
+float_caption_attachment_accuracy
+reference_section_completeness
+generated_structure_validity
+```
+
+Run-in `\paragraph` and `\subparagraph` are normalized as paragraph inline
+labels for comparison.  Figure/table/caption/footnote/reference/front-matter
+nodes are evaluated in their own tracks and should not dominate body section
+attachment.
 
 ## Runtime Boundaries
 
@@ -165,7 +299,8 @@ Kaggle tokens
 
 ```text
 README.md
-PROJECT_TUTORIAL.md
+docs/PROJECT_ARCHITECTURE_FULL.md
+docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md
 docs/PROJECT_SOURCE_OF_TRUTH.md
 docs/PROJECT_OVERVIEW.md
 docs/frontend_backend_contract_v1.md

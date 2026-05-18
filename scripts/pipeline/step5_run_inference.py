@@ -33,7 +33,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-threshold", type=float)
     parser.add_argument("--parent-threshold", type=float)
     parser.add_argument("--threshold", type=float, help="Legacy alias applied to both merge and parent thresholds")
-    parser.add_argument("--renderer", choices=["ir", "tree"], default="ir")
+    parser.add_argument("--renderer", choices=["ir"], default="ir")
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
     parser.add_argument("--render-table-crops", action="store_true")
     parser.add_argument("--logits-output", type=Path)
     return parser
@@ -60,6 +61,8 @@ def main() -> int:
         str(parent_threshold),
         "--renderer",
         args.renderer,
+        "--heading-skeleton-mode",
+        args.heading_skeleton_mode,
         "--asset-latex-prefix",
         args.asset_latex_prefix,
     ]

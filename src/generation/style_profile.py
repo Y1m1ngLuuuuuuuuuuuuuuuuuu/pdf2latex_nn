@@ -654,6 +654,51 @@ def _is_layout_node(node: DocumentNode) -> bool:
     return node.node_type not in {BlockType.HEADER_FOOTER, BlockType.FOOTNOTE, BlockType.MARGIN_NOTE, BlockType.TOC, BlockType.OTHER}
 
 
+def _is_mixed_column_blocker_node(node: DocumentNode) -> bool:
+    """Return whether a wide node should make the body layout mixed-column.
+
+    Body column mode must be learned from body evidence.  Front matter often
+    contains wide title/author/abstract blocks even in otherwise single-column
+    papers, and using those blocks as full-width blockers makes the generator
+    open unnecessary ``multicols`` regions.  Keep genuine body blockers
+    (figures, tables, display equations, body headings) while excluding
+    metadata, annotations, and noise.
+    """
+
+    if not _is_layout_node(node):
+        return False
+    layer = str(node.metadata.get("layout_layer") or "").casefold()
+    role = str(
+        node.metadata.get("layout_role")
+        or node.metadata.get("role")
+        or node.metadata.get("semantic_role")
+        or ""
+    ).casefold()
+    if layer in {"metadata_layer", "noise_layer", "annotation_layer"}:
+        return False
+    if node.flags.get("is_noise") or node.flags.get("is_header_footer"):
+        return False
+    if role in {
+        "abstract",
+        "abstract_body",
+        "abstract_title",
+        "affiliation",
+        "author",
+        "authors",
+        "correspondence",
+        "date",
+        "email",
+        "front_matter",
+        "index_terms",
+        "keywords",
+        "metadata",
+        "page_number",
+        "toc",
+    }:
+        return False
+    return bool(node.bboxes)
+
+
 def _is_body_style_node(node: DocumentNode) -> bool:
     if node.node_type not in {BlockType.TEXT, BlockType.LIST}:
         return False
@@ -887,7 +932,7 @@ def _page_has_full_width_blocker(nodes: list[DocumentNode], page_width: float, f
     center = page_width / 2.0
     margin = 0.05 * page_width
     for node in nodes:
-        if not _is_layout_node(node) or not node.bboxes:
+        if not _is_mixed_column_blocker_node(node):
             continue
         box = node.bboxes[0]
         width = max(box.x1 - box.x0, 0.0)

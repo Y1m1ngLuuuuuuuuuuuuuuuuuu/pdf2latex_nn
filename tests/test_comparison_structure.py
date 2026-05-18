@@ -50,6 +50,100 @@ def test_latex_to_comparison_extracts_core_structure(tmp_path: Path) -> None:
     assert "Method" in heading_texts
 
 
+def test_latex_to_comparison_filters_generated_layout_residue() -> None:
+    tex = r"""
+    \begin{document}
+    {\fontsize{14.50pt}{18.56pt}\selectfont}
+    \section{Intro}
+    Body text.
+    \begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\linewidth]{demo.png}
+    \caption{Figure 1: Demo figure.}
+    \end{figure}
+    \begin{minipage}[t]{0.511\linewidth}
+    More body text.
+    \end{minipage}
+    \end{document}
+    """
+    payload = latex_to_comparison(tex, doc_id="demo-layout-residue").to_dict()
+    texts = [block["text"] for block in payload["blocks"]]
+    assert "Body text." in texts
+    assert "More body text." in texts
+    assert "[H]" not in texts
+    assert "[t]{0.511}" not in texts
+    assert "14.50pt 18.56pt" not in texts
+    assert not any("linewidth" in text or "demo.png" in text for text in texts)
+
+
+def test_latex_to_comparison_does_not_turn_table_internals_into_body_paragraphs() -> None:
+    tex = r"""
+    \begin{document}
+    \section{Intro}
+    Body before.
+    \begin{table}[t]
+    \caption{Table 1: Scores.}
+    \begin{tabular}{cc}
+    A & B \\
+    1 & 2
+    \end{tabular}
+    \end{table}
+    Body after.
+    \end{document}
+    """
+    payload = latex_to_comparison(tex, doc_id="demo-table-residue").to_dict()
+    paragraphs = [block["text"] for block in payload["blocks"] if block["block_type"] == "paragraph"]
+    assert paragraphs == ["Body before.", "Body after."]
+    assert payload["test_items"]["counts"]["tables"] == 1
+    assert payload["test_items"]["counts"]["captions"] == 1
+
+
+def test_latex_to_comparison_parses_captionof_float_parent() -> None:
+    tex = r"""
+    \begin{document}
+    \section{Intro}
+    \includegraphics[width=\linewidth]{demo.png}
+    \captionof{figure}{Figure 1: Demo figure.}
+    \includegraphics[width=\linewidth]{scores.png}
+    \captionof{table}{Table 2: Demo table.}
+    \end{document}
+    """
+    payload = latex_to_comparison(tex, doc_id="demo-captionof").to_dict()
+    blocks = payload["blocks"]
+    by_id = {block["block_id"]: block for block in blocks}
+    captions = [block for block in blocks if block["block_type"] == "caption"]
+    assert payload["test_items"]["counts"]["figures"] == 1
+    assert payload["test_items"]["counts"]["tables"] == 1
+    assert len(captions) == 2
+    assert by_id[captions[0]["parent_id"]]["block_type"] == "figure"
+    assert by_id[captions[1]["parent_id"]]["block_type"] == "table"
+    assert captions[0]["marker"] == "figure"
+    assert captions[1]["marker"] == "table"
+
+
+def test_latex_to_comparison_does_not_treat_adjacent_inline_math_as_display_math() -> None:
+    tex = r"""
+    \begin{document}
+    \section{Method}
+    \subsection{Tokenizer}
+    \begin{itemize}
+    \item Codebook loss fits $Q$$\tau$ to the projected feature $z$.
+    \end{itemize}
+    \subsection{Training}
+    Training text after the list should belong to Training.
+    \end{document}
+    """
+    payload = latex_to_comparison(tex, doc_id="demo-adjacent-inline-math").to_dict()
+    blocks = payload["blocks"]
+    by_text = {block["text"]: block for block in blocks}
+    headings = [block for block in blocks if block["block_type"] == "heading"]
+    assert [heading["text"] for heading in headings] == ["Method", "Tokenizer", "Training"]
+    training = by_text["Training text after the list should belong to Training."]
+    training_heading = next(block for block in headings if block["text"] == "Training")
+    assert training["parent_id"] == training_heading["block_id"]
+    assert payload["test_items"]["counts"]["display_math"] == 0
+
+
 def test_markdown_to_comparison_extracts_nougat_like_structure(tmp_path: Path) -> None:
     markdown = """
     # Introduction

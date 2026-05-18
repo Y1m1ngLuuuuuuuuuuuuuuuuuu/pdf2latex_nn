@@ -133,8 +133,15 @@ INLINE_MATH_COMMANDS = {
     "langle",
     "rangle",
 }
-LIST_MARKER_RE = re.compile(r"^\s*(?P<marker>[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
+# OCR/PyMuPDF spans often attach a bullet directly to the first word
+# (``•Text``), or leak a closing punctuation mark before the bullet
+# (``)•Text``).  Treat those as list markers while keeping ordered markers
+# space-sensitive so section headings such as ``3.2 Title`` are not lists.
+BULLET_LIST_MARKER_RE = re.compile(r"^\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+LIST_MARKER_RE = re.compile(
+    r"^(?:\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*|\s*(?:\d+\.|[a-zA-Z]\.)\s+)"
+)
 DECIMAL_HEADING_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+\S")
 NUMERIC_ID_RE = re.compile(r"\d+")
 NOTE_MARKER_RE = re.compile(
@@ -182,6 +189,22 @@ CAPTION_TEXT_MATH_COMMAND_RE = re.compile(r"\\(?:mathrm|mathbf|mathit|mathsf|mat
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
 BARE_OPERATOR_EQUATION_RE = re.compile(r"^\\(?:arc)?(?:sin|cos|tan)\s*=")
+LATEX_FONTSIZE_WRAPPER_RE = re.compile(
+    r"\{\\fontsize\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\\selectfont\s*(?P<body>[^{}]*)\}",
+    re.DOTALL,
+)
+LATEX_FONTSIZE_COMMAND_RE = re.compile(
+    r"\\fontsize\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\\selectfont\s*",
+    re.DOTALL,
+)
+STRUCTURAL_LATEX_COMMAND_RE = re.compile(
+    r"\\(?:"
+    r"(?:sub)*section|paragraph|subparagraph|caption|captionof|label|ref|cite|"
+    r"begin\s*\{\s*(?:figure|table|algorithm|multicols|multicols\*|abstract|thebibliography)\s*\}|"
+    r"end\s*\{\s*(?:figure|table|algorithm|multicols|multicols\*|abstract|thebibliography)\s*\}"
+    r")",
+    re.IGNORECASE,
+)
 GREEK_CONTEXT_RE = re.compile(r"[αβγδεζηθικλμνξπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΠΡΣΤΥΦΧΨΩ]")
 GREEK_TO_LATEX = {
     "α": r"\alpha",
@@ -1165,6 +1188,8 @@ def render_equation(text: str, *, label: str | None = None) -> str:
     stripped = normalize_display_math_text(str(text or "").strip())
     if not stripped:
         return "\\[\n\n\\]"
+    if contains_structural_latex_command(stripped):
+        return render_display_math_fallback(stripped)
     if not is_safe_display_math_latex(stripped):
         return render_display_math_fallback(stripped)
     multi_tag_render = render_multi_tag_equation(stripped)
@@ -1224,6 +1249,10 @@ def is_safe_display_math_latex(text: str) -> bool:
     value = str(text or "").strip()
     if not value:
         return True
+    if contains_structural_latex_command(value):
+        return False
+    if _contains_unescaped_dollar(value):
+        return False
     if re.search(r"\\(?:frac|dfrac|tfrac)\s+(?!\{)", value):
         return False
     if re.search(r"\^\s*[-+]\s*[A-Za-z0-9]", value):
@@ -1387,9 +1416,14 @@ def should_render_as_align(text: str) -> bool:
 
 
 def render_inline_math(text: str) -> str:
-    stripped = str(text or "").strip()
+    stripped = sanitize_latex_render_artifacts(str(text or "")).strip()
     if not stripped:
         return "$$"
+    if contains_structural_latex_command(stripped) or _contains_unescaped_dollar(stripped[1:-1] if stripped.startswith("$") and stripped.endswith("$") else stripped):
+        return escape_latex(stripped)
+    if not _has_balanced_unescaped_braces(stripped):
+        return escape_latex(stripped)
+    stripped = strip_unbalanced_left_right_delimiters(stripped)
     if not is_plausible_inline_math_payload(stripped):
         return escape_latex(stripped)
     if stripped.startswith("$") and stripped.endswith("$") and len(stripped) >= 2:
@@ -1397,6 +1431,15 @@ def render_inline_math(text: str) -> str:
     if stripped.startswith(r"\(") and stripped.endswith(r"\)") and len(stripped) >= 4:
         return r"\(" + normalize_inline_math_unicode(stripped[2:-2].strip()) + r"\)"
     return "$" + normalize_inline_math_unicode(stripped) + "$"
+
+
+def strip_unbalanced_left_right_delimiters(text: str) -> str:
+    value = str(text or "")
+    left_count = len(re.findall(r"\\left\b|\\left(?=[\\.()\[\]{}|])", value))
+    right_count = len(re.findall(r"\\right\b|\\right(?=[\\.()\[\]{}|])", value))
+    if left_count == right_count:
+        return value
+    return re.sub(r"\\(?:left|right)\s*", "", value)
 
 
 def normalize_inline_math_unicode(text: str) -> str:
@@ -1415,11 +1458,40 @@ def normalize_display_math_text(text: str) -> str:
     semantics while compacting only known math command patterns.
     """
 
-    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    normalized = sanitize_latex_render_artifacts(text)
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(normalized or ""))
     normalized = normalize_duplicate_math_command_slashes(normalized)
     normalized = separate_glued_math_commands(normalized)
     normalized = normalize_math_ocr_spacing(normalized)
     return normalized.strip()
+
+
+def sanitize_latex_render_artifacts(text: object) -> str:
+    r"""Remove renderer-only style commands before math/text safety checks.
+
+    Span-level font preservation is useful in ordinary text, but OCR/math
+    fragments sometimes get emitted as ``{\fontsize{...}\selectfont x}``.
+    Those commands are illegal inside many reconstructed math fragments and can
+    also make the evaluation parser swallow following ``\section`` or
+    ``\caption`` commands.  Keep the payload and drop only the style wrapper.
+    """
+
+    value = str(text or "")
+    previous = None
+    while previous != value:
+        previous = value
+        value = LATEX_FONTSIZE_WRAPPER_RE.sub(lambda match: match.group("body"), value)
+    value = LATEX_FONTSIZE_COMMAND_RE.sub("", value)
+    value = value.replace("\\selectfont", "")
+    return value
+
+
+def contains_structural_latex_command(text: object) -> bool:
+    return bool(STRUCTURAL_LATEX_COMMAND_RE.search(str(text or "")))
+
+
+def _contains_unescaped_dollar(text: str) -> bool:
+    return find_unescaped(str(text or ""), "$", 0) is not None
 
 
 MATH_TEXT_BRACE_COMMANDS = {
@@ -1819,7 +1891,7 @@ def canonical_render_type(record: dict[str, Any]) -> str:
 
 
 def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
-    value = str(text or "")
+    value = sanitize_latex_render_artifacts(text)
     if not value:
         return ""
     rendered: list[str] = []

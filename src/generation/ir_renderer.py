@@ -20,24 +20,35 @@ from src.generation.ir_renderers.context import DocumentNodeRenderContext, Rende
 from src.generation.latex_renderer import (
     clean_float_caption_text,
     escape_latex,
+    figure_include_width,
     render_figure_block,
     render_figure_minipage_group,
+    render_algorithm_block,
     render_inline_math,
     render_table_placeholder,
     render_text_with_inline_latex,
     strip_list_marker,
 )
 from src.generation.source_float_layout import SourceFloatLayout, SourceTableLayout
+from src.generation.table_assets import ensure_pdf_region_crop
 from src.ir import BBox, BlockType, DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode, StyleProfile, StyleSpan
-from src.perception.title_features import strip_title_numbering
+from src.perception.title_features import strip_title_numbering, title_numbering_info
 
 
 CITE_COMMAND_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|ref|autoref|cref)\*?(?:\[[^\]]*\])?\{[^{}]+\}")
-LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+\.|[a-zA-Z]\.)\s+")
+# OCR/PyMuPDF spans often attach a bullet directly to the first word
+# (``•Text``), or leak a closing punctuation mark before the bullet
+# (``)•Text``).  Treat those as list markers while keeping ordered markers
+# space-sensitive so section headings such as ``3.2 Title`` are not lists.
+BULLET_LIST_MARKER_RE = re.compile(r"^\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+LIST_MARKER_RE = re.compile(
+    r"^(?:\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*|\s*(?:\d+\.|[a-zA-Z]\.)\s+)"
+)
 DECIMAL_HEADING_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+\S")
 NUMERIC_ID_RE = re.compile(r"\d+")
 APPENDIX_TITLE_PREFIX_RE = re.compile(r"^\s*(?:appendix\s+)?[A-Z](?:\.\d+)*\.?\s+", re.IGNORECASE)
+ALGORITHM_CAPTION_LINE_RE = re.compile(r"^\s*Algorithm\s*(?:[A-Za-z]?\d+(?:\.\d+)*)?\s*[:.\-]?\s*(?P<title>.*)$", re.IGNORECASE)
 BALANCED_MULTICOLS_BEGIN = r"\begin{multicols}{2}"
 BALANCED_MULTICOLS_END = r"\end{multicols}"
 REFERENCE_MULTICOLS_BEGIN = r"\begin{multicols*}{2}"
@@ -416,6 +427,14 @@ class OriginalLikeIRLatexRenderer:
 
     def _clean_appendix_heading_text(self, text: str) -> str:
         return _clean_appendix_heading_text(text)
+
+    def _heading_render_text_and_star(
+        self,
+        text: str,
+        role: RenderRole,
+        attributes: dict[str, object],
+    ) -> tuple[str, str]:
+        return _heading_render_text_and_star(text, role, attributes)
 
     def _split_run_in_heading_source(self, source_nodes: list[DocumentNode]) -> tuple[str, str] | None:
         return _split_run_in_heading_source(source_nodes)
@@ -986,6 +1005,35 @@ class OriginalLikeIRLatexRenderer:
             parts.append(rendered)
         return self._replace_cross_refs("".join(parts).strip(), node=node)
 
+    def _should_render_spans_for_node(self, node: DocumentNode, text: str) -> bool:
+        """Use PyMuPDF spans only when they cover the canonical node text.
+
+        Span-level rendering preserves bold/italic/math details, but clipped
+        spans can cover only the first visual line of a MinerU block.  In that
+        case rendering spans silently drops the rest of the canonical v7 text,
+        which is especially visible for cross-page list items.  Prefer complete
+        MinerU text over partial typography.
+        """
+
+        if not node.spans:
+            return False
+        canonical = _compact_span_coverage_text(text or node.text)
+        if len(canonical) < 60:
+            return True
+        span_text = " ".join(str(span.text or "") for span in node.spans if str(span.text or "").strip())
+        compact_span = _compact_span_coverage_text(span_text)
+        if not compact_span:
+            return False
+        coverage = len(compact_span) / max(len(canonical), 1)
+        if coverage >= 0.72:
+            return True
+        prefix_probe = compact_span[: min(40, len(compact_span))]
+        if prefix_probe and canonical.startswith(prefix_probe):
+            return False
+        if compact_span in canonical:
+            return False
+        return coverage >= 0.55
+
     def _consume_span_marker_note(self, node_id: str, text: str, script_role: str | None) -> "_ResolvedNote | None":
         if script_role != "superscript" or self._active_notes is None:
             return None
@@ -1011,11 +1059,13 @@ class OriginalLikeIRLatexRenderer:
     def _apply_span_font_size(self, rendered: str, span: StyleSpan, baseline_size: float | None) -> str:
         if not self.config.preserve_span_font_size or span.font_size is None or not baseline_size:
             return rendered
-        ratio = float(span.font_size) / baseline_size
-        if abs(ratio - 1.0) < self.config.span_font_size_delta_threshold:
-            return rendered
-        line_height = float(span.font_size) * 1.2
-        return rf"{{\fontsize{{{float(span.font_size):.2f}pt}}{{{line_height:.2f}pt}}\selectfont {rendered}}}"
+        # Local span-level font sizing is too unstable for OCR-derived inline
+        # content.  A tiny style change around math often produces constructs
+        # like ``$x${\fontsize... 1}``, while longer OCR math descriptions can
+        # leak ``\fontsize`` into paragraphs.  Preserve typography through the
+        # global style profile, headings, front matter, bold/italic, and script
+        # inference instead of emitting inline ``\fontsize`` commands here.
+        return rendered
 
     def _span_script_role(self, span: StyleSpan, node: DocumentNode, baseline_size: float | None) -> str | None:
         if not self.config.preserve_span_scripts or span.bbox is None or span.font_size is None or not baseline_size:
@@ -1159,6 +1209,55 @@ class OriginalLikeIRLatexRenderer:
             as_nonfloat=self._mixed_column_stack > 0,
             label=self._cross_ref_label_for_document_node(primary, "figure") if primary is not None else None,
         )
+
+    def _render_algorithm(
+        self,
+        source_nodes: list[DocumentNode],
+        text: str,
+        *,
+        label: str | None = None,
+    ) -> str:
+        """Render algorithms as visual crops when PDF geometry is available.
+
+        Pseudocode OCR is especially brittle: spacing, indentation, math
+        symbols, and line numbers all carry meaning.  For original-like
+        reconstruction we therefore prefer the physical bbox crop, mirroring
+        the table/figure fallback strategy.  The old algorithmic renderer is
+        retained as a graceful fallback for unit tests or documents without a
+        source PDF.
+        """
+
+        primary = _primary_visual_node(source_nodes, BlockType.ALGORITHM)
+        if primary is None and source_nodes:
+            primary = min(source_nodes, key=lambda node: node.reading_index)
+        if primary is None:
+            return render_algorithm_block(text, label=label)
+
+        record = document_node_record(primary)
+        caption = _algorithm_caption_from_node(primary, text)
+        asset_path = ensure_pdf_region_crop(
+            record,
+            source_pdf=_source_pdf_for_node(primary),
+            asset_output_dir=self.config.figure_asset_output_dir or self.config.table_asset_output_dir,
+            asset_latex_prefix=self.config.figure_asset_latex_prefix,
+            kind="algorithm",
+            bbox_keys=("algorithm_group_bbox", "code_group_bbox", "bbox"),
+            id_keys=("algorithm_group_id", "code_group_id", "node_id", "id", "block_id", "global_order", "original_index", "mineru_block_idx"),
+        )
+        if not asset_path:
+            return render_algorithm_block(text or primary.text, label=label)
+
+        # Algorithm crops preserve indentation, rules, line numbers, and
+        # pseudocode spacing.  Scaling them by the physical bbox width makes
+        # the crop shrink inside the algorithm float; instead, let the crop
+        # occupy the full available algorithm frame.
+        lines = [r"\begin{algorithm}[H]", r"\centering", rf"\includegraphics[width=1.000\linewidth]{{{asset_path}}}"]
+        if caption:
+            lines.append(rf"\caption{{{render_text_with_inline_latex(caption)}}}")
+        if label:
+            lines.append(rf"\label{{{label}}}")
+        lines.append(r"\end{algorithm}")
+        return "\n".join(lines)
 
     def _remember_float_caption(self, text: str, kind: str) -> None:
         for key in _float_caption_dedup_keys(text, kind):
@@ -1416,6 +1515,10 @@ def _clean_render_text(text: object) -> str:
     return value
 
 
+def _compact_span_coverage_text(text: object) -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "", _clean_render_text(text)).casefold()
+
+
 def _is_abstract_label(text: str) -> bool:
     return " ".join(str(text or "").split()).casefold().strip(" .:;") == "abstract"
 
@@ -1432,6 +1535,62 @@ def _clean_appendix_heading_text(text: str) -> str:
         return ""
     stripped = APPENDIX_TITLE_PREFIX_RE.sub("", value, count=1).strip()
     return stripped or _clean_heading_text(value)
+
+
+def _heading_render_text_and_star(
+    text: str,
+    role: RenderRole,
+    attributes: dict[str, object],
+) -> tuple[str, str]:
+    """Return ``(heading_text, star_suffix)`` for a visible-title-preserving heading.
+
+    The previous IR renderer always stripped visible numbering and emitted
+    ``\\section{...}``, relying on LaTeX counters to recreate the prefix.  That is
+    only safe for the default Arabic/decimal hierarchy.  Real PDFs use Roman,
+    alphabetic, Chinese, ``0.1`` and template-specific heading prefixes.  For
+    those, preserve the original visible prefix with a starred command.  If the
+    source heading had no visible prefix, also use a starred command so the
+    renderer does not invent one.
+    """
+
+    value = _clean_render_text(text).strip()
+    if not value:
+        return "", ""
+    if attributes.get("appendix_heading"):
+        # After ``\appendix`` LaTeX already owns Appendix A/B style counters.
+        # Keep the historical appendix behavior so ``Appendix A Proofs`` becomes
+        # ``\section{Proofs}`` under the appendix counter.
+        return _clean_appendix_heading_text(value), ""
+
+    numbering = title_numbering_info(value)
+    has_numbering = bool(numbering.get("has_numbering"))
+    if bool(attributes.get("heading_unnumbered")):
+        return _clean_heading_text(value), "*"
+    if not has_numbering:
+        return _clean_heading_text(value), "*"
+    if _heading_numbering_matches_default_latex_counter(numbering, role):
+        return _clean_heading_text(value), ""
+    return value, "*"
+
+
+def _heading_numbering_matches_default_latex_counter(numbering: dict[str, object], role: RenderRole) -> bool:
+    style = str(numbering.get("style") or "none")
+    path = tuple(str(part) for part in (numbering.get("path") or ()))
+    token = str(numbering.get("token") or "")
+    if not path or token.startswith("0"):
+        return False
+    if style == "arabic":
+        return role == RenderRole.SECTION and len(path) == 1 and path[0].isdigit()
+    if style == "decimal":
+        if not all(part.isdigit() for part in path):
+            return False
+        if path[0] == "0":
+            return False
+        if role == RenderRole.SUBSECTION:
+            return len(path) == 2
+        if role == RenderRole.SUBSUBSECTION:
+            return len(path) >= 3
+    return False
 
 
 def _wrap_unbalanced_two_columns(body: str) -> str:
@@ -1985,7 +2144,12 @@ SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 
 def _strip_note_marker(text: str, metadata: dict[str, object] | None = None) -> tuple[str, str | None]:
     metadata = metadata or {}
-    marker_value = metadata.get("footnote_marker") or metadata.get("footnote_label")
+    marker_value = (
+        metadata.get("footnote_marker")
+        or metadata.get("footnote_label")
+        or metadata.get("note_marker")
+        or metadata.get("note_label")
+    )
     marker = str(marker_value).strip() if marker_value is not None and str(marker_value).strip() else None
     value = str(text or "").strip()
     match = NOTE_MARKER_RE.match(value)
@@ -2011,7 +2175,13 @@ def _inline_note_marker(text: str) -> str | None:
 
 
 def _explicit_note_anchor(note_node: DocumentNode) -> str | None:
-    value = note_node.metadata.get("footnote_anchor") or note_node.metadata.get("anchor_node_id")
+    value = (
+        note_node.metadata.get("footnote_anchor")
+        or note_node.metadata.get("note_anchor")
+        or note_node.metadata.get("anchor_node_id")
+        or note_node.metadata.get("anchor_id")
+        or note_node.metadata.get("source_anchor_id")
+    )
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -3061,6 +3231,25 @@ def _figure_label_source_node(members: list[DocumentNode], fallback: DocumentNod
         if _figure_caption_identity(node) is not None:
             return node
     return fallback
+
+
+def _algorithm_caption_from_node(node: DocumentNode, text: str) -> str:
+    for key in ("algorithm_group_caption", "algorithm_caption", "caption"):
+        value = node.metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return _clean_algorithm_caption_candidate(value)
+    first_line = next((line.strip() for line in str(text or node.text or "").splitlines() if line.strip()), "")
+    return _clean_algorithm_caption_candidate(first_line)
+
+
+def _clean_algorithm_caption_candidate(text: str) -> str:
+    match = ALGORITHM_CAPTION_LINE_RE.match(str(text or "").strip())
+    if not match:
+        return ""
+    title = match.group("title").strip()
+    if not title or len(title) > 120:
+        return "Algorithm"
+    return clean_float_caption_text(title, "algorithm") or title
 
 
 def _should_render_figure_minipages(nodes: list[DocumentNode]) -> bool:

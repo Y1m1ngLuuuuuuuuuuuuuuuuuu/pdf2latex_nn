@@ -43,6 +43,8 @@ def test_structure_metrics_score_clean_structure() -> None:
     assert metrics["heading_tree_accuracy"]["score"] == 1.0
     assert metrics["reading_order_accuracy"]["score"] == 1.0
     assert metrics["paragraph_merge_f1"]["f1"] == 1.0
+    assert metrics["paragraph_boundary_f1"]["f1"] == 1.0
+    assert metrics["paragraph_text_coverage_f1"]["f1"] == 1.0
     assert metrics["section_attachment_f1"]["f1"] == 1.0
     assert metrics["reference_section_completeness"]["score"] == 1.0
     assert metrics["float_caption_attachment_accuracy"]["score"] == 1.0
@@ -97,3 +99,27 @@ def test_structure_metrics_catches_reading_order_inversion() -> None:
     ).to_dict()
     metrics = evaluate_comparison_structures(gold, pred)
     assert metrics["reading_order_accuracy"]["score"] < 1.0
+
+
+def test_structure_metrics_text_coverage_tolerates_split_paragraphs() -> None:
+    gold = markdown_to_comparison(
+        """
+        # A
+
+        Alpha beta gamma delta epsilon zeta eta theta.
+        """
+    ).to_dict()
+    pred = markdown_to_comparison(
+        """
+        # A
+
+        Alpha beta gamma delta.
+
+        Epsilon zeta eta theta.
+        """
+    ).to_dict()
+    metrics = evaluate_comparison_structures(gold, pred)
+    assert metrics["strict_block_match"]["matched_blocks"] < len(gold["blocks"])
+    assert metrics["paragraph_boundary_f1"]["f1"] < 1.0
+    assert metrics["paragraph_text_coverage_f1"]["f1"] == 1.0
+    assert metrics["section_attachment_f1"]["f1"] == 1.0

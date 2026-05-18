@@ -1410,6 +1410,35 @@ def test_tree_decoder_renders_algorithm_as_algorithmic_float():
     assert r"x\_i" not in tex
 
 
+def test_heading_stack_reuses_document_local_style_levels():
+    from src.reasoning.postprocess import ResolvedNode, build_heading_skeleton
+
+    def record(text: str, size: float, *, band: str = "full_span") -> dict[str, object]:
+        return {
+            "type": "title",
+            "text": text,
+            "layout_role": "heading",
+            "layout_band_type": band,
+            "style_spans": [{"text": text, "font_size": size, "is_bold": True}],
+        }
+
+    nodes = {
+        0: ResolvedNode(node_id=0, record=record("Introduction", 14.0)),
+        1: ResolvedNode(node_id=1, record=record("Background", 12.0, band="double_column")),
+        2: ResolvedNode(node_id=2, record=record("Method", 14.0)),
+        3: ResolvedNode(node_id=3, record=record("Training Details", 12.0, band="double_column")),
+    }
+    for order, node in nodes.items():
+        node.record["global_order"] = order
+
+    skeleton = build_heading_skeleton(nodes, mode="stack")
+
+    assert skeleton.heading_levels == {0: 1, 1: 2, 2: 1, 3: 2}
+    assert skeleton.heading_parent == {0: None, 1: 0, 2: None, 3: 2}
+    assert nodes[2].record["_heading_style_level_source"] == "reused-style"
+    assert nodes[3].record["_heading_style_level_source"] == "reused-style"
+
+
 def test_tree_decoder_algorithmic_converts_unicode_to_math_latex():
     records = [{"type": "algorithm", "text": "return θ ← θ - β∇L"}]
 

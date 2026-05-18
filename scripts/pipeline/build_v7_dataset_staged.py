@@ -37,6 +37,7 @@ from scripts.pipeline.build_mini_dataset import (  # noqa: E402
     CandidateSample,
     MiniDatasetConfig,
     ProcessedSample,
+    default_mineru_env_prefix,
     default_mineru_command,
     find_mineru_content_source,
     format_mineru_command,
@@ -612,7 +613,7 @@ def format_mineru_batch_command(batch_dir: Path, config: StagedConfig) -> str:
 def default_mineru_batch_command() -> str:
     autodl_mineru = Path("/root/miniconda3/envs/mineru/bin/mineru")
     executable = str(autodl_mineru) if autodl_mineru.exists() else "mineru"
-    return f"{shlex.quote(executable)} -p {{pdf_batch_dir}} -o {{mineru_output_dir}} -m auto -b pipeline"
+    return f"{default_mineru_env_prefix()} {shlex.quote(executable)} -p {{pdf_batch_dir}} -o {{mineru_output_dir}} -m auto -b pipeline"
 
 
 def chunked(items: list[CandidateSample], size: int) -> list[list[CandidateSample]]:

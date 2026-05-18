@@ -234,6 +234,29 @@ def test_candidate_edges_add_scope_and_float_skip_recall_edges():
     assert any(source == 4 and target == 5 for source, target, _ in pairs)
 
 
+def test_float_skip_edge_attr_marks_intervening_float_proxy():
+    if not has_torch():
+        return
+    import torch
+
+    items = [
+        item("Paragraph before float", [80, 100, 480, 150], page=0),
+        {
+            **item("Table 1: Results", [80, 170, 920, 550], page=0, full=True),
+            "type": "table",
+            "layout_layer": "float_layer",
+            "gnn_proxy_kind": "float_proxy",
+        },
+        item("continues after table.", [80, 580, 480, 630], page=0),
+    ]
+    semantic = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)
+    edge_attr = build_edge_attr_matrix(items, semantic, edge_pairs=[(0, 2, "float_skip")])
+
+    values = edge_attr[0].tolist()
+    assert tuple(edge_attr.shape) == (1, len(EDGE_ATTR_FIELDS))
+    assert values[-4:] == [1.0, 1.0, 0.0, 1.0]
+
+
 def test_candidate_edges_connect_visible_list_intro_to_bullet_items():
     items = [
         {**item("1 Introduction", [80, 80, 360, 110], page=0), "type": "title"},

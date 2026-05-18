@@ -1,0 +1,166 @@
+{
+  "schema_version": "ablation_matrix_current_v1",
+  "description": "Current v7 float-proxy adapter ablation suite. This matrix keeps the 3-class GNN task as the main line and evaluates architecture, feature, and training ablations on the latest clean relabeled graph set. It does not change the generator; generator/E2E comparisons are run separately with the canonical IR renderer.",
+  "common": {
+    "python_bin": "/root/miniconda3/envs/pdf2latex/bin/python",
+    "root": "data/06_graph_features_v7_floatproxy_adapter_20260516_205926_ablation_cache",
+    "manifest": "data/00_manifests/v7_floatproxy_adapter_20260516_205926_trainable_recall98.json",
+    "output_root": "data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current",
+    "epochs": 30,
+    "batch_size": 8,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "hidden_dim": 128,
+    "heads": 4,
+    "num_layers": 2,
+    "predictor_hidden_dims": "512,128",
+    "predictor_layer_norm": true,
+    "edge_feature_mode": "full",
+    "message_edge_mode": "type_aware",
+    "prediction_architecture": "y_network",
+    "merge_gate_mode": "hard",
+    "merge_gate_logit": -20.0,
+    "semantic_hidden_dim": 96,
+    "layout_hidden_dim": 64,
+    "dropout": 0.1,
+    "loss": "cross_entropy",
+    "class_weights": "custom",
+    "class_weight_values": "8,3,1",
+    "ohem_negative_ratio": 5.0,
+    "ohem_min_negatives": 256,
+    "train_negative_dropout": 0.0,
+    "device": "auto",
+    "num_workers": 2,
+    "seed": 7,
+    "repeat_seeds": [
+      7
+    ],
+    "selection_metric": "val_positive_macro_f0_5"
+  },
+  "calibration": {
+    "enabled": true,
+    "tau_min": 0.05,
+    "tau_max": 0.95,
+    "tau_step": 0.01,
+    "mode": "threshold_priority",
+    "apply_merge_gates": true,
+    "precision_floors": "0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"
+  },
+  "experiments": [
+    {
+      "name": "M06_current_main_merge_gate",
+      "family": "main",
+      "hypothesis": "The current locked main model balances MERGE precision and PARENT_CHILD quality with a Y-network, type-aware message propagation, and hard MERGE gate.",
+      "purpose": "Main model for paper-facing current experiments.",
+      "args": {}
+    },
+    {
+      "name": "M05_no_merge_gate",
+      "family": "architecture",
+      "hypothesis": "Removing the MERGE gate should increase false positive contractions and reduce production safety.",
+      "purpose": "Y-network + type-aware message mask without class-specific MERGE suppression.",
+      "args": {
+        "merge_gate_mode": "none"
+      }
+    },
+    {
+      "name": "M07_gaussian_edge_feature",
+      "family": "architecture",
+      "hypothesis": "Gaussian proximity should provide an additional physical locality cue for the PARENT/NONE branch.",
+      "purpose": "Main model plus runtime gaussian_proximity derived from center_distance.",
+      "args": {
+        "gaussian_edge_feature_mode": "center",
+        "gaussian_sigma": 0.1
+      }
+    },
+    {
+      "name": "A00_old_shared_gat",
+      "family": "architecture",
+      "hypothesis": "The old shared-head GAT underperforms the Y-network because MERGE and PARENT_CHILD need different information paths.",
+      "purpose": "Historical architecture baseline.",
+      "args": {
+        "prediction_architecture": "shared",
+        "message_edge_mode": "all",
+        "merge_gate_mode": "none",
+        "num_layers": 3,
+        "predictor_hidden_dims": "1024,512,128"
+      }
+    },
+    {
+      "name": "A01_no_message_passing",
+      "family": "architecture",
+      "hypothesis": "No message passing should protect local MERGE features but weaken hierarchy and attachment decisions.",
+      "purpose": "Classify from projected local node/edge features only.",
+      "args": {
+        "num_layers": 0,
+        "message_edge_mode": "all"
+      }
+    },
+    {
+      "name": "A02_no_type_aware_message_mask",
+      "family": "architecture",
+      "hypothesis": "Allowing all candidate edges to propagate messages should increase message pollution from float/table/noise nodes.",
+      "purpose": "Current Y-network with unrestricted propagation.",
+      "args": {
+        "message_edge_mode": "all"
+      }
+    },
+    {
+      "name": "F00_no_scibert",
+      "family": "node_features",
+      "hypothesis": "Without SciBERT, semantic continuation and ambiguous local attachment should degrade.",
+      "purpose": "Zero only the semantic feature group.",
+      "args": {
+        "ablate_node_groups": "semantic"
+      }
+    },
+    {
+      "name": "F01_no_geometry_layout",
+      "family": "node_features",
+      "hypothesis": "Without geometry/layout features, column, float, and hierarchy cues should degrade.",
+      "purpose": "Keep semantic/type cues and remove most layout evidence.",
+      "args": {
+        "ablate_node_groups": "geometry,scroll,derived,style,sequence,column,title,layout_layer,flow_context",
+        "ablate_edge_groups": "spatial,typography,overlap_gutter,index_bins,layout_flow"
+      }
+    },
+    {
+      "name": "F02_no_v7_reading_flow",
+      "family": "node_features",
+      "hypothesis": "Removing repaired v7 reading-flow cues should reveal the value of band/column flow reconstruction.",
+      "purpose": "Remove sequence, scroll, column, layout-layer, flow-context and matching edge flow cues.",
+      "args": {
+        "ablate_node_groups": "scroll,sequence,column,layout_layer,flow_context",
+        "ablate_edge_groups": "index_bins,layout_flow"
+      }
+    },
+    {
+      "name": "E00_no_punctuation",
+      "family": "edge_features",
+      "hypothesis": "Terminal punctuation and hyphen probes are important MERGE boundary cues.",
+      "purpose": "Remove source punctuation and hyphen edge probes.",
+      "args": {
+        "ablate_edge_groups": "punctuation"
+      }
+    },
+    {
+      "name": "E01_no_gutter_overlap",
+      "family": "edge_features",
+      "hypothesis": "Y-overlap and gutter cues suppress cross-column false MERGE.",
+      "purpose": "Remove y-overlap and x-gutter edge features.",
+      "args": {
+        "ablate_edge_groups": "overlap_gutter"
+      }
+    },
+    {
+      "name": "T00_no_ohem",
+      "family": "training",
+      "hypothesis": "Without OHEM, the long-tail NONE distribution should wash out positive relations.",
+      "purpose": "Current model trained with ordinary weighted CE only.",
+      "args": {
+        "ohem_negative_ratio": 0.0,
+        "ohem_min_negatives": 0
+      }
+    }
+  ]
+}

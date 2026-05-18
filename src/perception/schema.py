@@ -118,6 +118,10 @@ EDGE_ATTR_FIELDS = [
     "same_band_column",
     "band_order_delta",
     "crosses_band_boundary",
+    "is_float_skip_edge",
+    "has_float_between",
+    "has_figure_between",
+    "has_table_between",
 ]
 NON_TEXT_DENSITY_TYPES = {
     BlockType.EQUATION.value,

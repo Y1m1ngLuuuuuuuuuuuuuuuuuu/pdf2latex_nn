@@ -1,6 +1,6 @@
 # V7 Training And Monitoring
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This is the current operational runbook for v7 data production, relabeling, training, ablation, and monitoring.
 
@@ -37,13 +37,27 @@ quality-gated manifest writing
 When MinerU/v7 content already exists, do not rerun MinerU. Use:
 
 ```bash
-TAG=v7_dupcont_crossref_20260513 \
+TAG=<new_experiment_tag> \
 INPUT_MANIFEST=data/00_manifests/<input_manifest>.json \
 WORKERS=4 \
 PYTHON_BIN=/root/miniconda3/envs/pdf2latex/bin/python \
 EMBEDDING_DEVICE=cpu \
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
+
+Current float-proxy experiment:
+
+```bash
+TAG=v7_floatproxy_adapter_$(date +%Y%m%d_%H%M%S) \
+INPUT_MANIFEST=data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json \
+WORKERS=4 \
+PYTHON_BIN=/root/miniconda3/envs/pdf2latex/bin/python \
+EMBEDDING_DEVICE=cpu \
+bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
+```
+
+This produces a new manifest/graph family and intentionally does not overwrite
+the locked adapter-aware baseline results.
 
 Outputs:
 
@@ -74,6 +88,7 @@ labeled manifest appears after relabel
 candidate_edge_recall close to required threshold
 effective orphan ratio below gate
 label distribution not all NONE
+node_dim / edge_dim match the intended experiment
 ```
 
 ## Training
@@ -98,7 +113,7 @@ python scripts/pipeline/train_edge_gnn_full.py \
 
 The split is document-level. Never use page-level random splitting.
 
-Current locked default:
+Historical locked default:
 
 ```text
 M05_y_network_dual_head
@@ -115,6 +130,33 @@ same architecture as M05, with hard MERGE physical gate
 thresholds: tau_merge=0.41, tau_parent=0.49
 ```
 
+Current locked E2E model for generator experiments:
+
+```text
+M07_y_network_plus_gaussian_edge_feature
+checkpoint: data/09_eval_reports/ablations_v7_registry_adapteraware_20260515_181724/M07_y_network_plus_gaussian_edge_feature/seed_7/best_model.pth
+thresholds: tau_merge=0.44, tau_parent=0.45
+```
+
+The float-proxy graph schema changes edge attributes, so it requires a fresh
+training run before it can replace or challenge the locked M07 baseline.
+
+Float-proxy run status, 2026-05-17:
+
+```text
+tag: v7_floatproxy_adapter_20260516_205926
+trainable manifest: data/00_manifests/v7_floatproxy_adapter_20260516_205926_trainable_recall98.json
+trainable docs: 1829
+edge_attr_dim: 26
+best model by positive macro F1: M06_y_network_plus_merge_gate
+checkpoint: data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926/M06_y_network_plus_merge_gate/seed_7/best_model.pth
+thresholds: tau_merge=0.37, tau_parent=0.45
+E2E smoke: 20 / 20 compiled
+```
+
+Do not mix checkpoints between the registry-adapter schema and the float-proxy
+schema.  Their edge feature contracts differ.
+
 ## Ablation
 
 Prepare scripts:
@@ -126,9 +168,17 @@ python scripts/pipeline/prepare_ablation_suite.py
 Run after the labeled manifest exists:
 
 ```bash
-nohup bash data/08_runs/run_ablation_matrix_v3.sh \
-  > logs/ablation_matrix_v3_20260514.log 2>&1 &
+python scripts/pipeline/prepare_ablation_suite.py \
+  --matrix configs/ablation_matrix_v7_adapteraware_20260514_2109.json \
+  --output-sh data/08_runs/run_ablation_matrix_<tag>.sh \
+  --output-json data/09_eval_reports/ablation_matrix_<tag>_commands.json
+
+nohup bash data/08_runs/run_ablation_matrix_<tag>.sh \
+  > logs/ablation_matrix_<tag>.log 2>&1 &
 ```
+
+When testing a new adapter/schema family, prepare a new ablation command file
+instead of reusing historical M05/M07 checkpoints.
 
 ## Visual QA
 

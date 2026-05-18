@@ -40,7 +40,30 @@ from tools.profile_candidate_edge_recall import profile_candidate_recall  # noqa
 def default_mineru_command() -> str:
     autodl_mineru = Path("/root/miniconda3/envs/mineru/bin/mineru")
     executable = str(autodl_mineru) if autodl_mineru.exists() else "mineru"
-    return f"{shlex.quote(executable)} -p {{pdf}} -o {{mineru_output_dir}} -m auto -b pipeline"
+    return f"{default_mineru_env_prefix()} {shlex.quote(executable)} -p {{pdf}} -o {{mineru_output_dir}} -m auto -b pipeline"
+
+
+def default_mineru_env_prefix() -> str:
+    """Force MinerU to use local AutoDL model/cache paths.
+
+    MinerU 3.x starts a temporary FastAPI service and may otherwise resolve
+    model/cache paths through the process environment. Keeping this prefix in
+    the default command prevents accidental system-disk cache writes and avoids
+    silent remote model downloads during long batch jobs.
+    """
+    env = {
+        "MINERU_MODEL_SOURCE": "local",
+        "MINERU_TOOLS_CONFIG_JSON": "/root/mineru.json",
+        "XDG_CACHE_HOME": "/root/autodl-tmp/.cache",
+        "HF_HOME": "/root/autodl-tmp/.cache/huggingface",
+        "HUGGINGFACE_HUB_CACHE": "/root/autodl-tmp/.cache/huggingface/hub",
+        "MODELSCOPE_CACHE": "/root/autodl-tmp/.cache/modelscope",
+        "TORCH_HOME": "/root/autodl-tmp/.cache/torch",
+        "PADDLEOCR_HOME": "/root/autodl-tmp/.cache/paddleocr",
+        "MINERU_PROCESSING_WINDOW_SIZE": "32",
+        "MINERU_API_MAX_CONCURRENT_REQUESTS": "1",
+    }
+    return " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
 
 
 @dataclass(frozen=True)

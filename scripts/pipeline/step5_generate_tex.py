@@ -14,6 +14,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.adapters.mineru_v7_document_ir import stable_node_id  # noqa: E402
 from src.perception.gnn_view_adapter import GNNViewAdapterConfig, build_gnn_view  # noqa: E402
 from src.perception.reading_order import filter_graph_content_items, fuse_micro_nodes  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
@@ -31,7 +32,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-threshold", type=float, default=0.5)
     parser.add_argument("--parent-threshold", type=float, default=0.0)
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="legacy")
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
     parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table/figure crops")
@@ -40,12 +41,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asset-latex-prefix", default="assets", help="LaTeX path prefix for generated assets")
     parser.add_argument(
         "--renderer",
-        choices=["ir", "tree"],
+        choices=["ir"],
         default="ir",
-        help=(
-            "ir is the canonical v7 generation surface. tree keeps the legacy "
-            "TreeDecoder renderer for regression debugging only."
-        ),
+        help="Production renderer. Only the full-v7 IR surface is supported.",
     )
     parser.add_argument(
         "--render-crops",
@@ -116,26 +114,23 @@ def main() -> int:
     )
     root = decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
     document_title = args.title or infer_document_title(node_records)
-    if args.renderer == "ir":
-        if args.content_json is None:
-            raise ValueError("--renderer ir requires --content-json so graph predictions can map back to the full v7 IR")
-        from scripts.pipeline.batch_visual_qa_inference import render_decoded_tree_with_ir_backend  # noqa: PLC0415
+    if args.content_json is None:
+        raise ValueError("--renderer ir requires --content-json so graph predictions can map back to the full v7 IR")
+    from scripts.pipeline.batch_visual_qa_inference import render_decoded_tree_with_ir_backend  # noqa: PLC0415
 
-        tex = render_decoded_tree_with_ir_backend(
-            root,
-            node_records=node_records,
-            content_json=args.content_json,
-            pdf_path=resolved_source_pdf,
-            source_tex_path=args.source_tex,
-            document_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem),
-            title=document_title,
-            document_metadata=getattr(data, "document_metadata", None),
-            table_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
-            figure_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
-            asset_latex_prefix=args.asset_latex_prefix,
-        )
-    else:
-        tex = decoder.render_document(root, title=document_title, document_metadata=getattr(data, "document_metadata", None))
+    tex = render_decoded_tree_with_ir_backend(
+        root,
+        node_records=node_records,
+        content_json=args.content_json,
+        pdf_path=resolved_source_pdf,
+        source_tex_path=args.source_tex,
+        document_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem),
+        title=document_title,
+        document_metadata=getattr(data, "document_metadata", None),
+        table_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
+        figure_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
+        asset_latex_prefix=args.asset_latex_prefix,
+    )
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")
     pred_counts = torch.bincount(torch.clamp(logits.argmax(dim=-1), max=2), minlength=3).tolist()
@@ -225,13 +220,47 @@ def load_node_records(content_json: Path | None, data: Any) -> list[dict[str, An
 
 
 def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[dict[str, Any]]:
-    """Match content JSON records to graph nodes, trying micro-fusion when needed."""
+    """Match content JSON records to graph nodes with graph-side v7 ids.
+
+    The graph stores the exact ``gnn_idx -> v7 node id(s)`` mapping that was
+    used when ``edge_index`` and logits were produced.  Inference must use that
+    mapping as the source of truth; matching only by node count is unsafe
+    because a reordered GNN view would silently attach predicted edges to the
+    wrong full-v7 records.
+    """
 
     expected = int(data.num_nodes)
+    graph_source_ids = graph_gnn_to_v7_ids(data)
     view = build_gnn_view(
         records,
         config=GNNViewAdapterConfig(fuse_micro_nodes=bool(getattr(data, "micro_fusion_applied", False))),
     )
+    if graph_source_ids:
+        if len(graph_source_ids) != expected:
+            raise ValueError(
+                "graph gnn_to_v7_ids length does not match graph.num_nodes: "
+                f"{len(graph_source_ids)} != {expected}"
+            )
+        selected = select_records_by_graph_source_ids(records, graph_source_ids)
+        if len(selected) == expected:
+            return selected
+        if source_ids_for_view(view.gnn_items) == graph_source_ids:
+            return view.gnn_items
+        fallback_view = build_gnn_view(
+            records,
+            config=GNNViewAdapterConfig(fuse_micro_nodes=not bool(getattr(data, "micro_fusion_applied", False))),
+        )
+        if source_ids_for_view(fallback_view.gnn_items) == graph_source_ids:
+            return fallback_view.gnn_items
+        raise ValueError(
+            "content JSON rebuilt GNN view does not match graph-side gnn_to_v7_ids. "
+            "Refusing to render because logits/edge_index could be bridged to the wrong v7 nodes. "
+            + format_gnn_mapping_mismatches(
+                graph_source_ids,
+                source_ids_for_view(view.gnn_items),
+                source_ids_for_view(fallback_view.gnn_items),
+            )
+        )
     if len(view.gnn_items) == expected:
         return view.gnn_items
     fallback_view = build_gnn_view(
@@ -256,6 +285,170 @@ def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[d
     return records
 
 
+def select_records_by_graph_source_ids(
+    records: list[dict[str, Any]], graph_source_ids: list[list[str]]
+) -> list[dict[str, Any]]:
+    """Select full-v7 records in the exact graph-saved GNN node order.
+
+    The GNN graph already stores the source v7 node id(s) for every graph node.
+    That graph-side mapping is the only safe bridge from logits/edge_index back
+    to the complete v7 observation layer.  Rebuilding a fresh adapter view at
+    inference time is useful for diagnostics, but it must not define order.
+    """
+
+    indexed: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, record in enumerate(records):
+        node_id = str(record.get("_v7_node_id") or stable_node_id(record, fallback_position=index))
+        prepared = dict(record)
+        prepared.setdefault("_v7_source_index", index)
+        prepared.setdefault("_v7_node_id", node_id)
+        prepared.setdefault("_v7_source_indexes", [index])
+        prepared.setdefault("_v7_source_node_ids", [node_id])
+        indexed[node_id] = (index, prepared)
+
+    selected: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for source_ids in graph_source_ids:
+        ids = [source_id for source_id in normalize_v7_id_list(source_ids) if source_id]
+        source_records: list[tuple[int, dict[str, Any]]] = []
+        for source_id in ids:
+            match = indexed.get(source_id)
+            if match is None:
+                missing.append(source_id)
+                continue
+            source_records.append(match)
+        if source_records:
+            selected.append(combine_graph_source_records(source_records, ids))
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise ValueError(f"graph gnn_to_v7_ids references missing content records: {preview}")
+    return selected
+
+
+def combine_graph_source_records(source_records: list[tuple[int, dict[str, Any]]], source_ids: list[str]) -> dict[str, Any]:
+    if len(source_records) == 1:
+        index, record = source_records[0]
+        combined = dict(record)
+        combined["_v7_source_index"] = index
+        combined["_v7_node_id"] = source_ids[0] if source_ids else str(record.get("_v7_node_id") or "")
+        combined["_v7_source_indexes"] = [index]
+        combined["_v7_source_node_ids"] = list(source_ids)
+        return combined
+
+    ordered = sorted(source_records, key=lambda pair: pair[0])
+    combined = dict(ordered[0][1])
+    combined["_v7_source_index"] = ordered[0][0]
+    combined["_v7_node_id"] = source_ids[0]
+    combined["_v7_source_indexes"] = [index for index, _ in ordered]
+    combined["_v7_source_node_ids"] = list(source_ids)
+    combined["merged_records"] = [dict(record) for _, record in ordered[1:]]
+    combined["source_node_ids"] = [index for index, _ in ordered]
+
+    text_parts = [record_text(record) for _, record in ordered]
+    text = join_graph_source_text(text_parts)
+    if text:
+        combined["text"] = text
+        combined["text_for_embedding"] = text
+
+    bbox = union_bboxes([record.get("bbox") for _, record in ordered])
+    if bbox is not None:
+        combined["bbox"] = bbox
+    return combined
+
+
+def record_text(record: dict[str, Any]) -> str:
+    for key in ("text", "text_for_embedding", "content", "latex"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def join_graph_source_text(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        if not part:
+            continue
+        if not text:
+            text = part
+            continue
+        if text.endswith("-"):
+            text = text[:-1] + part.lstrip()
+        elif re.match(r"^[,.;:!?%)\]}]", part):
+            text += part
+        else:
+            text += " " + part
+    return text.strip()
+
+
+def union_bboxes(values: list[Any]) -> list[float] | None:
+    bboxes: list[list[float]] = []
+    for value in values:
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            try:
+                bboxes.append([float(value[0]), float(value[1]), float(value[2]), float(value[3])])
+            except (TypeError, ValueError):
+                continue
+    if not bboxes:
+        return None
+    return [
+        min(bbox[0] for bbox in bboxes),
+        min(bbox[1] for bbox in bboxes),
+        max(bbox[2] for bbox in bboxes),
+        max(bbox[3] for bbox in bboxes),
+    ]
+
+
+def graph_gnn_to_v7_ids(data: Any) -> list[list[str]]:
+    values = getattr(data, "gnn_to_v7_ids", None)
+    if values:
+        normalized = [normalize_v7_id_list(value) for value in list(values)]
+        if any(normalized):
+            return normalized
+    primary_values = getattr(data, "gnn_to_v7_id", None)
+    if primary_values:
+        return [[str(value)] for value in list(primary_values) if str(value)]
+    return []
+
+
+def source_ids_for_view(items: list[dict[str, Any]]) -> list[list[str]]:
+    return [normalize_v7_id_list(item.get("_v7_source_node_ids") or item.get("_v7_node_id")) for item in items]
+
+
+def normalize_v7_id_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        result: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item:
+                result.append(item)
+        return list(dict.fromkeys(result))
+    return []
+
+
+def format_gnn_mapping_mismatches(
+    expected: list[list[str]],
+    current: list[list[str]],
+    fallback: list[list[str]],
+    *,
+    limit: int = 8,
+) -> str:
+    mismatches: list[str] = []
+    max_len = max(len(expected), len(current), len(fallback))
+    for index in range(max_len):
+        exp = expected[index] if index < len(expected) else ["<missing>"]
+        cur = current[index] if index < len(current) else ["<missing>"]
+        alt = fallback[index] if index < len(fallback) else ["<missing>"]
+        if exp == cur or exp == alt:
+            continue
+        mismatches.append(f"idx={index}: graph={exp} current={cur} fallback={alt}")
+        if len(mismatches) >= limit:
+            break
+    suffix = f"; showing {len(mismatches)} mismatch(es)" if mismatches else "; length mismatch only"
+    return suffix + (": " + " | ".join(mismatches) if mismatches else "")
+
+
 def record_from_content_item(item: dict[str, Any]) -> dict[str, Any]:
     record = dict(item)
     text = item.get("text_for_embedding") or item.get("text") or item.get("content") or item.get("latex") or ""
@@ -268,7 +461,17 @@ def record_from_content_item(item: dict[str, Any]) -> dict[str, Any]:
 def merge_graph_node_metadata(content_record: dict[str, Any], graph_record: dict[str, Any]) -> dict[str, Any]:
     merged = dict(content_record)
     for key, value in graph_record.items():
-        if key in {"text", "text_for_embedding", "content", "latex", "html", "reference_items", "merged_records"}:
+        if key in {
+            "text",
+            "text_for_embedding",
+            "content",
+            "latex",
+            "html",
+            "reference_items",
+            "merged_text",
+            "merged_records",
+            "source_node_ids",
+        }:
             continue
         if key not in merged or merged[key] in (None, "", []):
             merged[key] = value

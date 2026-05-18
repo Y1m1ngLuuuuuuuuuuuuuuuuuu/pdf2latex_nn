@@ -28,7 +28,7 @@ from scripts.pipeline.step5_generate_tex import (  # noqa: E402
 from scripts.pipeline.train_edge_gnn_full import split_indices  # noqa: E402
 from src.adapters import MinerUV7DocumentIRAdapterConfig, convert_v7_payload_to_document_ir  # noqa: E402
 from src.generation.render_surface import render_original_like_document  # noqa: E402
-from src.ir import DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode  # noqa: E402
+from src.ir import BlockType, DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import (  # noqa: E402
@@ -63,7 +63,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--heading-skeleton-mode",
         choices=["legacy", "stack", "off"],
-        default="legacy",
+        default="stack",
         help=(
             "legacy keeps the current decoder behavior; stack makes the global "
             "heading state machine own section scope and lets GNN edges refine "
@@ -79,13 +79,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clean-output-dir", action="store_true")
     parser.add_argument(
         "--renderer",
-        choices=["ir", "tree"],
+        choices=["ir"],
         default="ir",
-        help=(
-            "ir is the canonical v7 generation surface: TreeDecoder output is "
-            "converted through DocumentIR + RenderTreeIR + OriginalLikeIRLatexRenderer. "
-            "tree keeps the legacy renderer for regression debugging only."
-        ),
+        help="Production renderer. Only DocumentIR + RenderTreeIR + OriginalLikeIRLatexRenderer is supported.",
     )
     parser.add_argument(
         "--render-crops",
@@ -290,22 +286,21 @@ def run_one_document(
     )
     root = local_decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
     title = infer_document_title(node_records)
-    if renderer == "ir":
-        tex = render_decoded_tree_with_ir_backend(
-            root,
-            node_records=node_records,
-            content_json=content_json,
-            pdf_path=pdf_path,
-            source_tex_path=Path(str(doc["tex_path"])) if doc.get("tex_path") else None,
-            document_id=document_id,
-            title=title,
-            document_metadata=getattr(data, "document_metadata", None),
-            table_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
-            figure_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
-            asset_latex_prefix="assets",
-        )
-    else:
-        tex = local_decoder.render_document(root, title=title, document_metadata=getattr(data, "document_metadata", None))
+    if renderer != "ir":
+        raise ValueError("Production E2E rendering only supports --renderer ir")
+    tex = render_decoded_tree_with_ir_backend(
+        root,
+        node_records=node_records,
+        content_json=content_json,
+        pdf_path=pdf_path,
+        source_tex_path=Path(str(doc["tex_path"])) if doc.get("tex_path") else None,
+        document_id=document_id,
+        title=title,
+        document_metadata=getattr(data, "document_metadata", None),
+        table_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
+        figure_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
+        asset_latex_prefix="assets",
+    )
     tex_path = doc_dir / "generated.tex"
     tex_path.write_text(tex, encoding="utf-8")
 
@@ -421,12 +416,19 @@ def build_document_ir_from_graph_records(
     pdf_path: Path,
     document_id: str,
 ) -> Any:
-    """Convert exactly the graph-visible v7 records into DocumentIR.
+    """Disabled legacy helper kept only to make old imports fail loudly.
 
-    The full content JSON can contain filtered noise nodes or pre-fusion variants.
-    Rendering the graph output should instead use the same node order that the GNN
-    saw, so source node ids in RenderTreeIR line up with graph node indexes.
+    The production renderer must build DocumentIR from the complete v7 JSON and
+    bridge GNN predictions back through graph-side ``gnn_to_v7_ids``.  Rendering
+    from graph-visible records drops metadata, notes, floats and header/footer
+    evidence, so this path is intentionally blocked.
     """
+
+    raise RuntimeError(
+        "Graph-record-only DocumentIR rendering is disabled. Production rendering "
+        "must use build_document_ir_from_full_v7() plus the exact graph "
+        "gnn_to_v7_ids bridge."
+    )
 
     payload = {
         "schema_version": "content_v7_graph_visible",
@@ -555,14 +557,26 @@ def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> Ren
         and node.node_id not in existing_source_ids
     ]
     if not metadata_nodes:
+        metadata_nodes = [
+            node
+            for node in infer_legacy_front_matter_nodes(document)
+            if node.node_id not in existing_source_ids
+        ]
+    if not metadata_nodes:
         return tree
 
     abstract_label = next((node for node in metadata_nodes if _document_node_is_abstract_label(node)), None)
-    title_nodes = [node for node in metadata_nodes if _document_node_is_title(node)]
+    title_nodes = [
+        node
+        for node in metadata_nodes
+        if _document_node_is_title(node) or _legacy_document_title_node(node, abstract_label=abstract_label)
+    ]
     author_nodes = [
         node
         for node in metadata_nodes
-        if _document_node_is_author_like(node) or _metadata_front_matter_before_abstract(node, abstract_label)
+        if _document_node_is_author_like(node)
+        or _metadata_front_matter_before_abstract(node, abstract_label)
+        or _legacy_author_node(node, title_nodes=title_nodes, abstract_label=abstract_label)
     ]
     abstract_body_nodes = _front_matter_abstract_body_nodes(metadata_nodes, abstract_label=abstract_label)
 
@@ -666,6 +680,65 @@ def _document_node_is_title(node: DocumentNode) -> bool:
 def _document_node_is_author_like(node: DocumentNode) -> bool:
     role = str(node.metadata.get("layout_role") or "").casefold()
     return role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
+
+
+def infer_legacy_front_matter_nodes(document: DocumentIR) -> list[DocumentNode]:
+    """Recover front matter for v7 files without layout_layer metadata.
+
+    Some older v7 artifacts retain all full-v7 facts but do not annotate
+    ``layout_layer=metadata_layer``.  The GNN view intentionally starts at the
+    first body heading in those files, so rendering must infer the title,
+    authors and abstract from the complete v7 reading order instead of dropping
+    them.
+    """
+
+    nodes = sorted(document.nodes, key=lambda item: item.reading_index)
+    abstract_label = next((node for node in nodes if _document_node_is_abstract_label(node)), None)
+    if abstract_label is None:
+        return []
+    first_body_heading = next(
+        (
+            node
+            for node in nodes
+            if node.reading_index > abstract_label.reading_index
+            and node.node_type == BlockType.TITLE
+            and normalize_render_text(node.text) not in {"abstract", "keywords", "index terms"}
+        ),
+        None,
+    )
+    limit = first_body_heading.reading_index if first_body_heading is not None else abstract_label.reading_index + 1
+    return [
+        node
+        for node in nodes
+        if node.reading_index < limit
+        and str(node.metadata.get("layout_layer") or "").casefold() not in {"noise_layer", "annotation_layer"}
+    ]
+
+
+def _legacy_document_title_node(node: DocumentNode, *, abstract_label: DocumentNode | None) -> bool:
+    if abstract_label is None or node.reading_index >= abstract_label.reading_index:
+        return False
+    if node.node_type != BlockType.TITLE:
+        return False
+    text_key = normalize_render_text(node.text)
+    return bool(text_key and text_key not in {"abstract", "keywords", "index terms"})
+
+
+def _legacy_author_node(
+    node: DocumentNode,
+    *,
+    title_nodes: list[DocumentNode],
+    abstract_label: DocumentNode | None,
+) -> bool:
+    if abstract_label is None or node.reading_index >= abstract_label.reading_index:
+        return False
+    if node.node_type == BlockType.TITLE:
+        return False
+    if any(node.node_id == title.node_id for title in title_nodes):
+        return False
+    if title_nodes and node.reading_index <= max(title.reading_index for title in title_nodes):
+        return False
+    return bool((node.text or "").strip())
 
 
 def _metadata_front_matter_before_abstract(node: DocumentNode, abstract_label: DocumentNode | None) -> bool:
@@ -861,6 +934,21 @@ def render_attributes_for_resolved_node(node: ResolvedNode) -> dict[str, Any]:
         attrs["paragraph_heading"] = True
     if node.record.get("_appendix_heading"):
         attrs["appendix_heading"] = True
+    if node.record.get("_heading_unnumbered"):
+        attrs["heading_unnumbered"] = True
+    numbering = node.record.get("title_numbering")
+    if isinstance(numbering, dict):
+        attrs["title_numbering_style"] = str(numbering.get("style") or "none")
+        attrs["title_numbering_token"] = str(numbering.get("token") or "")
+        if numbering.get("level") is not None:
+            attrs["title_numbering_level"] = numbering.get("level")
+    for source_key, attr_key in (
+        ("title_numbering_style", "title_numbering_style"),
+        ("title_numbering_token", "title_numbering_token"),
+        ("title_numbering_level", "title_numbering_level"),
+    ):
+        if source_key in node.record and attr_key not in attrs:
+            attrs[attr_key] = node.record[source_key]
     return attrs
 
 

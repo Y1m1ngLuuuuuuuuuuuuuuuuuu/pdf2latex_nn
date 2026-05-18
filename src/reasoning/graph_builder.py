@@ -1395,6 +1395,7 @@ def build_edge_attr_matrix(
         source_band_column = layout_band_column_id(source)
         target_band_column = layout_band_column_id(target)
         band_delta = layout_band_order(target) - layout_band_order(source)
+        between_flags = structural_between_flags(items, source_idx, target_idx, reading_order_ranks)
         rows.append(
             [
                 semantic_cosine,
@@ -1415,11 +1416,52 @@ def build_edge_attr_matrix(
                 float(source_band_column is not None and target_band_column is not None and source_band_column == target_band_column),
                 max(-1.0, min(1.0, band_delta / 10.0)),
                 float(source_band is not None and target_band is not None and source_band != target_band),
+                float(source_type == "float_skip"),
+                between_flags["has_float_between"],
+                between_flags["has_figure_between"],
+                between_flags["has_table_between"],
             ]
         )
     if not rows:
         return torch.empty((0, len(EDGE_ATTR_FIELDS)), dtype=torch.float32)
     return torch.tensor(rows, dtype=torch.float32)
+
+
+def structural_between_flags(items: list[dict[str, Any]], source_idx: int, target_idx: int, ranks: list[int]) -> dict[str, float]:
+    if source_idx >= len(ranks) or target_idx >= len(ranks):
+        return {
+            "has_float_between": 0.0,
+            "has_figure_between": 0.0,
+            "has_table_between": 0.0,
+        }
+    left_rank = min(ranks[source_idx], ranks[target_idx])
+    right_rank = max(ranks[source_idx], ranks[target_idx])
+    if right_rank - left_rank <= 1:
+        return {
+            "has_float_between": 0.0,
+            "has_figure_between": 0.0,
+            "has_table_between": 0.0,
+        }
+    has_figure = False
+    has_table = False
+    has_other_float = False
+    for item_idx, rank in enumerate(ranks):
+        if item_idx in {source_idx, target_idx}:
+            continue
+        if not left_rank < rank < right_rank:
+            continue
+        item_type = canonical_type(items[item_idx])
+        if item_type == "figure":
+            has_figure = True
+        elif item_type == "table":
+            has_table = True
+        elif item_type in {"algorithm", "equation", "code"} or layout_layer_name(items[item_idx]) == "float_layer":
+            has_other_float = True
+    return {
+        "has_float_between": float(has_figure or has_table or has_other_float),
+        "has_figure_between": float(has_figure),
+        "has_table_between": float(has_table),
+    }
 
 
 def make_node_records(

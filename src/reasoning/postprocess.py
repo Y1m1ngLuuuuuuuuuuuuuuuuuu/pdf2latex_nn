@@ -1371,6 +1371,7 @@ def build_strict_heading_stack_skeleton(
     render_hints: dict[int, dict[str, Any]] = {}
     events: list[str] = []
     stack: list[tuple[int, int]] = []
+    level_by_style_signature: dict[str, int] = {}
     seen_body_heading = False
     references_open = False
     appendix_open = False
@@ -1404,9 +1405,30 @@ def build_strict_heading_stack_skeleton(
             apply_heading_decision(node, decision)
             if decision.is_structural:
                 level = max(1, int(decision.level))
+                style_signature = heading_state_style_signature(node, evidence=evidence)
+                node.record["_heading_style_signature"] = style_signature
                 node.record["_skeleton_heading_level"] = level
                 node.record["_heading_render_level"] = level
                 node.record["canonical_type"] = "title"
+                special_scope_heading = (
+                    strict_is_references_heading(node)
+                    or strict_is_appendix_heading(node)
+                    or strict_is_abstract_heading(node)
+                    or strict_is_acknowledgement_heading(node)
+                )
+                if not special_scope_heading:
+                    level = resolve_heading_level_from_style_state(
+                        node,
+                        evidence=evidence,
+                        profile=profile,
+                        default_level=level,
+                        stack=stack,
+                        level_by_style_signature=level_by_style_signature,
+                    )
+                    node.record["_skeleton_heading_level"] = level
+                    node.record["_heading_render_level"] = level
+                else:
+                    level_by_style_signature.setdefault(style_signature, level)
                 heading_ids.add(node_id)
                 heading_levels[node_id] = level
                 if strict_is_references_heading(node):
@@ -1425,7 +1447,10 @@ def build_strict_heading_stack_skeleton(
                 scope_by_node[node_id] = node_id
                 stack.append((level, node_id))
                 seen_body_heading = True
-                events.append(f"{node_id}:strict-heading level={level} parent={parent_id} reason={decision.reason}")
+                events.append(
+                    f"{node_id}:strict-heading level={level} parent={parent_id} "
+                    f"style={style_signature} reason={decision.reason}"
+                )
                 continue
             render_hints[node_id] = dict(node.record)
             events.append(f"{node_id}:strict-non-heading reason={decision.reason}")
@@ -1447,6 +1472,101 @@ def build_strict_heading_stack_skeleton(
         render_hints=render_hints,
         events=events,
     )
+
+
+def heading_state_style_signature(node: ResolvedNode, *, evidence: HeadingEvidence | None) -> str:
+    """Return a document-local heading style key used by the stack scanner.
+
+    The key intentionally describes *style families*, not exact text.  Thus
+    ``1 Introduction`` and ``2 Related Work`` share the same signature, and a
+    later title with that signature is forced back to the same outline level.
+    This is the state-machine memory the generator needs for papers whose
+    section numbering style is customized by the TeX class.
+    """
+
+    text = " ".join(node.text.split())
+    prefix_kind, prefix_level = heading_prefix_signature(text)
+    if prefix_kind in {"numeric", "bare_numbered"}:
+        prefix_family = "numbered:1"
+    elif prefix_kind in {"dotted_numeric", "appendix_dotted"}:
+        prefix_family = f"dotted:{max(2, prefix_level or 2)}"
+    elif prefix_kind == "roman":
+        prefix_family = "roman:1"
+    elif prefix_kind == "alpha":
+        prefix_family = "alpha"
+    elif strict_is_appendix_heading(node):
+        prefix_family = "appendix"
+    elif strict_is_references_heading(node):
+        prefix_family = "references"
+    elif strict_is_abstract_heading(node):
+        prefix_family = "abstract"
+    else:
+        prefix_family = "freeform"
+
+    relative = evidence.relative_font_size if evidence is not None else heading_font_ratio(node, body_font_size=0.0)
+    font_bucket = round(max(relative, 0.0) * 20.0) / 20.0
+    role = node_layout_role(node.record) or "none"
+    bold = int(node_is_bold(node.record) or (evidence.is_bold if evidence is not None else False))
+    centered = int(bool(node.record.get("layout_centered") or node.record.get("is_centered")))
+    isolated = int(bool(evidence.is_line_isolated if evidence is not None else False))
+    return f"{prefix_family}|font={font_bucket:.2f}|bold={bold}|role={role}|center={centered}|iso={isolated}"
+
+
+def resolve_heading_level_from_style_state(
+    node: ResolvedNode,
+    *,
+    evidence: HeadingEvidence | None,
+    profile: HeadingStyleProfile,
+    default_level: int,
+    stack: list[tuple[int, int]],
+    level_by_style_signature: dict[str, int],
+) -> int:
+    """Resolve heading level with repeated-style memory.
+
+    Prefixes and font clusters provide the first guess.  Once a style signature
+    has appeared, the state machine treats later occurrences as the same
+    outline level.  New styles are admitted using the existing evidence score,
+    then remembered for the remainder of the document.
+    """
+
+    signature = heading_state_style_signature(node, evidence=evidence)
+    if signature in level_by_style_signature:
+        node.record["_heading_style_level_source"] = "reused-style"
+        return level_by_style_signature[signature]
+
+    text = " ".join(node.text.split())
+    prefix_kind, prefix_level = heading_prefix_signature(text)
+    explicit_level = title_numbering_level(text) or prefix_level
+    if prefix_kind == "alpha" and stack:
+        level = max(stack[-1][0] + 1, int(default_level or 1))
+    elif explicit_level is not None and prefix_kind not in {"custom_colon", "numeric_paren"}:
+        level = int(explicit_level)
+    elif evidence is not None:
+        cluster = round(evidence.relative_font_size * 20.0) / 20.0
+        if cluster in profile.level_by_font_cluster:
+            level = profile.level_by_font_cluster[cluster]
+        else:
+            level = int(default_level or 1)
+    else:
+        level = int(default_level or 1)
+
+    level = max(1, min(level, 5))
+    if stack and prefix_kind == "freeform":
+        current = stack[-1][1]
+        current_font = node_font_size(node.record)
+        # When an unnumbered title introduces a new, less prominent style under
+        # the active heading, prefer a child level.  Reuse will keep later
+        # occurrences stable.
+        if current in {item[1] for item in stack}:
+            active_level = stack[-1][0]
+            if evidence is not None and evidence.relative_font_size <= 1.08 and level <= active_level:
+                level = min(active_level + 1, 5)
+            elif current_font > 0 and level <= active_level and is_local_subheading_layout(node.record):
+                level = min(active_level + 1, 5)
+
+    level_by_style_signature[signature] = level
+    node.record["_heading_style_level_source"] = "new-style"
+    return level
 
 
 def strict_heading_stack_decision(
@@ -2674,6 +2794,15 @@ def is_cjk(char: str) -> bool:
 def canonical_render_type(record: dict[str, Any]) -> str:
     if str(record.get("list_type") or "").lower() == "reference_list":
         return "reference"
+    role = str(record.get("layout_role") or record.get("role") or record.get("semantic_role") or "").lower()
+    if role in {"figure_caption", "image_caption", "chart_caption"}:
+        return "figure"
+    if role == "table_caption":
+        return "table"
+    if role == "algorithm_caption":
+        return "algorithm"
+    if role == "code_caption":
+        return "code"
     raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
     if raw in {"paragraph", "text", "paragraph_text", "body"}:
         return "text"

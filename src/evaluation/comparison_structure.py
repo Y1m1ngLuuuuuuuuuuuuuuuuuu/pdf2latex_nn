@@ -32,13 +32,19 @@ SECTION_LEVELS = {
     "paragraph": 4,
     "subparagraph": 5,
 }
+BLOCK_HEADING_COMMANDS = {"section", "subsection", "subsubsection"}
 SECTION_COMMAND_RE = re.compile(
     r"\\(?P<name>part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
 )
 BEGIN_END_RE = re.compile(r"\\(?P<kind>begin|end)\s*\{\s*(?P<name>[^}]+?)\s*\}")
 ITEM_RE = re.compile(r"\\item\b(?:\s*\[[^\]]*\])?")
-CAPTION_RE = re.compile(r"\\caption\*?")
-DISPLAY_MATH_DELIM_RE = re.compile(r"\\\[.*?\\\]|\$\$.*?\$\$", re.DOTALL)
+CAPTION_RE = re.compile(r"\\(?:captionof\*?|caption\*?)")
+# Treat ``$$...$$`` as display math only when it appears as a standalone
+# delimiter.  Generated OCR-LaTeX often contains adjacent inline math fragments
+# such as ``$Q$$\tau$``; a plain ``\$\$.*?\$\$`` regex swallows everything up
+# to the next accidental pair and corrupts the section/list context.
+DISPLAY_DOLLAR_MATH_PATTERN = r"(?<!\S)\$\$.*?\$\$(?!\S)"
+DISPLAY_MATH_DELIM_RE = re.compile(r"\\\[.*?\\\]|" + DISPLAY_DOLLAR_MATH_PATTERN, re.DOTALL)
 INLINE_MATH_RE = re.compile(r"(?<!\\)\$.*?(?<!\\)\$|\\\(.*?\\\)", re.DOTALL)
 DISPLAY_MATH_ENVS = {
     "equation",
@@ -68,11 +74,11 @@ LATEX_TOKEN_RE = re.compile(
     r"|\\(?:begin|end)\s*\{\s*[^}]+?\s*\}"
     r"|\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
     r"|\\(?:title|author)\*?"
-    r"|\\caption\*?"
+    r"|\\(?:captionof\*?|caption\*?)"
     r"|\\item\b(?:\s*\[[^\]]*\])?"
     r"|\\bibitem\b(?:\s*\[[^\]]*\])?\s*\{[^}]*\}"
     r"|\\\[.*?\\\]"
-    r"|\$\$.*?\$\$",
+    r"|" + DISPLAY_DOLLAR_MATH_PATTERN,
     re.DOTALL,
 )
 
@@ -87,7 +93,10 @@ MARKDOWN_LATEX_SECTION_RE = re.compile(
     r"^\s*\\(?P<name>part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
     r"\s*\{(?P<title>.*)\}\s*$"
 )
-MARKDOWN_LATEX_CAPTION_RE = re.compile(r"\\caption\*?\s*\{(?P<caption>.*?)\}", re.DOTALL)
+MARKDOWN_LATEX_CAPTION_RE = re.compile(
+    r"\\(?:captionof\*?(?:\s*\{[^}]+\})?|caption\*?)\s*\{(?P<caption>.*?)\}",
+    re.DOTALL,
+)
 MARKDOWN_LATEX_BEGIN_RE = re.compile(r"^\s*\\begin\s*\{\s*(?P<name>[^}]+?)\s*\}")
 MARKDOWN_LATEX_END_TEMPLATE = r"\\end\s*\{\s*%s\s*\}"
 REFERENCE_HEADING_RE = re.compile(r"^(references|bibliography|参考文献)\s*$", re.I)
@@ -110,6 +119,19 @@ SILENT_LATEX_ARG_COMMAND_RE = re.compile(
     r"\*?(?:\s*\[[^\]]*\])*\s*\{[^{}]*\}",
     re.DOTALL,
 )
+SILENT_LATEX_DOUBLE_ARG_COMMAND_RE = re.compile(
+    r"\\(?:fontsize|setlength|addtolength)"
+    r"\*?(?:\s*\[[^\]]*\])*\s*\{[^{}]*\}\s*\{[^{}]*\}",
+    re.DOTALL,
+)
+
+FLOAT_PLACEMENT_RESIDUE_RE = re.compile(r"^\s*\[!?[Hhtbp]+\]\s*$", re.I)
+MINIPAGE_OPTION_RESIDUE_RE = re.compile(r"^\s*\[(?:t|b|c)\]\s*\{\s*(?:0?\.\d+|\d+(?:\.\d+)?)(?:\\?\w+)?\s*\}\s*$", re.I)
+LATEX_DIMENSION_RESIDUE_RE = re.compile(
+    r"^\s*\{?\s*(?:\d+(?:\.\d+)?\s*(?:pt|em|ex|in|cm|mm|bp|pc|sp)\s*){1,4}\}?\s*$",
+    re.I,
+)
+BRACKET_BRACE_RESIDUE_RE = re.compile(r"^\s*(?:[\[\]{}(),;:]+|\[\s*\]|\{\s*\})\s*$")
 
 
 @dataclass
@@ -205,6 +227,7 @@ class _LatexComparisonParser:
         self.section_stack: dict[int, str] = {}
         self.context_stack: list[dict[str, str]] = []
         self.next_id = 1
+        self.pending_run_in_prefix: str | None = None
 
     def parse(self) -> ComparisonDocument:
         cursor = 0
@@ -225,7 +248,7 @@ class _LatexComparisonParser:
                 cursor = end
                 continue
             elif CAPTION_RE.match(token):
-                end = self.handle_caption(match.end())
+                end = self.handle_caption(match.end(), token)
                 cursor = end
                 continue
             elif ITEM_RE.match(token):
@@ -236,6 +259,9 @@ class _LatexComparisonParser:
                 self.handle_display_math(token)
             cursor = match.end()
         self.flush_text(self.tex[cursor:])
+        if self.pending_run_in_prefix:
+            self.add_block(self.default_text_type(), self.pending_run_in_prefix, metadata={"source_command": "run_in_heading"})
+            self.pending_run_in_prefix = None
         return ComparisonDocument(
             doc_id=self.doc_id,
             source_format="latex",
@@ -246,28 +272,40 @@ class _LatexComparisonParser:
 
     def flush_text(self, raw: str) -> None:
         text = latex_text(raw)
+        if self.current_context() and self.current_context().get("type") in {"figure", "table"}:
+            return
+        if not text and self.pending_run_in_prefix:
+            return
+        if text and self.pending_run_in_prefix:
+            text = f"{self.pending_run_in_prefix} {text}"
+            self.pending_run_in_prefix = None
+        if is_latex_structural_residue(text):
+            return
         for paragraph in split_paragraphs(text):
             if not paragraph:
+                continue
+            if is_latex_structural_residue(paragraph):
                 continue
             block_type = self.default_text_type()
             self.add_block(block_type, paragraph)
 
     def handle_begin(self, token: str, token_end: int) -> int:
         env = env_name_from_token(token)
+        args_end = skip_environment_open_arguments(self.tex, token_end, env)
         if env in DISPLAY_MATH_ENVS and "\\end" in token:
             self.handle_display_math(token)
             return token_end
         if env in SKIP_ENVS:
-            return token_end
+            return args_end
         if env in LIST_ENVS:
             self.context_stack.append({"type": "list", "env": env, "id": self.add_block("list", env, marker=env).block_id})
-            return token_end
+            return args_end
         if env in FIGURE_ENVS:
             self.context_stack.append({"type": "figure", "env": env, "id": self.add_block("figure", "", marker=env).block_id})
-            return token_end
+            return args_end
         if env in TABLE_ENVS:
             self.context_stack.append({"type": "table", "env": env, "id": self.add_block("table", "", marker=env).block_id})
-            return token_end
+            return args_end
         if env in REFERENCE_ENVS:
             self.context_stack.append({"type": "references", "env": env, "id": self.ensure_references_heading()})
             after = skip_optional_args(self.tex, token_end)
@@ -275,16 +313,19 @@ class _LatexComparisonParser:
             return close if close > after else token_end
         if env == "abstract":
             self.context_stack.append({"type": "abstract", "env": env, "id": self.add_block("abstract", "Abstract", level=1).block_id})
-            return token_end
+            return args_end
         if env in DISPLAY_MATH_ENVS:
             self.context_stack.append({"type": "math", "env": env, "id": ""})
-            return token_end
+            return args_end
         if env in ALGORITHM_ENVS:
             self.context_stack.append({"type": "algorithm", "env": env, "id": self.add_block("algorithm", "", marker=env).block_id})
-        return token_end
+            return args_end
+        return args_end
 
     def handle_end(self, token: str) -> None:
         env = env_name_from_token(token)
+        if not any(ctx.get("env") == env for ctx in self.context_stack):
+            return
         while self.context_stack:
             ctx = self.context_stack.pop()
             if ctx.get("env") == env:
@@ -300,6 +341,13 @@ class _LatexComparisonParser:
         if close <= after:
             return end
         level = SECTION_LEVELS[name]
+        if name not in BLOCK_HEADING_COMMANDS:
+            prefix = latex_text(title)
+            if prefix:
+                self.pending_run_in_prefix = " ".join(
+                    part for part in [self.pending_run_in_prefix, prefix] if part
+                )
+            return close
         parent_id = self.section_parent(level)
         block = self.add_block("heading", latex_text(title), level=level, parent_id=parent_id, marker=name)
         self.section_stack = {key: value for key, value in self.section_stack.items() if key < level}
@@ -316,14 +364,28 @@ class _LatexComparisonParser:
         self.add_block(block_type, latex_text(text), parent_id=ROOT_ID, marker=name)
         return close
 
-    def handle_caption(self, start: int) -> int:
+    def handle_caption(self, start: int, token: str) -> int:
         after = skip_optional_args(self.tex, start)
+        forced_kind: str | None = None
+        if token.lstrip("\\").startswith("captionof"):
+            forced_kind, kind_close = read_braced(self.tex, after)
+            if kind_close <= after:
+                return start
+            after = skip_optional_args(self.tex, kind_close)
         text, close = read_braced(self.tex, after)
         if close <= after:
             return start
         parent = self.current_float_parent()
+        forced_parent_type = normalize_captionof_kind(forced_kind)
+        if forced_parent_type and not parent:
+            parent = self.add_block(
+                forced_parent_type,
+                "",
+                marker=f"captionof:{forced_parent_type}",
+                metadata={"source_command": "captionof"},
+            ).block_id
         caption_text = latex_text(text)
-        kind, label = caption_kind_and_label(caption_text, parent)
+        kind, label = caption_kind_and_label(caption_text, forced_parent_type or parent)
         self.add_block("caption", caption_text, parent_id=parent, marker=kind, label=label)
         return close
 
@@ -484,6 +546,11 @@ class _MarkdownComparisonParser:
                 name = latex_heading.group("name")
                 level = SECTION_LEVELS[name]
                 text = latex_text(latex_heading.group("title"))
+                if name not in BLOCK_HEADING_COMMANDS:
+                    if text:
+                        self.paragraph.append(text)
+                    index += 1
+                    continue
                 self.add_heading(text, level)
                 self.in_references = bool(REFERENCE_HEADING_RE.match(text))
                 self.in_abstract = False
@@ -513,6 +580,14 @@ class _MarkdownComparisonParser:
                     index += 1
                     continue
                 level = self.normalized_markdown_heading_level(raw_level)
+                if level > 3:
+                    if text:
+                        self.add_block("paragraph", text)
+                    self.in_references = False
+                    self.in_abstract = False
+                    self.active_abstract_id = None
+                    index += 1
+                    continue
                 self.add_heading(text, level)
                 self.in_references = bool(REFERENCE_HEADING_RE.match(text))
                 self.in_abstract = False
@@ -651,6 +726,8 @@ class _MarkdownComparisonParser:
         return max(1, min(5, raw_level - self.markdown_heading_base + 1))
 
     def add_heading(self, text: str, level: int) -> ComparisonBlock:
+        if level > 3:
+            return self.add_block("paragraph", text)
         parent = self.section_parent(level)
         block = self.add_block("heading", text, level=level, parent_id=parent)
         self.section_stack = {key: value for key, value in self.section_stack.items() if key < level}
@@ -823,6 +900,36 @@ def skip_optional_args(text: str, start: int) -> int:
     return cursor
 
 
+def skip_environment_open_arguments(text: str, start: int, env_name: str) -> int:
+    """Skip non-content arguments attached to ``\\begin{...}``.
+
+    The generated LaTeX path often emits placement and layout arguments such as
+    ``\\begin{figure}[H]`` or ``\\begin{minipage}[t]{0.8\\linewidth}``.  These
+    arguments are part of TeX's layout surface, not document text.  If we leave
+    the parser cursor directly after ``\\begin{figure}``, those fragments become
+    fake paragraphs and badly pollute section-attachment metrics.
+    """
+
+    cursor = skip_optional_args(text, start)
+    normalized = env_name.strip().lower()
+    required_arg_counts = {
+        "minipage": 1,
+        "parbox": 1,
+        "multicols": 1,
+        "multicols*": 1,
+        "tabular": 1,
+        "tabular*": 2,
+        "tabularx": 2,
+        "array": 1,
+    }
+    for _ in range(required_arg_counts.get(normalized, 0)):
+        _, close = read_braced(text, cursor)
+        if close <= cursor:
+            break
+        cursor = skip_space(text, close)
+    return cursor
+
+
 def skip_space(text: str, start: int) -> int:
     cursor = start
     while cursor < len(text) and text[cursor].isspace():
@@ -832,6 +939,7 @@ def skip_space(text: str, start: int) -> int:
 
 def latex_text(value: str) -> str:
     text = str(value or "")
+    text = SILENT_LATEX_DOUBLE_ARG_COMMAND_RE.sub(" ", text)
     text = SILENT_LATEX_ARG_COMMAND_RE.sub(" ", text)
     text = CITATION_RE.sub(lambda match: " [" + ",".join(key.strip() for key in match.group("keys").split(",")) + "] ", text)
     text = re.sub(r"\\(?:ref|autoref|cref|Cref|eqref)\s*\{([^}]+)\}", r" \1 ", text)
@@ -857,6 +965,26 @@ def latex_text(value: str) -> str:
     for src, dst in replacements.items():
         text = text.replace(src, dst)
     return " ".join(text.split())
+
+
+def is_latex_structural_residue(text: str) -> bool:
+    """Return true for standalone TeX layout fragments, not real content."""
+
+    value = " ".join(str(text or "").split())
+    if not value:
+        return True
+    compact = value.replace(" ", "")
+    if FLOAT_PLACEMENT_RESIDUE_RE.match(compact):
+        return True
+    if MINIPAGE_OPTION_RESIDUE_RE.match(compact):
+        return True
+    if LATEX_DIMENSION_RESIDUE_RE.match(value):
+        return True
+    if BRACKET_BRACE_RESIDUE_RE.match(value):
+        return True
+    if re.fullmatch(r"(?:pt|em|ex|in|cm|mm|bp|pc|sp|\d+(?:\.\d+)?)+", compact, flags=re.I):
+        return True
+    return False
 
 
 def normalize_math_text(value: str) -> str:
@@ -934,6 +1062,17 @@ def caption_kind_and_label(text: str, parent: str | None) -> tuple[str | None, s
     if parent in {"figure", "table", "algorithm"}:
         return parent, None
     return None, parent
+
+
+def normalize_captionof_kind(kind: str | None) -> str | None:
+    value = str(kind or "").strip().lower().rstrip("*")
+    if value in {"figure", "fig"}:
+        return "figure"
+    if value in {"table", "tabular", "tab"}:
+        return "table"
+    if value in {"algorithm", "alg"}:
+        return "algorithm"
+    return None
 
 
 def strip_markdown_inline(text: str) -> str:

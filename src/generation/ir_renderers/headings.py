@@ -16,12 +16,12 @@ class HeadingRenderer:
         }[context.node.role]
         run_in_split = owner._split_run_in_heading_source(context.source_nodes)
         heading_source_text = run_in_split[0] if run_in_split is not None else context.text
-        heading_text = (
-            owner._clean_appendix_heading_text(heading_source_text)
-            if context.node.attributes.get("appendix_heading")
-            else owner._clean_heading_text(heading_source_text)
+        heading_text, star = owner._heading_render_text_and_star(
+            heading_source_text,
+            context.node.role,
+            context.node.attributes,
         )
-        heading = rf"\{command}{{{owner._render_text_with_citations(heading_text)}}}" if heading_text else ""
+        heading = rf"\{command}{star}{{{owner._render_text_with_citations(heading_text)}}}" if heading_text else ""
         run_in_body = ""
         if run_in_split is not None:
             run_in_body = owner._render_body_text(run_in_split[1], node=context.source_nodes[0] if context.source_nodes else None)

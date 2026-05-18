@@ -1,6 +1,6 @@
 # Ground Truth Labeling v0
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This document describes the current automatic label generator. It creates training labels from matching TeX source and v7 PDF graph candidates.
 
@@ -69,6 +69,12 @@ The labeler does not align against the complete v7 fact layer directly, because
 that would desynchronize graph indexes and labels. Excluded full-v7 nodes remain
 available to the generator through the graph-to-v7 mapping.
 
+For the current float-proxy experiment, figure/table/algorithm PDF-side nodes
+are present in the graph-visible sequence as proxies. Their alignment text is
+caption text or a stable placeholder, not raw table cells or noisy figure OCR.
+This keeps TeX float/caption structure learnable while avoiding semantic
+pollution of paragraph MERGE labels.
+
 Expected non-main-flow nodes such as headers, footers, TOC entries, and some metadata are excluded or exempted from the effective orphan ratio.
 
 ## Labels
@@ -94,11 +100,16 @@ Important guards:
 ```text
 text and display equation do not MERGE just because they share a list item
 table/figure/image bodies are weakly aligned, not ordinary text
+float proxies do not MERGE with body text
 references are preserved as reference items where possible
 author biography / backmatter is excluded from unsafe MERGE candidates
 footnote / margin-note layers are separated from body parent chains
 candidate_edge_recall must meet the configured gate
 ```
+
+Graph and label generation must be rebuilt together whenever the
+`GNNViewAdapter` policy or raw edge schema changes. MinerU does not need to be
+rerun unless OCR, bbox, or v7 fact extraction itself changes.
 
 ## Quality Gates
 

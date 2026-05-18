@@ -31,7 +31,23 @@ from src.perception.title_features import title_numbering_info
 from src.pipeline.v7_contract import assert_v7_content_json, read_json_payload
 
 
-PAGE_FOOTNOTE_TYPES = {"page_footnote", "footnote", "foot_note", "image_footnote", "table_footnote", "chart_footnote"}
+PAGE_FOOTNOTE_TYPES = {
+    "page_footnote",
+    "page_note",
+    "page_note_text",
+    "footnote",
+    "foot_note",
+    "footnote_text",
+    "foot_note_text",
+    "endnote",
+    "end_note",
+    "image_footnote",
+    "figure_footnote",
+    "table_footnote",
+    "chart_footnote",
+    "code_footnote",
+    "algorithm_footnote",
+}
 MARGIN_NOTE_TYPES = {"aside_text", "page_aside_text", "margin_note", "marginnote", "side_note", "sidenote", "sidebar"}
 HEADER_FOOTER_TYPES = {"page_number", "header", "footer", "page_header", "page_footer"}
 TOC_TYPES = {"toc", "index", "table_of_contents"}
@@ -332,12 +348,15 @@ def map_v7_type_to_block_type(item: dict[str, Any]) -> BlockType:
     layer = str(item.get("layout_layer") or "").casefold()
     role = str(item.get("layout_role") or "").casefold()
     raw = raw_v7_type(item)
+    role_block_type = CAPTION_TYPES_BY_BLOCK.get(role)
+    if role_block_type is not None:
+        return role_block_type
     if raw in CAPTION_TYPES_BY_BLOCK:
         return CAPTION_TYPES_BY_BLOCK[raw]
-    if raw in PAGE_FOOTNOTE_TYPES or role in {"footnote", "page_footnote", "image_footnote", "table_footnote", "chart_footnote"}:
-        return BlockType.FOOTNOTE
-    if raw in MARGIN_NOTE_TYPES or role in {"margin_note", "marginnote", "side_note", "sidenote", "aside_text", "page_aside_text"}:
+    if is_margin_note_like_v7_item(item):
         return BlockType.MARGIN_NOTE
+    if is_footnote_like_v7_item(item):
+        return BlockType.FOOTNOTE
     if layer == "noise_layer" or raw in HEADER_FOOTER_TYPES or role == "noise":
         return BlockType.HEADER_FOOTER
     if raw in TOC_TYPES or role in {"toc_title", "toc_entry"}:
@@ -373,8 +392,40 @@ def raw_v7_type(item: dict[str, Any]) -> str:
     return ""
 
 
+def is_margin_note_like_v7_item(item: dict[str, Any]) -> bool:
+    raw = raw_v7_type(item)
+    role = str(item.get("layout_role") or "").casefold().strip()
+    subtype = str(item.get("subtype") or item.get("label") or "").casefold().strip()
+    block = item.get("block")
+    block_type = str(block.get("type") or "").casefold().strip() if isinstance(block, dict) else ""
+    values = {raw, role, subtype, block_type}
+    return bool(values & MARGIN_NOTE_TYPES) or any(value in {"margin", "margin_note", "side_note", "sidenote"} for value in values)
+
+
+def is_footnote_like_v7_item(item: dict[str, Any]) -> bool:
+    raw = raw_v7_type(item)
+    role = str(item.get("layout_role") or "").casefold().strip()
+    layer = str(item.get("layout_layer") or "").casefold().strip()
+    subtype = str(item.get("subtype") or item.get("label") or "").casefold().strip()
+    block = item.get("block")
+    block_type = str(block.get("type") or "").casefold().strip() if isinstance(block, dict) else ""
+    values = {raw, role, subtype, block_type}
+    if values & PAGE_FOOTNOTE_TYPES:
+        return True
+    if any("footnote" in value or "foot_note" in value or "endnote" in value for value in values):
+        return True
+    if layer == "annotation_layer" and any(value in {"note", "page_note", "page_note_text"} for value in values):
+        return True
+    if layer == "annotation_layer" and role.endswith("_note") and not is_margin_note_like_v7_item(item):
+        return True
+    return False
+
+
 def text_from_v7_item(item: dict[str, Any]) -> str:
-    if str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold() == "table":
+    role = str(item.get("layout_role") or "").casefold().strip()
+    role_block_type = CAPTION_TYPES_BY_BLOCK.get(role)
+    raw_type = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
+    if raw_type == "table" and role_block_type not in {BlockType.FIGURE, BlockType.ALGORITHM, BlockType.CODE}:
         caption = item.get("table_group_caption") or item.get("table_caption")
         if isinstance(caption, list):
             caption_text = " ".join(str(part).strip() for part in caption if str(part).strip()).strip()
@@ -418,7 +469,22 @@ def text_from_block(block: dict[str, Any]) -> str:
             value = content.get(key)
             if isinstance(value, str):
                 return value
-        for key in ("paragraph_content", "title_content", "content"):
+        for key in (
+            "paragraph_content",
+            "title_content",
+            "page_footnote_content",
+            "footnote_content",
+            "foot_note_content",
+            "image_footnote_content",
+            "figure_footnote_content",
+            "table_footnote_content",
+            "chart_footnote_content",
+            "code_footnote_content",
+            "algorithm_footnote_content",
+            "margin_note_content",
+            "aside_text_content",
+            "content",
+        ):
             value = content.get(key)
             if isinstance(value, list):
                 return "".join(text_from_content_segment(segment) for segment in value)
@@ -684,6 +750,17 @@ def clean_style_spans_for_node(spans: list[StyleSpan], *, node_text: str) -> tup
         if removed:
             repairs.append({"kind": "split_letter_ocr_prefix", "removed": removed, "original": span.text[:160]})
             span = replace(span, text=text)
+        anchored_text = _trim_span_to_node_text_anchor(text, node_text=node_text)
+        if anchored_text is not None and anchored_text != text:
+            repairs.append(
+                {
+                    "kind": "span_prefix_outside_node_text",
+                    "removed": text[: max(0, len(text) - len(anchored_text))].strip()[:160],
+                    "original": span.text[:160],
+                }
+            )
+            text = anchored_text
+            span = replace(span, text=text)
         compact_span = _compact_alignment_text(text)
         if compact_node and not compact_span and re.fullmatch(r"\W+", str(text or "").strip()):
             repairs.append({"kind": "punctuation_ocr_span", "removed": text.strip(), "original": span.text[:160]})
@@ -701,6 +778,44 @@ def clean_style_spans_for_node(spans: list[StyleSpan], *, node_text: str) -> tup
         cursor = next_cursor
         cleaned.append(span)
     return cleaned, repairs
+
+
+def _trim_span_to_node_text_anchor(text: str, *, node_text: str) -> str | None:
+    """Crop PyMuPDF span spillover back to the canonical MinerU block text.
+
+    PyMuPDF clipping can leak a previous visual line into the current block,
+    especially for dense list items:
+
+    ``Rapid adaptation ... • Balanced learning ...``
+
+    while MinerU's canonical text for the current node is just
+    ``• Balanced learning ...``.  The previous short OCR-debris cleaner is
+    intentionally conservative and only removes tiny split-letter prefixes;
+    this anchor-based pass handles whole-line spillover by trusting the
+    canonical MinerU text when it is found inside the span.
+    """
+
+    value = str(text or "")
+    canonical = str(node_text or "").strip()
+    compact_node = _compact_alignment_text(canonical)
+    compact_value = _compact_alignment_text(value)
+    if len(compact_node) < 12 or len(compact_value) <= len(compact_node):
+        return None
+    index = compact_value.find(compact_node)
+    if index <= 0:
+        return None
+    prefix_compact = compact_value[:index]
+    # Only crop when the leaked prefix is substantial enough to be a separate
+    # visual fragment.  Tiny prefixes are handled by the OCR debris cleaner.
+    if len(prefix_compact) < 10:
+        return None
+    char_index = _original_offset_for_compact_index(value, index)
+    if char_index is None or char_index <= 0:
+        return canonical
+    removed = value[:char_index].strip()
+    if not removed:
+        return None
+    return canonical
 
 
 def flags_from_v7_item(item: dict[str, Any]) -> dict[str, bool]:
@@ -742,6 +857,11 @@ def features_from_v7_item(item: dict[str, Any]) -> dict[str, float | int | bool 
         "page_height",
         "footnote_marker",
         "footnote_label",
+        "footnote_anchor",
+        "note_marker",
+        "note_label",
+        "note_anchor",
+        "anchor_node_id",
         "margin_note_side",
     )
     features: dict[str, float | int | bool | str | None] = {}
@@ -825,6 +945,12 @@ def metadata_from_v7_item(item: dict[str, Any], *, include_raw_block: bool, incl
         "footnote_marker",
         "footnote_label",
         "footnote_anchor",
+        "note_marker",
+        "note_label",
+        "note_anchor",
+        "anchor_node_id",
+        "anchor_id",
+        "source_anchor_id",
         "margin_note_side",
         "aside_text",
         "style_extract_status",

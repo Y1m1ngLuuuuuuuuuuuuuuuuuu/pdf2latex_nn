@@ -384,6 +384,7 @@ class AlignmentLabeler:
         self.flattener_summary: dict[str, Any] | None = None
         self.alignment_quality: dict[str, Any] = {}
         self.gnn_view_summary: dict[str, Any] | None = None
+        self.pdf_view_includes_float = True
         self._edge_attr: Any | None = None
         self._edge_attr_fields: dict[str, int] = {}
 
@@ -461,6 +462,9 @@ class AlignmentLabeler:
                 view = fallback_view
         items = view.gnn_items
         self.gnn_view_summary = view.excluded_items_summary
+        self.pdf_view_includes_float = bool(
+            (self.gnn_view_summary.get("policy") if isinstance(self.gnn_view_summary, dict) else {}).get("include_float")
+        )
         nodes = []
         for index, item in enumerate(items):
             text = pdf_item_text(item)

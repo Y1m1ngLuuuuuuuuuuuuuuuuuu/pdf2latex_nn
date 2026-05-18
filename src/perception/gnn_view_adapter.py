@@ -21,6 +21,18 @@ from src.perception.reading_order import (
 )
 
 EXCLUDED_LAYERS = {"noise_layer", "annotation_layer"}
+FLOAT_RAW_TYPES = {"figure", "image", "chart", "table", "algorithm"}
+FLOAT_ROLES = {
+    "figure",
+    "figure_caption",
+    "image",
+    "image_caption",
+    "table",
+    "table_caption",
+    "algorithm",
+    "algorithm_caption",
+    "caption",
+}
 DEFAULT_EXCLUDED_METADATA_ROLES = {
     "document_title",
     "front_matter_title",
@@ -54,9 +66,11 @@ class GNNViewAdapterConfig:
     """Policy for building the GNN view.
 
     ``include_metadata`` defaults to false because front matter is rendered
-    directly from full v7 IR, not learned as body structure.  Floats stay in the
-    graph by default so caption/float relations remain classifiable, while
-    message-passing masks prevent them from polluting text representations.
+    directly from full v7 IR, not learned as body structure.  ``include_float``
+    defaults to true, but float nodes are converted to lightweight proxies:
+    they keep bbox/order/type identity while exposing only caption text or a
+    placeholder to SciBERT.  Raw table cells and figure OCR never enter the GNN
+    semantic channel.
     """
 
     include_metadata: bool = False
@@ -81,7 +95,7 @@ def build_gnn_view(
     for item in annotated:
         include, reason = _include_item_in_gnn_view(item, cfg)
         if include:
-            included.append(item)
+            included.append(_to_gnn_item(item, cfg))
         else:
             excluded.append((int(item["_v7_source_index"]), item, reason))
 
@@ -119,6 +133,7 @@ def _include_item_in_gnn_view(item: dict[str, Any], cfg: GNNViewAdapterConfig) -
     layer = str(item.get("layout_layer") or "").casefold()
     role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
     raw_type = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
+    is_float_item = _is_float_item(layer=layer, role=role, raw_type=raw_type)
     if is_duplicate_shadow_record(item):
         return False, "duplicate_shadow"
     if is_toc_record(item) and not cfg.include_toc:
@@ -129,9 +144,93 @@ def _include_item_in_gnn_view(item: dict[str, Any], cfg: GNNViewAdapterConfig) -
         return False, "annotation_layer"
     if layer == "metadata_layer" and not cfg.include_metadata:
         return False, f"metadata:{role or raw_type or 'unknown'}"
-    if layer == "float_layer" and not cfg.include_float:
+    if is_float_item and not cfg.include_float:
         return False, f"float:{role or raw_type or 'unknown'}"
     return True, "included"
+
+
+def _is_float_item(*, layer: str, role: str, raw_type: str) -> bool:
+    if layer == "float_layer":
+        return True
+    if raw_type in FLOAT_RAW_TYPES:
+        return True
+    if role in FLOAT_ROLES:
+        return True
+    return role.endswith("_caption")
+
+
+def _to_gnn_item(item: dict[str, Any], cfg: GNNViewAdapterConfig) -> dict[str, Any]:
+    layer = str(item.get("layout_layer") or "").casefold()
+    role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
+    raw_type = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
+    if cfg.include_float and _is_float_item(layer=layer, role=role, raw_type=raw_type):
+        return _float_proxy_item(item, layer=layer, role=role, raw_type=raw_type)
+    return item
+
+
+def _float_proxy_item(item: dict[str, Any], *, layer: str, role: str, raw_type: str) -> dict[str, Any]:
+    proxy = dict(item)
+    proxy_type = _float_proxy_type(role=role, raw_type=raw_type)
+    proxy_text = _float_proxy_text(item, proxy_type=proxy_type)
+    proxy["type"] = proxy_type
+    proxy["canonical_type"] = proxy_type
+    proxy["layout_layer"] = "float_layer"
+    proxy["layout_role"] = role or f"{proxy_type}_proxy"
+    proxy["text_for_embedding"] = proxy_text
+    proxy["text"] = proxy_text
+    proxy["content"] = proxy_text
+    proxy["gnn_proxy_kind"] = "float_proxy"
+    proxy["gnn_proxy_source_type"] = raw_type or proxy_type
+    proxy["gnn_proxy_semantic_source"] = "caption_or_placeholder"
+    proxy["style_spans"] = []
+    return proxy
+
+
+def _float_proxy_type(*, role: str, raw_type: str) -> str:
+    if "table" in role or raw_type == "table":
+        return "table"
+    if "algorithm" in role or raw_type in {"algorithm", "code"}:
+        return "algorithm"
+    return "figure"
+
+
+def _float_proxy_text(item: dict[str, Any], *, proxy_type: str) -> str:
+    caption_keys = (
+        "figure_group_caption",
+        "image_group_caption",
+        "table_group_caption",
+        "algorithm_group_caption",
+        "figure_caption",
+        "image_caption",
+        "table_caption",
+        "algorithm_caption",
+        "caption",
+    )
+    for key in caption_keys:
+        value = item.get(key)
+        text = _stringify_caption(value)
+        if text:
+            return text
+    role = str(item.get("layout_role") or "").casefold()
+    if role.endswith("_caption"):
+        for key in ("text_for_embedding", "text", "content"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    placeholders = {
+        "figure": "[FIGURE]",
+        "table": "[TABLE]",
+        "algorithm": "[ALGORITHM]",
+    }
+    return placeholders.get(proxy_type, "[FLOAT]")
+
+
+def _stringify_caption(value: Any) -> str:
+    if isinstance(value, list):
+        return " ".join(str(part).strip() for part in value if str(part).strip()).strip()
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 
 def _apply_micro_fusion(included: list[dict[str, Any]]) -> list[dict[str, Any]]:

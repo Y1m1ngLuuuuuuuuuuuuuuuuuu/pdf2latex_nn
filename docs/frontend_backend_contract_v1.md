@@ -1,6 +1,6 @@
 # Frontend / Backend Contract v1
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This contract fixes the boundary between PDF extraction, TeX truth generation, GNN training, decoding, and LaTeX rendering.
 
@@ -85,15 +85,42 @@ This means "not sent to the GNN" never means "deleted from the document".
 Generator code must render from full v7 / DocumentIR plus bridged predicted
 relations, not from the filtered graph view alone.
 
+Float policy:
+
+```text
+figure/table/algorithm are not body text
+figure/table/algorithm do enter the GNN view as float proxies
+caption or placeholder text is used for embedding
+raw table body / raw figure OCR is not used as paragraph semantics
+MERGE is blocked for float proxies
+message passing from float proxies into body text is masked
+skip-over-float candidate edges preserve paragraph-continuation recall
+```
+
 ## GraphInput
 
 `graph.pt` is a PyTorch Geometric `Data` object:
 
 ```text
-x           [N, 832] float32
+x           [N, node_dim] float32
 edge_index  [2, E] long
-edge_attr   [E, 22] float32
+edge_attr   [E, edge_dim] float32
 ```
+
+Current known schema families:
+
+```text
+v7_registry_adapteraware_20260515_181724:
+  node_dim = 832
+  edge_dim = 22
+
+v7_floatproxy_adapter_20260516_205926:
+  node_dim = 832
+  edge_dim = 26
+```
+
+Do not hard-code the tensor dimensions in new code.  Read the schema metadata
+from the graph where possible, or bind the model config to the manifest family.
 
 If labels are attached:
 
@@ -152,6 +179,7 @@ block types
 float/caption associations
 style references
 source bbox references
+source v7 node ids bridged from GNN indexes
 ```
 
 Renderer output is allowed to be approximate, but should not drop content unless explicitly marked noise/no-render.
@@ -199,7 +227,8 @@ implemented in the specialized renderer for its `RenderRole` / `BlockType`.
 ```text
 1. Production samples must have matching compiled PDF and TeX source.
 2. v7 JSON is the only production frontend format.
-3. Graph tensors use the current 832/22 schema.
+3. Graph tensor dimensions are schema-family specific.  The locked registry
+   baseline uses 832/22; the active float-proxy track uses 832/26.
 4. Edge labels are 3-class only.
 5. Renderer order must be derived from reading order / RenderTreeIR, not raw list order.
 6. Table/figure crops are assets, not graph text features.

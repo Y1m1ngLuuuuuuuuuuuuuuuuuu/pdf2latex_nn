@@ -85,7 +85,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.53)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="legacy")
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex", help="pdflatex or xelatex executable")
     parser.add_argument("--compile-runs", type=int, default=2)
@@ -94,12 +94,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clean-output-dir", action="store_true")
     parser.add_argument(
         "--renderer",
-        choices=["ir", "tree"],
+        choices=["ir"],
         default="ir",
-        help=(
-            "ir uses the canonical decoupled generation surface. tree is the "
-            "legacy TreeDecoder renderer for regression debugging."
-        ),
+        help="Production renderer. Only the canonical decoupled IR surface is supported.",
     )
     parser.add_argument(
         "--render-table-crops",

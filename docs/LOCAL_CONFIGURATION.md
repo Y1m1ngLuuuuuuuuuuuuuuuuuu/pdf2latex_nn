@@ -1,6 +1,6 @@
 # Local Configuration And Secret Handling
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This document records local/private setup rules. Do not commit secrets.
 
@@ -85,7 +85,11 @@ Large runtime data belongs under:
 
 ```text
 /root/autodl-tmp/pdf2latex_nn/data
+/root/autodl-tmp/pdf2latex_nn/logs
 ```
+
+Do not clean checkpoints, evaluation reports, manifests, or generated PDFs
+unless the user explicitly identifies the exact run as disposable.
 
 ## Current Remote Safety
 

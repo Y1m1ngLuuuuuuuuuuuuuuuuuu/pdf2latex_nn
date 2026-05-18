@@ -30,9 +30,9 @@ from src.evaluation.comparison_structure import (  # noqa: E402
 from src.evaluation.structure_metrics import evaluate_comparison_structures  # noqa: E402
 
 
-DEFAULT_MANIFEST = Path("data/00_manifests/v7_scope320_floatfix_mergeclean_biofilter_recall98_1976_20260512.json")
+DEFAULT_MANIFEST = Path("data/00_manifests/v7_floatproxy_adapter_20260516_205926_trainable_recall98.json")
 DEFAULT_NOUGAT_BIN = Path("baselines/nougat/.conda_env/bin/nougat")
-DEFAULT_OUTPUT_DIR = Path("data/09_eval_reports/nougat_comparison")
+DEFAULT_OUTPUT_DIR = Path("data/09_eval_reports/nougat_current_paired_20260517")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -40,6 +40,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--nougat-bin", type=Path, default=DEFAULT_NOUGAT_BIN)
+    parser.add_argument(
+        "--ours-e2e-manifest",
+        type=Path,
+        default=None,
+        help="Optional current E2E manifest. When provided, the same gold TeX is also evaluated against our generated LaTeX.",
+    )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
     parser.add_argument("--train-ratio", type=float, default=0.80)
@@ -68,16 +74,18 @@ def main() -> int:
     docs = select_documents(args)
     if not docs:
         raise ValueError("No documents selected for Nougat comparison")
+    ours_by_doc = load_ours_records(args.ours_e2e_manifest)
 
     rows: list[dict[str, Any]] = []
     for index, doc in enumerate(docs, start=1):
-        row = run_one_document(index, len(docs), doc, args)
+        row = run_one_document(index, len(docs), doc, args, ours_by_doc=ours_by_doc)
         rows.append(row)
         print_status(index, len(docs), row)
 
     payload = {
         "schema_version": "nougat_comparison_v1",
         "manifest": str(args.manifest),
+        "ours_e2e_manifest": str(args.ours_e2e_manifest) if args.ours_e2e_manifest else None,
         "nougat_bin": str(args.nougat_bin),
         "split": args.split,
         "limit": args.limit,
@@ -92,7 +100,14 @@ def main() -> int:
     return 0
 
 
-def run_one_document(index: int, total: int, doc: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def run_one_document(
+    index: int,
+    total: int,
+    doc: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    ours_by_doc: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     doc_id = str(doc.get("document_id") or Path(str(doc.get("pdf_path", f"doc_{index}"))).stem)
     doc_dir = args.output_dir / f"{index:02d}_{safe_filename(doc_id)}"
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -135,10 +150,83 @@ def run_one_document(index: int, total: int, doc: dict[str, Any], args: argparse
                 "structure_metrics": str(metrics_path),
             }
         )
+        attach_ours_metrics(
+            row=row,
+            gold=gold.to_dict(),
+            doc_dir=doc_dir,
+            doc_id=doc_id,
+            ours_record=ours_by_doc.get(doc_id),
+            match_threshold=args.match_threshold,
+        )
     except Exception as exc:  # noqa: BLE001 - comparison batches should continue.
         row["error"] = repr(exc)
     write_json(doc_dir / "nougat_record.json", row)
     return row
+
+
+def load_ours_records(path: Path | None) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    docs = payload.get("documents", payload) if isinstance(payload, dict) else payload
+    if not isinstance(docs, list):
+        raise ValueError(f"Expected ours E2E manifest list or documents list: {path}")
+    records: dict[str, dict[str, Any]] = {}
+    for row in docs:
+        if not isinstance(row, dict):
+            continue
+        doc_id = row.get("document_id")
+        if doc_id:
+            records[str(doc_id)] = row
+    return records
+
+
+def attach_ours_metrics(
+    *,
+    row: dict[str, Any],
+    gold: dict[str, Any],
+    doc_dir: Path,
+    doc_id: str,
+    ours_record: dict[str, Any] | None,
+    match_threshold: float,
+) -> None:
+    if not ours_record:
+        row["ours_available"] = False
+        return
+    row["ours_available"] = True
+    pred_dict: dict[str, Any] | None = None
+
+    structure_path = existing_path(ours_record.get("generated_structure"))
+    if structure_path:
+        pred_dict = json.loads(structure_path.read_text(encoding="utf-8"))
+    else:
+        generated_tex = existing_path(ours_record.get("generated_tex"))
+        if generated_tex:
+            pred = latex_file_to_comparison(generated_tex, doc_id=doc_id)
+            pred_dict = pred.to_dict()
+            write_comparison_json(pred, doc_dir / "ours_structure.json")
+
+    if pred_dict is None:
+        row["ours_error"] = "missing_generated_structure_or_tex"
+        return
+
+    if structure_path:
+        write_json(doc_dir / "ours_structure.json", pred_dict)
+    metrics = evaluate_comparison_structures(gold, pred_dict, match_threshold=match_threshold)
+    metrics_path = doc_dir / "ours_structure_metrics.json"
+    write_json(metrics_path, metrics)
+    ours_flat = flatten_metrics(metrics)
+    for key, value in ours_flat.items():
+        row[f"ours_{key}"] = value
+    row["ours_structure_metrics"] = str(metrics_path)
+    row["ours_doc_dir"] = ours_record.get("doc_dir")
+    for key, ours_value in ours_flat.items():
+        nougat_value = row.get(key)
+        if ours_value is not None and nougat_value is not None:
+            try:
+                row[f"delta_ours_minus_nougat_{key}"] = float(ours_value) - float(nougat_value)
+            except (TypeError, ValueError):
+                pass
 
 
 def run_nougat(pdf_path: Path, doc_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -187,6 +275,33 @@ def find_existing_mmd(doc_dir: Path, pdf_path: Path) -> Path | None:
 
 
 def select_documents(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.ours_e2e_manifest:
+        # A paired comparison must use exactly the same document set as the
+        # current E2E run.  Otherwise the first valid PDF/TeX records selected
+        # from the source manifest can be offset from the generated-LaTeX
+        # manifest, producing a 19/20 "paired" table and misleading deltas.
+        ours_payload = json.loads(args.ours_e2e_manifest.read_text(encoding="utf-8"))
+        ours_docs = ours_payload.get("documents", ours_payload) if isinstance(ours_payload, dict) else ours_payload
+        if not isinstance(ours_docs, list):
+            raise ValueError(f"Expected ours E2E manifest list or documents list: {args.ours_e2e_manifest}")
+        docs = [doc for doc in ours_docs if isinstance(doc, dict)]
+        explicit_ids = set(args.document_id or [])
+        if explicit_ids:
+            selected = [doc for doc in docs if str(doc.get("document_id")) in explicit_ids]
+            missing = sorted(explicit_ids - {str(doc.get("document_id")) for doc in selected})
+            if missing:
+                raise ValueError(f"Requested document ids not found in E2E manifest: {missing}")
+            return selected[: args.limit]
+        selected = []
+        for doc in docs:
+            if existing_path(doc.get("pdf_path") or doc.get("source_pdf")) and existing_path(
+                doc.get("tex_path") or doc.get("main_tex") or doc.get("source_tex")
+            ):
+                selected.append(doc)
+            if len(selected) >= args.limit:
+                break
+        return selected
+
     payload = json.loads(args.manifest.read_text(encoding="utf-8"))
     docs = payload.get("documents", payload) if isinstance(payload, dict) else payload
     if not isinstance(docs, list):
@@ -244,8 +359,13 @@ def flatten_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "macro_structure_score": metrics.get("macro_structure_score"),
         "heading_tree_accuracy": (metrics.get("heading_tree_accuracy") or {}).get("score"),
         "reading_order_accuracy": (metrics.get("reading_order_accuracy") or {}).get("score"),
-        "paragraph_merge_f1": (metrics.get("paragraph_merge_f1") or {}).get("f1"),
+        "paragraph_boundary_f1": (metrics.get("paragraph_boundary_f1") or {}).get("f1"),
+        "paragraph_text_coverage_f1": (metrics.get("paragraph_text_coverage_f1") or {}).get("f1"),
         "section_attachment_f1": (metrics.get("section_attachment_f1") or {}).get("f1"),
+        "section_attachment_body_no_float_f1": (metrics.get("section_attachment_body_no_float_f1") or {}).get("f1"),
+        "section_attachment_oracle_heading_flow_f1": (
+            metrics.get("section_attachment_oracle_heading_flow_f1") or {}
+        ).get("f1"),
         "reference_section_completeness": (metrics.get("reference_section_completeness") or {}).get("score"),
         "float_caption_attachment_accuracy": (metrics.get("float_caption_attachment_accuracy") or {}).get("score"),
         "generated_structure_validity": (metrics.get("generated_structure_validity") or {}).get("score"),
@@ -256,19 +376,44 @@ def flatten_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+    summary = {
         "documents": len(rows),
         "completed": sum(1 for row in rows if row.get("structure_metrics")),
         "failed": sum(1 for row in rows if row.get("error")),
         "macro_structure_score": mean_value(row.get("macro_structure_score") for row in rows),
         "heading_tree_accuracy": mean_value(row.get("heading_tree_accuracy") for row in rows),
         "reading_order_accuracy": mean_value(row.get("reading_order_accuracy") for row in rows),
-        "paragraph_merge_f1": mean_value(row.get("paragraph_merge_f1") for row in rows),
+        "paragraph_boundary_f1": mean_value(row.get("paragraph_boundary_f1") for row in rows),
+        "paragraph_text_coverage_f1": mean_value(row.get("paragraph_text_coverage_f1") for row in rows),
         "section_attachment_f1": mean_value(row.get("section_attachment_f1") for row in rows),
+        "section_attachment_body_no_float_f1": mean_value(row.get("section_attachment_body_no_float_f1") for row in rows),
+        "section_attachment_oracle_heading_flow_f1": mean_value(
+            row.get("section_attachment_oracle_heading_flow_f1") for row in rows
+        ),
         "reference_section_completeness": mean_value(row.get("reference_section_completeness") for row in rows),
         "float_caption_attachment_accuracy": mean_value(row.get("float_caption_attachment_accuracy") for row in rows),
         "generated_structure_validity": mean_value(row.get("generated_structure_validity") for row in rows),
     }
+    ours_keys = [
+        "macro_structure_score",
+        "heading_tree_accuracy",
+        "reading_order_accuracy",
+        "paragraph_boundary_f1",
+        "paragraph_text_coverage_f1",
+        "section_attachment_f1",
+        "section_attachment_body_no_float_f1",
+        "reference_section_completeness",
+        "float_caption_attachment_accuracy",
+        "generated_structure_validity",
+    ]
+    if any(row.get("ours_available") for row in rows):
+        summary["ours_available"] = sum(1 for row in rows if row.get("ours_available"))
+        for key in ours_keys:
+            summary[f"ours_{key}"] = mean_value(row.get(f"ours_{key}") for row in rows)
+            summary[f"delta_ours_minus_nougat_{key}"] = mean_value(
+                row.get(f"delta_ours_minus_nougat_{key}") for row in rows
+            )
+    return summary
 
 
 def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -277,15 +422,39 @@ def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "macro_structure_score",
         "heading_tree_accuracy",
         "reading_order_accuracy",
-        "paragraph_merge_f1",
+        "paragraph_boundary_f1",
+        "paragraph_text_coverage_f1",
         "section_attachment_f1",
+        "section_attachment_body_no_float_f1",
+        "section_attachment_oracle_heading_flow_f1",
         "reference_section_completeness",
         "float_caption_attachment_accuracy",
         "generated_structure_validity",
+        "ours_available",
+        "ours_macro_structure_score",
+        "ours_heading_tree_accuracy",
+        "ours_reading_order_accuracy",
+        "ours_paragraph_boundary_f1",
+        "ours_paragraph_text_coverage_f1",
+        "ours_section_attachment_f1",
+        "ours_section_attachment_body_no_float_f1",
+        "ours_reference_section_completeness",
+        "ours_float_caption_attachment_accuracy",
+        "ours_generated_structure_validity",
+        "delta_ours_minus_nougat_macro_structure_score",
+        "delta_ours_minus_nougat_heading_tree_accuracy",
+        "delta_ours_minus_nougat_reading_order_accuracy",
+        "delta_ours_minus_nougat_paragraph_boundary_f1",
+        "delta_ours_minus_nougat_paragraph_text_coverage_f1",
+        "delta_ours_minus_nougat_section_attachment_body_no_float_f1",
+        "delta_ours_minus_nougat_reference_section_completeness",
+        "delta_ours_minus_nougat_float_caption_attachment_accuracy",
+        "delta_ours_minus_nougat_generated_structure_validity",
         "matched_blocks",
         "gold_blocks",
         "pred_blocks",
         "nougat_mmd",
+        "ours_doc_dir",
         "error",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -299,6 +468,7 @@ def print_status(index: int, total: int, row: dict[str, Any]) -> None:
     print(
         f"[{index:02d}/{total:02d}] {row.get('document_id')} "
         f"score={format_float(row.get('macro_structure_score'))} "
+        f"ours={format_float(row.get('ours_macro_structure_score'))} "
         f"heading={format_float(row.get('heading_tree_accuracy'))} "
         f"order={format_float(row.get('reading_order_accuracy'))} "
         f"err={row.get('error', '')}",

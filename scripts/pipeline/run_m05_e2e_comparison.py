@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Run the locked M05 model through E2E generation and structure/layout QA.
+"""Run the current model through E2E generation and structure/layout QA.
 
 This script is intentionally a thin orchestration layer. It reuses the current
 visual-QA inference path, then evaluates generated LaTeX against the matching
 source TeX through the neutral comparison-structure schema.
+
+The filename is kept for compatibility with older reports. The defaults now
+target the current v7 float-proxy adapter-aware model family and the canonical
+IR generator path.
 """
 
 from __future__ import annotations
@@ -31,12 +35,12 @@ from src.evaluation.visual_qa import compare_pdf_layouts  # noqa: E402
 from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
 
 
-DEFAULT_MANIFEST = Path("data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json")
+DEFAULT_MANIFEST = Path("data/00_manifests/v7_floatproxy_adapter_20260516_205926_trainable_recall98.json")
 DEFAULT_CHECKPOINT = Path(
-    "data/09_eval_reports/gnn_y_network_compare_20260514/"
-    "M05_y_network_dual_head/seed_7/best_model.pth"
+    "data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926/"
+    "M06_y_network_plus_merge_gate/seed_7/best_model.pth"
 )
-DEFAULT_OUTPUT_DIR = Path("data/09_eval_reports/m05_e2e_comparison_20260514")
+DEFAULT_OUTPUT_DIR = Path("data/09_eval_reports/current_e2e_comparison_hard20_floatcaption_rerun_20260518_132615")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -55,9 +59,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.45)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="legacy")
-    parser.add_argument("--renderer", choices=["ir", "tree"], default="ir")
-    parser.add_argument("--render-table-crops", action="store_true")
+    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
+    parser.add_argument("--renderer", choices=["ir"], default="ir")
+    parser.add_argument("--render-table-crops", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--match-threshold", type=float, default=0.58)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex")
     parser.add_argument("--compile-runs", type=int, default=2)
@@ -70,16 +75,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    args = build_arg_parser().parse_args()
     import torch
 
-    args = build_arg_parser().parse_args()
     if args.clean_output_dir and args.output_dir.exists():
         shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     docs = select_documents(args)
     if not docs:
-        raise ValueError("No documents selected for M05 E2E comparison")
+        raise ValueError("No documents selected for current E2E comparison")
 
     device = resolve_device(args.device, torch=torch)
     model = load_model(args.checkpoint, device=device, torch=torch)
@@ -127,7 +132,7 @@ def main() -> int:
         print_status(index, len(docs), row)
 
     payload = {
-        "schema_version": "m05_e2e_comparison_v1",
+        "schema_version": "current_e2e_comparison_v1",
         "manifest": str(args.manifest),
         "checkpoint": str(args.checkpoint),
         "split": args.split,
@@ -136,6 +141,8 @@ def main() -> int:
         "parent_threshold": args.parent_threshold,
         "heading_skeleton_mode": args.heading_skeleton_mode,
         "renderer": args.renderer,
+        "render_table_crops": args.render_table_crops,
+        "match_threshold": args.match_threshold,
         "summary": summarize_rows(rows),
         "documents": rows,
     }
@@ -159,7 +166,11 @@ def evaluate_generated_document(doc: dict[str, Any], row: dict[str, Any], args: 
         metrics_path = doc_dir / "structure_metrics.json"
         write_comparison_json(gold, gold_path)
         write_comparison_json(pred, pred_path)
-        metrics = evaluate_comparison_structures(gold.to_dict(), pred.to_dict())
+        metrics = evaluate_comparison_structures(
+            gold.to_dict(),
+            pred.to_dict(),
+            match_threshold=args.match_threshold,
+        )
         write_json(metrics_path, metrics)
         result.update(
             {
@@ -170,8 +181,13 @@ def evaluate_generated_document(doc: dict[str, Any], row: dict[str, Any], args: 
                 "macro_structure_score": metrics.get("macro_structure_score"),
                 "heading_tree_accuracy": (metrics.get("heading_tree_accuracy") or {}).get("score"),
                 "reading_order_accuracy": (metrics.get("reading_order_accuracy") or {}).get("score"),
-                "paragraph_merge_f1": (metrics.get("paragraph_merge_f1") or {}).get("f1"),
+                "paragraph_boundary_f1": (metrics.get("paragraph_boundary_f1") or {}).get("f1"),
+                "paragraph_text_coverage_f1": (metrics.get("paragraph_text_coverage_f1") or {}).get("f1"),
                 "section_attachment_f1": (metrics.get("section_attachment_f1") or {}).get("f1"),
+                "section_attachment_body_no_float_f1": (metrics.get("section_attachment_body_no_float_f1") or {}).get("f1"),
+                "section_attachment_oracle_heading_flow_f1": (
+                    metrics.get("section_attachment_oracle_heading_flow_f1") or {}
+                ).get("f1"),
                 "reference_section_completeness": (metrics.get("reference_section_completeness") or {}).get("score"),
                 "float_caption_attachment_accuracy": (metrics.get("float_caption_attachment_accuracy") or {}).get("score"),
                 "generated_structure_validity": (metrics.get("generated_structure_validity") or {}).get("score"),
@@ -206,8 +222,13 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "macro_structure_score": mean_value(row.get("macro_structure_score") for row in rows),
         "heading_tree_accuracy": mean_value(row.get("heading_tree_accuracy") for row in rows),
         "reading_order_accuracy": mean_value(row.get("reading_order_accuracy") for row in rows),
-        "paragraph_merge_f1": mean_value(row.get("paragraph_merge_f1") for row in rows),
+        "paragraph_boundary_f1": mean_value(row.get("paragraph_boundary_f1") for row in rows),
+        "paragraph_text_coverage_f1": mean_value(row.get("paragraph_text_coverage_f1") for row in rows),
         "section_attachment_f1": mean_value(row.get("section_attachment_f1") for row in rows),
+        "section_attachment_body_no_float_f1": mean_value(row.get("section_attachment_body_no_float_f1") for row in rows),
+        "section_attachment_oracle_heading_flow_f1": mean_value(
+            row.get("section_attachment_oracle_heading_flow_f1") for row in rows
+        ),
         "reference_section_completeness": mean_value(row.get("reference_section_completeness") for row in rows),
         "float_caption_attachment_accuracy": mean_value(row.get("float_caption_attachment_accuracy") for row in rows),
         "generated_structure_validity": mean_value(row.get("generated_structure_validity") for row in rows),
@@ -222,8 +243,11 @@ def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "macro_structure_score",
         "heading_tree_accuracy",
         "reading_order_accuracy",
-        "paragraph_merge_f1",
+        "paragraph_boundary_f1",
+        "paragraph_text_coverage_f1",
         "section_attachment_f1",
+        "section_attachment_body_no_float_f1",
+        "section_attachment_oracle_heading_flow_f1",
         "reference_section_completeness",
         "float_caption_attachment_accuracy",
         "generated_structure_validity",

@@ -1,6 +1,6 @@
 # Feature Schema v0
 
-**Last updated**: 2026-05-14
+**Last updated**: 2026-05-18
 
 This document fixes the current v7 graph tensor contract. The version name remains `feature_schema_v0` because downstream code imports that schema, but the active implementation is the v7 feature set.
 
@@ -10,9 +10,15 @@ This document fixes the current v7 graph tensor contract. The version name remai
 pipeline_version: v7
 graph_schema_version: graph_v7
 node_feature_dim: 832
-edge_attr_dim: 22
+edge_attr_dim: 26
 labels: MERGE=0, PARENT_CHILD=1, NONE=2
 ```
+
+Historical locked reports/checkpoints from `v7_registry_adapteraware_20260515_181724`
+used `edge_attr_dim=22`. The current checked-in schema adds four float
+barrier/skip features and is being validated under the
+`v7_floatproxy_adapter_20260516_205926` rebuild tag. Old checkpoints remain
+valid only with their original graph/schema compatibility path.
 
 Coordinates come from MinerU/PDF page space and are normalized or transformed by the graph builder. Raw bboxes stay available in node metadata.
 
@@ -49,6 +55,15 @@ v7_id_to_gnn_idx
 gnn_view_summary
 ```
 
+Current adapter behavior:
+
+```text
+metadata/noise/annotation/toc/duplicate-shadow -> normally excluded
+figure/table/algorithm -> included as float_proxy nodes
+float_proxy text -> caption text when available, otherwise [FIGURE]/[TABLE]/[ALGORITHM]
+raw table cells / figure OCR -> not embedded as ordinary text
+```
+
 ## Edge Feature Layout
 
 Edge features are directional. For edge `u -> v`, deltas are computed from source to target.
@@ -63,6 +78,7 @@ overlap_gutter    y-overlap and x-gutter barrier cues
 index_bins        binned reading-order distance
 punctuation       source terminal punctuation and hyphen probes
 layout_flow       band/column/page transition cues
+float_barrier     float_skip edge marker and intervening figure/table flags
 ```
 
 `PARENT_CHILD` is directional. If `u -> v` is parent-child, the reverse `v -> u` is usually `NONE`.
@@ -78,6 +94,18 @@ long-sight / local scope anchors
 float skip window
 forced reading-flow edges
 ```
+
+The final four current raw edge features are:
+
+```text
+is_float_skip_edge
+has_float_between
+has_figure_between
+has_table_between
+```
+
+They are hints for “paragraph continues across a visual float” without letting
+the float body itself become a MERGE target.
 
 Before training, candidate-edge recall is profiled against TeX-derived true positive edges. Production manifests should filter or reject samples below the configured recall threshold.
 
@@ -111,7 +139,7 @@ Graph tensors must satisfy:
 x.ndim == 2
 edge_index.shape[0] == 2
 edge_attr.shape[0] == edge_index.shape[1]
-edge_attr.shape[1] == 22
+edge_attr.shape[1] == 26
 y.shape[0] == edge_index.shape[1] when labeled
 finite float32 node/edge features
 non-empty node and edge sets

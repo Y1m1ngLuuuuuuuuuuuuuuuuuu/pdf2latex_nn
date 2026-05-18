@@ -404,9 +404,9 @@ def _line_spacing_after(line: FrontMatterLine, *, next_line: FrontMatterLine | N
     if next_line is None:
         return ""
     if line.role == "author" and next_line.role != "author":
-        return r"\\[4pt]"
+        return r"\\\vspace{4pt}"
     if line.role != next_line.role:
-        return r"\\[2pt]"
+        return r"\\\vspace{2pt}"
     return r"\\"
 
 

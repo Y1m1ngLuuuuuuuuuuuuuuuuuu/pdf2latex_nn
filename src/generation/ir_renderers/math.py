@@ -38,16 +38,24 @@ class AlgorithmCodeRenderer:
 
     def render(self, context: RenderContext) -> str:
         if context.node.role == RenderRole.ALGORITHM:
-            return render_algorithm_block(
-                context.text,
-                label=context.owner._cross_ref_label_for_render_node(context.node, context.document_nodes, "algorithm"),
-            )
+            render_algorithm = getattr(context.owner, "_render_algorithm", None)
+            if callable(render_algorithm):
+                return render_algorithm(
+                    context.source_nodes,
+                    context.text,
+                    label=context.owner._cross_ref_label_for_render_node(context.node, context.document_nodes, "algorithm"),
+                )
+            return render_algorithm_block(context.text)
         return "\\begin{verbatim}\n" + safe_verbatim_text(context.text.strip()) + "\n\\end{verbatim}" if context.text else ""
 
     def render_document_node(self, context: DocumentNodeRenderContext) -> str:
         if context.node.node_type == BlockType.ALGORITHM:
-            return render_algorithm_block(
-                context.text,
-                label=context.owner._cross_ref_label_for_document_node(context.node, "algorithm"),
-            )
+            render_algorithm = getattr(context.owner, "_render_algorithm", None)
+            if callable(render_algorithm):
+                return render_algorithm(
+                    [context.node],
+                    context.text,
+                    label=context.owner._cross_ref_label_for_document_node(context.node, "algorithm"),
+                )
+            return render_algorithm_block(context.text)
         return "\\begin{verbatim}\n" + safe_verbatim_text(context.text.strip()) + "\n\\end{verbatim}" if context.text else ""
