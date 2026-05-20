@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.generation.ir_renderers.context import DocumentNodeRenderContext, RenderContext
-from src.generation.latex_renderer import render_algorithm_block, render_equation, render_inline_math, safe_verbatim_text
+from src.generation.latex_helpers import render_algorithm_block, render_equation, render_inline_math, safe_verbatim_text
 from src.ir import BlockType, RenderRole
 
 

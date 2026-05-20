@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from src.generation.latex_renderer import escape_latex, render_text_with_inline_latex
+from src.generation.latex_helpers import escape_latex, render_text_with_inline_latex
 from src.ir import BBox, BlockType, DocumentNode, StyleProfile, StyleSpan
 
 

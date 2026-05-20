@@ -33,8 +33,9 @@ style spans disappear or get misclassified as noise.
 | `scripts/pipeline/run_e2e_inference.py` | Full E2E front-end + inference + compile path. Defaults to the IR renderer and stack heading skeleton. |
 | `scripts/pipeline/run_m05_e2e_comparison.py` | Locked-model comparison wrapper. Defaults to the IR renderer and stack heading skeleton. |
 
-`src.generation.latex_renderer.render_latex_document()` is a legacy/debug
-surface for historical tests and low-level helpers only.  Current production
+`src.generation.latex_helpers` provides low-level LaTeX helper functions used
+by the IR renderer. `src.generation.latex_renderer` is a deprecated standalone
+tree-rendering surface retained for historical unit tests. Current production
 scripts no longer accept `--renderer tree`; they expose only `--renderer ir`.
 
 ## Graph-to-v7 Bridge Contract
@@ -165,14 +166,26 @@ needed.
 | `references.py` | bibliography/reference section role rendering |
 | `notes.py` | footnote/margin-note role; actual anchor logic is owner `_NoteContext` |
 
-### Legacy renderer
+### Shared LaTeX helpers
+
+`src/generation/latex_helpers.py`
+
+This file owns the helper surface used by production renderers:
+
+- escaping and Unicode normalization
+- inline/display math cleanup
+- list marker detection and stripping
+- algorithm formatting
+- table/figure crop placeholder helpers
+- float caption cleanup
+
+### Deprecated tree renderer
 
 `src/generation/latex_renderer.py`
 
 This file remains for:
 
-- low-level escaping/math/list helper functions
-- legacy TreeDecoder tests
+- historical TreeDecoder tests
 - regression debugging
 
 It is not the production generator.  New output-quality logic should go through
@@ -285,8 +298,8 @@ numbers, while custom visible prefixes were lost.
 Before accepting a generator change, verify:
 
 1. The E2E command uses `--renderer ir`.
-2. The decoder uses `--heading-skeleton-mode stack` unless intentionally
-   benchmarking legacy mode.
+2. The decoder uses `--heading-skeleton-mode stack`; production scripts expose
+   no alternative heading decoder mode.
 3. Graph records are bridged by exact `gnn_to_v7_ids`, not by count.
 4. Full v7 data is converted to `DocumentIR` for rendering.
 5. Metadata/noise filtering only affects GNN view, not full v7 render facts.

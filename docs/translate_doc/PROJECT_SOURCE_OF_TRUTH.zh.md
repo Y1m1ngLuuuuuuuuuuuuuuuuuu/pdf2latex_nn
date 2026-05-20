@@ -44,6 +44,7 @@ compiled PDF + matching TeX
   -> graph.pt
   -> TeX AST alignment labels
   -> GATv2/Y-Network training / inference
+  -> edge_logits.pt + predicted_relations.json
   -> TreeDecoder
   -> RenderTreeIR
   -> OriginalLikeIRLatexRenderer
@@ -52,6 +53,8 @@ compiled PDF + matching TeX
 旧 v3/v4/v5 JSON 是历史实验。不要把它们喂给训练或评测。
 
 完整 v7 JSON 是完整事实层。它不能因为 GNN 不直接使用某些节点，就删除或改写 metadata、figures、tables、footnotes、headers、captions 或 references。图可见视图由 `src/perception/gnn_view_adapter.py` 单独构建。
+
+GNN 预测结果不能直接渲染。模型只在 graph-visible view 上预测每条候选边的 MERGE/PARENT_CHILD/NONE logits。`TreeDecoder` 在约束下把这些概率转成结构关系，然后 relation bridge 把 graph index 精确映射回 v7 source ids，最后 IR renderer 读取完整 v7 fact layer。
 
 当前模型/数据轨道：
 
@@ -118,20 +121,18 @@ EMBEDDING_DEVICE=cpu \
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
 
-`--renderer ir` 是当前 E2E 脚本暴露的唯一生产渲染面。legacy TreeDecoder renderer 只保留给历史单测和底层 helper 兼容；生产脚本不再接受 `--renderer tree`。
+`--renderer ir` 是当前 E2E 脚本暴露的唯一生产渲染面。旧 TreeDecoder renderer 只保留给历史单测和底层 helper 兼容；生产脚本不再接受 `--renderer tree`。
 
 Decoder heading 模式：
 
 ```text
---heading-skeleton-mode legacy   基线 decoder 行为
---heading-skeleton-mode stack    当前生产候选：layout heading detector 提供候选/提示；
+--heading-skeleton-mode stack    唯一生产模式：layout heading detector 提供候选/提示；
                                  确定性 stack 提供 outline prior 和 section-scope 安全约束；
                                  GNN parent edges 仍然进入 relation bridge，
                                  但受物理/heading 约束保护
---heading-skeleton-mode off      不使用 heading skeleton，仅用于回归/调试基线
 ```
 
-当前 E2E 生成和 section-scope A/B 实验应使用 `stack`。它不需要重新跑 MinerU、不需要 rebuild graph、不需要 relabel、不需要重新训练。stack 模式会显式过滤 front-matter paper title、长数学/OCR 残片等错误 heading evidence，再构建大纲。
+当前 E2E 生成应使用 `stack`。它不需要重新跑 MinerU、不需要 rebuild graph、不需要 relabel、不需要重新训练。stack 模式会显式过滤 front-matter paper title、长数学/OCR 残片等错误 heading evidence，再构建大纲。本地代码现在会拒绝旧 heading decoder mode，避免同一条生产链路里同时存在新旧方案。
 
 ## 当前 Manifest 家族
 
@@ -223,4 +224,4 @@ docs/interface_audit_2026_05_14.md
 docs/LOCAL_CONFIGURATION.md
 ```
 
-此列表之外的内容，要么是源码注释、生成报告，要么是 legacy reference material。
+此列表之外的内容，要么是源码注释、生成报告，要么是历史参考材料。

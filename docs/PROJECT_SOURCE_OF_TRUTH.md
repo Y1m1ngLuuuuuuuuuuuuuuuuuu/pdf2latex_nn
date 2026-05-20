@@ -61,6 +61,7 @@ compiled PDF + matching TeX
   -> graph.pt
   -> TeX AST alignment labels
   -> GATv2/Y-Network training / inference
+  -> edge_logits.pt + predicted_relations.json
   -> TreeDecoder
   -> RenderTreeIR
   -> OriginalLikeIRLatexRenderer
@@ -72,6 +73,12 @@ The full v7 JSON is the complete fact layer. It must not delete or rewrite
 metadata, figures, tables, footnotes, headers, captions, or references just
 because the GNN does not consume them directly. The graph-visible view is built
 separately by `src/perception/gnn_view_adapter.py`.
+
+GNN predictions are never rendered directly. The model predicts per-edge
+MERGE/PARENT_CHILD/NONE logits on the graph-visible view. `TreeDecoder` turns
+those probabilities into a constrained structure, then the relation bridge maps
+graph indices back to exact v7 source ids before the IR renderer reads the full
+v7 fact layer.
 
 Current model/data tracks:
 
@@ -140,9 +147,8 @@ bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
 
 `--renderer ir` is the only production surface exposed by current E2E scripts.
-The legacy TreeDecoder renderer remains in code only for historical unit tests
-and low-level helper compatibility; production scripts no longer accept
-`--renderer tree`.
+The standalone TreeDecoder renderer is not a production surface; production
+scripts no longer accept `--renderer tree`.
 
 Generator module ownership and the current full-v7/GNN-view/render-tree bridge
 are frozen in:
@@ -151,27 +157,33 @@ are frozen in:
 docs/generator_logic_audit_2026_05_17.md
 ```
 
+The replaceable frontend/table/style boundaries are frozen in:
+
+```text
+docs/MINERU_ADAPTER_CONTRACT.md
+docs/TABLE_ENGINE_CONTRACT.md
+docs/STYLE_TEMPLATE_CONTRACT.md
+```
+
 When generator behavior looks inconsistent, check that document before changing
 `ir_renderer.py`; most failures come from crossing the full-v7 render facts with
 the filtered GNN view.
 
-Decoder heading modes:
+Decoder heading mode:
 
 ```text
---heading-skeleton-mode legacy   baseline decoder behavior
---heading-skeleton-mode stack    current production candidate: layout heading detector supplies
+--heading-skeleton-mode stack    canonical mode: layout heading detector supplies
                                  candidates/hints; deterministic stack provides
                                  outline priors and section-scope safety gates;
                                  GNN parent edges remain part of the relation
                                  bridge under physical/heading constraints
---heading-skeleton-mode off      no heading skeleton; regression/debug baseline only
 ```
 
-Use `stack` for section-scope A/B experiments and current E2E generation. It
-does not require MinerU reruns, graph rebuilds, relabeling, or model
-retraining.  The stack mode now explicitly filters false heading evidence such
-as front-matter paper titles and long math/OCR fragments before building the
-outline.
+Use `stack` for all current E2E generation. It does not require MinerU reruns,
+graph rebuilds, relabeling, or model retraining. The stack mode explicitly
+filters false heading evidence such as front-matter paper titles and long
+math/OCR fragments before building the outline. Local code now rejects the old
+heading decoder modes instead of silently keeping a second production path.
 
 ## Current Manifest Families
 
@@ -313,4 +325,4 @@ docs/interface_audit_2026_05_14.md
 docs/LOCAL_CONFIGURATION.md
 ```
 
-Anything outside this list is either source-code comments, generated reports, or legacy reference material.
+Anything outside this list is either source-code comments, generated reports, or historical reference material.

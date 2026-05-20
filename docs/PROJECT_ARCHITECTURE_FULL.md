@@ -171,18 +171,18 @@ src/perception/
 | File | Responsibility |
 | --- | --- |
 | `schema.py` | Stable feature schema, block enums, tensor field names. |
-| `mineru_parser.py` | MinerU JSON parsing helpers. |
-| `pdf_parser.py` | PDF-side extraction glue. |
+| `content_resolver.py` | Bounded resolver for selecting the current full v7 content JSON from explicit MinerU/v7 roots. |
 | `reading_order.py` | v7 reading-order metadata, TOC/noise helpers, duplicate continuation handling. |
 | `xy_cut.py` | Reading-order sorting helpers and band/column order utilities. |
 | `style_spans.py` | PyMuPDF span extraction, style state merging, font/bold/italic/math/code flags. |
 | `layout_probes.py` | Layout-role probes such as header/footer/footnote/TOC/front matter. |
 | `title_features.py` | Numbering and heading token probes. |
 | `gnn_view_adapter.py` | Converts full v7 fact layer into graph-visible GNN view. |
-| `embedder.py` | SciBERT embedding support. |
-| `feature_extractor.py` | Feature extraction helpers. |
-| `table_parser.py` | Table related parsing helpers. |
-| `formula_parser.py` | Formula related parsing helpers. |
+
+The frontend adapter boundary is specified in
+`docs/MINERU_ADAPTER_CONTRACT.md`. As long as a future MinerU version or another
+PDF extractor still produces the same `DocumentIR` contract, downstream graph,
+decoder, and renderer modules do not need to know which engine produced it.
 
 ### 3.2 IR Layer
 
@@ -195,10 +195,6 @@ src/ir/
 | `schema.py` | Canonical DocumentIR, DocumentNode, RenderTreeIR, RenderRole, metadata. |
 | `serialization.py` | IR JSON serialization. |
 | `validators.py` | IR validation. |
-| `alignment.py` | Alignment structures. |
-| `ground_truth.py` | Ground-truth IR support. |
-| `observed.py` | Observed IR support. |
-| `provenance.py` | Provenance metadata. |
 
 ### 3.3 Adapter Layer
 
@@ -220,18 +216,15 @@ src/reasoning/
 | --- | --- |
 | `graph_builder.py` | Builds PyG `Data` from GNN view: node features, edge features, candidate edges, masks. |
 | `gnn_model.py` | `FeatureProjector`, `EdgeRelationGAT`, Y-network, message mask, merge gate. |
-| `predictors.py` | Prediction head helpers. |
 | `training.py` | Training utilities. |
 | `label_generator.py` | AlignmentLabeler and edge label generation. |
 | `tex_ast_builder.py` | TeX AST extraction. |
 | `latex_flattener.py` | Comment stripping, input/include flattening, bbl injection, macro handling, math masking. |
 | `tex_relation_labeler.py` | TeX path relation labeling. |
 | `postprocess.py` | TreeDecoder, merge contraction, constraints, relation-to-render tree bridge. |
+| `prediction_io.py` | Writes auditable `PredictedRelations` JSON sidecars from raw GNN edge logits/probabilities. |
 | `heading_skeleton.py` | Heading evidence and document-local heading style profile. |
 | `layout_state_machine.py` | Layout state-machine parsing helpers. |
-| `semantic_continuity.py` | Text continuity helpers. |
-| `normalizer.py` | Text normalization helpers. |
-| `structure_builder.py` | Structure assembly helpers. |
 
 ### 3.5 Generation Layer
 
@@ -249,11 +242,20 @@ src/generation/
 | `citations.py` | Citation and reference resolution helpers. |
 | `front_matter.py` | Title/author/abstract handling helpers. |
 | `source_float_layout.py` | Optional source-TeX float placement hints. |
-| `latex_templates.py` | Document templates and package setup. |
 | `font_resolver.py` | Font mapping and fontspec helpers. |
-| `compile_checker.py` | LaTeX compile checks. |
-| `safe_generator.py` | Safer generation wrapper. |
-| `latex_renderer.py` | Legacy compatibility renderer; not the production surface. |
+| `latex_helpers.py` | Shared escaping, math, list, float, and algorithm helper functions used by the IR renderer. |
+| `latex_renderer.py` | Deprecated standalone tree renderer for historical tests; not the production surface. |
+
+Table extraction/rendering and template/style injection are separate contracts:
+
+```text
+docs/TABLE_ENGINE_CONTRACT.md
+docs/STYLE_TEMPLATE_CONTRACT.md
+```
+
+Those contracts keep future structured table engines and SCI/IEEE-style
+templates as replaceable providers around `DocumentIR` and `StyleProfile`,
+instead of adding another generator path.
 
 ### 3.6 Evaluation Layer
 
@@ -268,7 +270,6 @@ tools/
 | `structure_metrics.py` | Heading, reading order, paragraph boundary/text coverage, section attachment, references, float-caption metrics. |
 | `compile_eval.py` | Compile success evaluation. |
 | `visual_qa.py` | Visual QA helpers. |
-| `metrics.py` | Generic metrics. |
 | `tools/convert_latex_to_comparison.py` | LaTeX to comparison JSON. |
 | `tools/convert_markdown_to_comparison.py` | Markdown/Nougat MMD to comparison JSON. |
 | `tools/evaluate_comparison_structure.py` | Structure metric CLI. |
@@ -1034,6 +1035,7 @@ src/reasoning/postprocess.py
 
 Responsibilities:
 
+- read raw edge probabilities from model logits / `predicted_relations.json`
 - threshold probabilities
 - contract MERGE components
 - enforce can_merge barriers
@@ -1080,6 +1082,21 @@ maintain active heading stack
 provide outline priors and section-scope safety gates
 consume GNN MERGE / PARENT_CHILD / NONE probabilities under constraints
 ```
+
+The `PredictedRelations` sidecar records raw per-edge model output for audit:
+
+```text
+edge_logits.pt
+  -> predicted_relations.json
+     - edge id and source/target graph indices
+     - MERGE/PARENT_CHILD/NONE probabilities
+     - raw argmax label
+     - threshold config
+```
+
+Final render structure is not raw argmax. It is produced after merge
+contraction, heading-stack scope, relation barriers, and exact graph-to-v7
+bridging.
 
 Heading evidence includes:
 
@@ -1176,13 +1193,19 @@ src/generation/render_surface.py
 OriginalLikeIRLatexRenderer
 ```
 
-Legacy renderer:
+Low-level LaTeX helper module:
+
+```text
+src/generation/latex_helpers.py
+```
+
+Deprecated standalone tree renderer:
 
 ```text
 src/generation/latex_renderer.py
 ```
 
-The legacy renderer is compatibility/test support only. Current E2E scripts
+The standalone tree renderer is not a production path. Current E2E scripts
 expose only:
 
 ```text
@@ -1704,7 +1727,6 @@ python tools/evaluate_comparison_structure.py --gold gold.json --pred nougat.jso
 ### Model Contract
 
 - `src/reasoning/gnn_model.py`
-- `src/reasoning/predictors.py`
 - `scripts/pipeline/train_edge_gnn_full.py`
 - `configs/ablation_matrix_v7_adapteraware_20260514_2109.json`
 - `tests/test_graph_builder.py`

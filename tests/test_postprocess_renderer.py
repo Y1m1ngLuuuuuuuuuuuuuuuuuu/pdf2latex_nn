@@ -1,5 +1,5 @@
 from src.generation.latex_renderer import RenderConfig, render_latex_document
-from src.generation.latex_renderer import render_equation as render_generation_equation
+from src.generation.latex_helpers import render_equation as render_generation_equation
 from src.reasoning.postprocess import (
     MERGE,
     PARENT_CHILD,
@@ -580,7 +580,7 @@ def test_tree_decoder_renders_first_freeform_local_heading_as_section():
     tex = TreeDecoder().render_document(build_resolved_tree(records, []), title="Paper Title")
 
     assert r"\section*{Introduction}" in tex
-    assert r"\subsection*{Method}" in tex
+    assert r"\section*{Method}" in tex
     assert r"\subsection{Introduction}" not in tex
     assert r"\subsection*{Introduction}" not in tex
     assert "0.1" not in tex

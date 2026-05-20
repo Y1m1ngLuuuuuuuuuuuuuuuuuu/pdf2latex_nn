@@ -47,6 +47,7 @@ from scripts.pipeline.build_mini_dataset import (  # noqa: E402
     run_command_with_process_group_timeout,
     sample_paths,
     scan_candidates,
+    v7_styles_have_current_layout_metadata,
     write_manifest,
 )
 from src.reasoning.label_generator import (  # noqa: E402
@@ -109,7 +110,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mineru-output-dir",
         type=Path,
-        default=REPO_ROOT / "data/02_mineru_outputs/mineru_output",
+        default=REPO_ROOT / "data/02_mineru_outputs/mineru_output_v7_staged",
+    )
+    parser.add_argument(
+        "--mineru-source-dir",
+        type=Path,
+        help=(
+            "Optional read-only MinerU raw-output directory. Existing MinerU "
+            "content is read from here, while rebuilt v7/style JSON is written "
+            "to --mineru-output-dir."
+        ),
+    )
+    parser.add_argument(
+        "--mineru-output-dirs",
+        nargs="+",
+        type=Path,
+        default=[],
+        help=(
+            "Candidate v7 content roots searched before graph/label. "
+            "Use newer schema-valid v7 directories first; --mineru-output-dir "
+            "remains the write/output root."
+        ),
     )
     parser.add_argument("--graph-output-dir", type=Path, default=REPO_ROOT / "data/06_graph_features_v7")
     parser.add_argument("--ground-truth-dir", type=Path, default=REPO_ROOT / "data/04_ground_truth_ir")
@@ -152,9 +173,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compiled-accepted-manifest", action="append", type=Path, default=[])
     parser.add_argument("--no-auto-compiled-accepted-manifests", action="store_true")
     parser.add_argument("--require-compiled-accepted", action="store_true")
+    parser.add_argument(
+        "--candidate-sort-mode",
+        choices=("doc_id", "manifest_order"),
+        default="doc_id",
+        help=(
+            "Sort compiled-manifest candidates by arXiv id, or preserve explicit "
+            "manifest order. Use manifest_order for ranked expansion manifests."
+        ),
+    )
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
-    parser.add_argument("--max-orphan-ratio", type=float, default=0.15)
-    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
+    parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
+    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.60)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
     parser.add_argument("--min-non-none-edges", type=int, default=1)
     parser.add_argument("--min-candidate-recall", type=float, default=1.0)
@@ -187,6 +217,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-json", action="store_true")
     parser.add_argument("--force-graph", action="store_true")
     parser.add_argument("--force-label", action="store_true")
+    parser.add_argument("--prefer-valid-v7-content", action="store_true")
+    parser.add_argument("--require-v7-schema-fields", action="store_true", default=True)
+    parser.add_argument("--no-require-v7-schema-fields", dest="require_v7_schema_fields", action="store_false")
+    parser.add_argument("--min-layout-layer-coverage", type=float, default=0.90)
+    parser.add_argument("--min-layout-role-coverage", type=float, default=0.90)
+    parser.add_argument("--min-canonical-type-coverage", type=float, default=0.00)
+    parser.add_argument("--allow-stale-v7-content", action="store_true")
+    parser.add_argument(
+        "--force-refresh-v7-conversion",
+        action="store_true",
+        help="If resolver finds no valid v7 content, rebuild v7/styles from MinerU raw/v2 when available. Does not force a MinerU rerun.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -241,7 +283,16 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         project_root=args.project_root.resolve(),
         raw_pdf_dir=args.raw_pdf_dir.resolve(),
         tex_source_dir=args.tex_source_dir.resolve(),
+        mineru_source_dir=args.mineru_source_dir.resolve() if args.mineru_source_dir else None,
         mineru_output_dir=args.mineru_output_dir.resolve(),
+        mineru_content_roots=tuple(path.resolve() for path in args.mineru_output_dirs),
+        prefer_valid_v7_content=bool(args.prefer_valid_v7_content),
+        require_v7_schema_fields=bool(args.require_v7_schema_fields),
+        min_layout_layer_coverage=float(args.min_layout_layer_coverage),
+        min_layout_role_coverage=float(args.min_layout_role_coverage),
+        min_canonical_type_coverage=float(args.min_canonical_type_coverage),
+        allow_stale_v7_content=bool(args.allow_stale_v7_content),
+        force_refresh_v7_conversion=bool(args.force_refresh_v7_conversion),
         graph_output_dir=args.graph_output_dir.resolve(),
         ground_truth_dir=args.ground_truth_dir.resolve(),
         manifest_output=args.manifest_output.resolve(),
@@ -262,6 +313,7 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         compiled_accepted_manifests=tuple(path.resolve() for path in args.compiled_accepted_manifest),
         auto_discover_compiled_manifests=not bool(args.no_auto_compiled_accepted_manifests),
         require_compiled_accepted=bool(args.require_compiled_accepted),
+        candidate_sort_mode=str(args.candidate_sort_mode),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=False,
         force_json=bool(args.force_json),
@@ -418,9 +470,15 @@ def preflight_tex_worker(candidate: CandidateSample, config: MiniDatasetConfig) 
 
 
 def run_mineru_stage(candidates: list[CandidateSample], config: StagedConfig) -> None:
-    missing = [candidate for candidate in candidates if not has_mineru_output(candidate, config)]
+    existing = [candidate for candidate in candidates if has_mineru_output(candidate, config)]
+    missing_all = [candidate for candidate in candidates if not has_mineru_output(candidate, config)]
+    mineru_prefetch_limit = max(config.mini.target + config.process_backlog, config.mini.target)
+    missing_needed = max(0, mineru_prefetch_limit - len(existing))
+    missing = missing_all[:missing_needed]
     print(
-        f"[staged] mineru existing={len(candidates) - len(missing)} missing={len(missing)} batch_size={config.mineru_batch_size}",
+        f"[staged] mineru existing={len(existing)} missing_total={len(missing_all)} "
+        f"missing_scheduled={len(missing)} deferred={max(0, len(missing_all) - len(missing))} "
+        f"prefetch_limit={mineru_prefetch_limit} batch_size={config.mineru_batch_size}",
         flush=True,
     )
     if not missing:
@@ -583,7 +641,11 @@ def has_valid_labeled_graph(candidate: CandidateSample, config: StagedConfig) ->
 
 
 def has_mineru_output(candidate: CandidateSample, config: StagedConfig) -> bool:
-    return find_mineru_content_source(candidate.document_id, config.mini.mineru_output_dir) is not None
+    paths = sample_paths(candidate, config.mini)
+    if paths["styles"].exists() and v7_styles_have_current_layout_metadata(paths["styles"]):
+        return True
+    source_dir = config.mini.mineru_source_dir or config.mini.mineru_output_dir
+    return find_mineru_content_source(candidate.document_id, source_dir) is not None
 
 
 def prepare_pdf_batch_dir(candidates: list[CandidateSample], batch_dir: Path) -> None:

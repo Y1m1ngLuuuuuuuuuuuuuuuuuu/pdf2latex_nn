@@ -165,7 +165,28 @@ PARENT_CHILD
 NONE
 ```
 
-Calibration and deterministic guards can convert probabilities to decoded edges. These guards belong to decoder configuration, not to the graph tensors.
+The raw GNN output is `edge_logits.pt`. Current inference also writes
+`predicted_relations.json`, a `PredictedRelations` sidecar containing per-edge
+probabilities, raw argmax labels, threshold config, and edge endpoints. This
+sidecar is an audit record for the graph-visible candidate edges; it is not a
+render source.
+
+The decoder consumes those probabilities under deterministic constraints:
+
+```text
+raw logits/probabilities
+  -> thresholded MERGE candidates
+  -> merge contraction
+  -> heading skeleton / active section scope
+  -> constrained PARENT_CHILD selection
+  -> ResolvedNode tree
+  -> RenderTreeIR with v7 source ids
+```
+
+Calibration and deterministic guards belong to decoder configuration, not to
+graph tensors. A high raw probability can still be rejected by merge barriers,
+section-scope constraints, float/equation barriers, or graph-to-v7 bridge
+checks.
 
 ## RenderTreeIR
 
@@ -193,13 +214,22 @@ src/generation/ir_renderer.py
 src/generation/ir_renderers/
 ```
 
-Legacy renderer:
+Low-level LaTeX helper module:
+
+```text
+src/generation/latex_helpers.py
+```
+
+Deprecated standalone tree renderer:
 
 ```text
 src/generation/latex_renderer.py
 ```
 
-The legacy renderer is compatibility-only. New behavior should go into the IR renderer and its helpers.
+`latex_helpers.py` keeps shared escaping, math, list, float, and algorithm
+helpers used by the IR renderer. `latex_renderer.py` is not a production render
+surface. New rendering behavior should go into the IR renderer, registry
+renderers, or focused helper modules.
 
 `OriginalLikeIRLatexRenderer` remains the production entrypoint, but role and
 block rendering is now dispatched through a registry:

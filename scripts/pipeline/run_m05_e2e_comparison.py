@@ -59,7 +59,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.45)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
+    parser.add_argument(
+        "--heading-skeleton-mode",
+        choices=["stack"],
+        default="stack",
+        help="Canonical decoder mode. Only stack is supported.",
+    )
     parser.add_argument("--renderer", choices=["ir"], default="ir")
     parser.add_argument("--render-table-crops", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--match-threshold", type=float, default=0.58)

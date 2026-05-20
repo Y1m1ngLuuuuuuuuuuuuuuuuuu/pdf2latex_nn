@@ -648,6 +648,11 @@ def block_similarity(gold_block: dict[str, Any], pred_block: dict[str, Any]) -> 
     token_score, common = counter_similarity(gold_counter, pred_counter, gold_tokens, pred_tokens)
     jaccard = token_jaccard_from_counters(gold_counter, pred_counter)
     containment = min(len(gold_text), len(pred_text)) / max(len(gold_text), len(pred_text), 1)
+    if block_type(gold_block) in TEXT_LIKE_TYPES and block_type(pred_block) in TEXT_LIKE_TYPES and containment < 0.82:
+        # Strict block matching should not treat a paragraph fragment as the
+        # whole paragraph.  Split/merged paragraphs are handled by
+        # ``match_text_windows`` and paragraph_text_coverage_f1 instead.
+        return max(jaccard, token_score * containment)
     if gold_text in pred_text or pred_text in gold_text:
         return max(token_score, 0.7 * containment + 0.3)
     if common == 0:

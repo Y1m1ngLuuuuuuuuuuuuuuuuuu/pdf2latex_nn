@@ -17,7 +17,7 @@ from src.generation.font_resolver import resolve_pdf_font
 from src.generation.front_matter import render_author_block_original_like, render_document_title_original_like
 from src.generation.ir_renderers import build_default_registry
 from src.generation.ir_renderers.context import DocumentNodeRenderContext, RenderContext
-from src.generation.latex_renderer import (
+from src.generation.latex_helpers import (
     clean_float_caption_text,
     escape_latex,
     figure_include_width,

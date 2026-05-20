@@ -41,6 +41,7 @@ from src.reasoning.postprocess import (  # noqa: E402
     root_without_redundant_document_title,
     sorted_render_children,
 )
+from src.reasoning.prediction_io import write_predicted_relations  # noqa: E402
 from src.adapters.mineru_v7_document_ir import stable_node_id  # noqa: E402
 
 
@@ -62,14 +63,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--heading-skeleton-mode",
-        choices=["legacy", "stack", "off"],
+        choices=["stack"],
         default="stack",
-        help=(
-            "legacy keeps the current decoder behavior; stack makes the global "
-            "heading state machine own section scope and lets GNN edges refine "
-            "only local non-heading relations; off disables the skeleton for "
-            "old-decoder regression comparisons."
-        ),
+        help="Canonical decoder mode: global heading stack owns section scope, GNN refines local relations.",
     )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex")
@@ -268,6 +264,21 @@ def run_one_document(
         logits = model(data.to(device)).detach().cpu()
     logits_path = doc_dir / "edge_logits.pt"
     torch.save(logits, logits_path)
+    predicted_relations_path = doc_dir / "predicted_relations.json"
+    write_predicted_relations(
+        predicted_relations_path,
+        doc_id=document_id,
+        graph_path=str(graph_path),
+        edge_index=data.edge_index.detach().cpu(),
+        scores=logits,
+        threshold_config={
+            "merge": float(decoder.config.merge_threshold),
+            "parent_child": float(decoder.config.parent_threshold),
+            "sibling": float(decoder.config.sibling_threshold),
+        },
+        model_version=str(checkpoint),
+        include_logits=False,
+    )
 
     node_records = load_node_records(content_json, data)
     local_decoder = TreeDecoder(
@@ -297,6 +308,7 @@ def run_one_document(
         document_id=document_id,
         title=title,
         document_metadata=getattr(data, "document_metadata", None),
+        predicted_relations_path=predicted_relations_path,
         table_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
         figure_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
         asset_latex_prefix="assets",
@@ -326,6 +338,8 @@ def run_one_document(
         "source_pdf": str(pdf_path),
         "source_graph": str(graph_path),
         "source_content_json": str(content_json),
+        "edge_logits": str(logits_path),
+        "predicted_relations": str(predicted_relations_path),
         "original_pdf": str(original_pdf),
         "generated_tex": str(tex_path),
         "generated_pdf": str(generated_pdf),
@@ -351,6 +365,7 @@ def render_decoded_tree_with_ir_backend(
     document_id: str,
     title: str | None,
     document_metadata: dict[str, Any] | None,
+    predicted_relations_path: Path | None,
     table_asset_output_dir: Path | None,
     figure_asset_output_dir: Path | None,
     asset_latex_prefix: str,
@@ -375,6 +390,7 @@ def render_decoded_tree_with_ir_backend(
         document_ir_path=str(content_json),
         document_id=document.doc_id,
         graph_index_to_node_ids=graph_index_to_node_ids,
+        predicted_relations_path=str(predicted_relations_path) if predicted_relations_path else None,
     )
     tree = inject_full_v7_front_matter(tree, document)
     from src.generation.ir_renderer import IRLatexRenderConfig
@@ -416,7 +432,7 @@ def build_document_ir_from_graph_records(
     pdf_path: Path,
     document_id: str,
 ) -> Any:
-    """Disabled legacy helper kept only to make old imports fail loudly.
+    """Disabled graph-record helper kept only to make old imports fail loudly.
 
     The production renderer must build DocumentIR from the complete v7 JSON and
     bridge GNN predictions back through graph-side ``gnn_to_v7_ids``.  Rendering
@@ -452,6 +468,7 @@ def render_tree_from_resolved_root(
     document_ir_path: str,
     document_id: str,
     graph_index_to_node_ids: dict[int, list[str]],
+    predicted_relations_path: str | None = None,
 ) -> RenderTreeIR:
     nodes: list[RenderTreeNode] = []
     hoisted_front_matter_ids: list[str] = []
@@ -525,6 +542,7 @@ def render_tree_from_resolved_root(
         root_id=root_id,
         nodes=nodes,
         document_ir_path=document_ir_path,
+        predicted_relations_path=predicted_relations_path,
         metadata={"adapter": "TreeDecoderResolvedNodeToRenderTreeIR"},
     )
 
@@ -559,7 +577,7 @@ def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> Ren
     if not metadata_nodes:
         metadata_nodes = [
             node
-            for node in infer_legacy_front_matter_nodes(document)
+            for node in infer_fallback_front_matter_nodes(document)
             if node.node_id not in existing_source_ids
         ]
     if not metadata_nodes:
@@ -569,14 +587,14 @@ def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> Ren
     title_nodes = [
         node
         for node in metadata_nodes
-        if _document_node_is_title(node) or _legacy_document_title_node(node, abstract_label=abstract_label)
+        if _document_node_is_title(node) or _fallback_document_title_node(node, abstract_label=abstract_label)
     ]
     author_nodes = [
         node
         for node in metadata_nodes
         if _document_node_is_author_like(node)
         or _metadata_front_matter_before_abstract(node, abstract_label)
-        or _legacy_author_node(node, title_nodes=title_nodes, abstract_label=abstract_label)
+        or _fallback_author_node(node, title_nodes=title_nodes, abstract_label=abstract_label)
     ]
     abstract_body_nodes = _front_matter_abstract_body_nodes(metadata_nodes, abstract_label=abstract_label)
 
@@ -682,7 +700,7 @@ def _document_node_is_author_like(node: DocumentNode) -> bool:
     return role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
 
 
-def infer_legacy_front_matter_nodes(document: DocumentIR) -> list[DocumentNode]:
+def infer_fallback_front_matter_nodes(document: DocumentIR) -> list[DocumentNode]:
     """Recover front matter for v7 files without layout_layer metadata.
 
     Some older v7 artifacts retain all full-v7 facts but do not annotate
@@ -715,7 +733,7 @@ def infer_legacy_front_matter_nodes(document: DocumentIR) -> list[DocumentNode]:
     ]
 
 
-def _legacy_document_title_node(node: DocumentNode, *, abstract_label: DocumentNode | None) -> bool:
+def _fallback_document_title_node(node: DocumentNode, *, abstract_label: DocumentNode | None) -> bool:
     if abstract_label is None or node.reading_index >= abstract_label.reading_index:
         return False
     if node.node_type != BlockType.TITLE:
@@ -724,7 +742,7 @@ def _legacy_document_title_node(node: DocumentNode, *, abstract_label: DocumentN
     return bool(text_key and text_key not in {"abstract", "keywords", "index terms"})
 
 
-def _legacy_author_node(
+def _fallback_author_node(
     node: DocumentNode,
     *,
     title_nodes: list[DocumentNode],
@@ -916,7 +934,7 @@ def latex_override_for_resolved_node(node: ResolvedNode, role: RenderRole) -> st
         return None
     if not node.record.get("_render_as_paragraph_heading"):
         return None
-    from src.generation.latex_renderer import escape_latex
+    from src.generation.latex_helpers import escape_latex
 
     text = node.text.strip()
     return rf"\paragraph*{{{escape_latex(text)}}}" if text else None

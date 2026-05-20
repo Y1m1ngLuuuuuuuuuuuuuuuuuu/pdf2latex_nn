@@ -152,18 +152,13 @@ src/perception/
 | 文件 | 职责 |
 | --- | --- |
 | `schema.py` | 稳定特征 schema、block enum、tensor 字段名。 |
-| `mineru_parser.py` | MinerU JSON 解析辅助。 |
-| `pdf_parser.py` | PDF 侧提取胶水代码。 |
+| `content_resolver.py` | 从显式 MinerU/v7 roots 中有界选择当前 full v7 content JSON。 |
 | `reading_order.py` | v7 reading-order metadata、TOC/noise helpers、duplicate continuation。 |
 | `xy_cut.py` | reading-order 排序辅助和 band/column order 工具。 |
 | `style_spans.py` | PyMuPDF span 提取、style state merge、font/bold/italic/math/code flags。 |
 | `layout_probes.py` | header/footer/footnote/TOC/front matter 等 layout-role 探针。 |
 | `title_features.py` | 编号和 heading token 探针。 |
 | `gnn_view_adapter.py` | 将完整 v7 fact layer 转换为 GNN graph-visible view。 |
-| `embedder.py` | SciBERT embedding 支持。 |
-| `feature_extractor.py` | 特征提取辅助。 |
-| `table_parser.py` | 表格相关解析辅助。 |
-| `formula_parser.py` | 公式相关解析辅助。 |
 
 ### 3.2 IR 层
 
@@ -176,10 +171,6 @@ src/ir/
 | `schema.py` | DocumentIR、DocumentNode、RenderTreeIR、RenderRole、metadata。 |
 | `serialization.py` | IR JSON 序列化。 |
 | `validators.py` | IR 校验。 |
-| `alignment.py` | 对齐结构。 |
-| `ground_truth.py` | ground-truth IR 支持。 |
-| `observed.py` | observed IR 支持。 |
-| `provenance.py` | provenance metadata。 |
 
 ### 3.3 Adapter 层
 
@@ -201,18 +192,15 @@ src/reasoning/
 | --- | --- |
 | `graph_builder.py` | 从 GNN view 构建 PyG `Data`：节点特征、边特征、候选边和 masks。 |
 | `gnn_model.py` | `FeatureProjector`、`EdgeRelationGAT`、Y-network、message mask、merge gate。 |
-| `predictors.py` | 预测头辅助。 |
 | `training.py` | 训练工具。 |
 | `label_generator.py` | AlignmentLabeler 和边标签生成。 |
 | `tex_ast_builder.py` | TeX AST 提取。 |
 | `latex_flattener.py` | 注释剥离、input/include 展平、bbl 注入、宏处理、数学屏蔽。 |
 | `tex_relation_labeler.py` | TeX path relation labeling。 |
 | `postprocess.py` | TreeDecoder、merge contraction、约束、relation-to-render tree bridge。 |
+| `prediction_io.py` | 将 raw GNN edge logits/probabilities 写成可审计的 `PredictedRelations` JSON sidecar。 |
 | `heading_skeleton.py` | heading evidence 和文档局部 heading style profile。 |
 | `layout_state_machine.py` | layout state-machine parsing helpers。 |
-| `semantic_continuity.py` | 文本连续性辅助。 |
-| `normalizer.py` | 文本归一化辅助。 |
-| `structure_builder.py` | 结构组装辅助。 |
 
 ### 3.5 Generation 层
 
@@ -230,11 +218,9 @@ src/generation/
 | `citations.py` | Citation/reference 解析和修复。 |
 | `front_matter.py` | 标题/作者/摘要辅助。 |
 | `source_float_layout.py` | 可选的源 TeX float placement hints。 |
-| `latex_templates.py` | 文档模板和 package 设置。 |
 | `font_resolver.py` | 字体映射和 fontspec 辅助。 |
-| `compile_checker.py` | LaTeX 编译检查。 |
-| `safe_generator.py` | 更安全的生成 wrapper。 |
-| `latex_renderer.py` | legacy 兼容 renderer，不是生产表面。 |
+| `latex_helpers.py` | IR renderer 使用的转义、数学、列表、浮动体、算法 helper。 |
+| `latex_renderer.py` | 历史测试用的已废弃独立 tree renderer，不是生产渲染表面。 |
 
 ### 3.6 Evaluation 层
 
@@ -249,7 +235,6 @@ tools/
 | `structure_metrics.py` | heading、reading order、段落边界/文本覆盖、section attachment、references、float-caption 指标。 |
 | `compile_eval.py` | 编译成功率评估。 |
 | `visual_qa.py` | 视觉 QA 辅助。 |
-| `metrics.py` | 通用指标。 |
 | `tools/convert_latex_to_comparison.py` | LaTeX 转 comparison JSON。 |
 | `tools/convert_markdown_to_comparison.py` | Markdown/Nougat MMD 转 comparison JSON。 |
 | `tools/evaluate_comparison_structure.py` | 结构指标 CLI。 |
@@ -998,6 +983,7 @@ src/reasoning/postprocess.py
 
 职责：
 
+- 读取模型 logits / `predicted_relations.json` 中的 raw edge probabilities
 - threshold probabilities
 - contract MERGE components
 - enforce can_merge barriers
@@ -1042,6 +1028,19 @@ maintain active heading stack
 provide outline priors and section-scope safety gates
 consume GNN MERGE / PARENT_CHILD / NONE probabilities under constraints
 ```
+
+`PredictedRelations` sidecar 用于审计 raw per-edge 模型输出：
+
+```text
+edge_logits.pt
+  -> predicted_relations.json
+     - edge id 和 source/target graph index
+     - MERGE/PARENT_CHILD/NONE probabilities
+     - raw argmax label
+     - threshold config
+```
+
+最终渲染结构不是 raw argmax，而是在 merge contraction、heading-stack scope、relation barrier 和 exact graph-to-v7 bridge 之后得到。
 
 Heading evidence 包含：
 
@@ -1136,13 +1135,19 @@ src/generation/render_surface.py
 OriginalLikeIRLatexRenderer
 ```
 
-Legacy renderer：
+底层 LaTeX helper 模块：
+
+```text
+src/generation/latex_helpers.py
+```
+
+已废弃的独立 tree renderer：
 
 ```text
 src/generation/latex_renderer.py
 ```
 
-legacy renderer 只用于兼容/测试。当前 E2E 脚本只暴露：
+独立 tree renderer 不是生产路径。当前 E2E 脚本只暴露：
 
 ```text
 --renderer ir
@@ -1653,7 +1658,6 @@ python tools/evaluate_comparison_structure.py --gold gold.json --pred nougat.jso
 ### 模型合约
 
 - `src/reasoning/gnn_model.py`
-- `src/reasoning/predictors.py`
 - `scripts/pipeline/train_edge_gnn_full.py`
 - `configs/ablation_matrix_v7_adapteraware_20260514_2109.json`
 - `tests/test_graph_builder.py`

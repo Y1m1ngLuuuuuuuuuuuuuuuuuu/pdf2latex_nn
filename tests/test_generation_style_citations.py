@@ -7,7 +7,7 @@ import pytest
 from src.generation.citations import CitationResolver, expand_citation_labels, sanitize_bbl_bibitem_keys, strip_reference_label
 from src.generation.front_matter import render_author_block_original_like
 from src.generation.ir_renderer import IRLatexRenderConfig, OriginalLikeIRLatexRenderer
-from src.generation.latex_renderer import list_environment_for_text, render_equation, render_inline_math, render_text_with_inline_latex
+from src.generation.latex_helpers import list_environment_for_text, render_equation, render_inline_math, render_text_with_inline_latex
 from src.generation.render_surface import render_original_like_document
 from src.generation.style_profile import StyleProfileExtractor
 from src.ir import (
@@ -713,9 +713,9 @@ def test_run_in_heading_uses_explicit_v7_split_when_all_spans_are_bold():
 
     tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
 
-    assert r"\subsection{Playing Go -- possible representations.}" in tex
+    assert r"\subsection*{Playing Go -- possible representations.}" in tex
     assert "As an illustration, let's consider a game engine." in tex
-    assert "As an illustration" not in tex.split(r"\subsection{", 1)[1].split("}", 1)[0]
+    assert "As an illustration" not in tex.split(r"\subsection*{", 1)[1].split("}", 1)[0]
 
 
 def test_style_profile_body_geometry_ignores_front_matter_abstract_width():

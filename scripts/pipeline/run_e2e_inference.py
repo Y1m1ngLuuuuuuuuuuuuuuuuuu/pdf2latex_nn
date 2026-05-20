@@ -85,7 +85,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-threshold", type=float, default=0.53)
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
+    parser.add_argument(
+        "--heading-skeleton-mode",
+        choices=["stack"],
+        default="stack",
+        help="Canonical decoder mode. Only stack is supported.",
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--pdflatex", default="pdflatex", help="pdflatex or xelatex executable")
     parser.add_argument("--compile-runs", type=int, default=2)
@@ -107,9 +112,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    args = build_arg_parser().parse_args()
+
     import torch
 
-    args = build_arg_parser().parse_args()
     if args.clean_output_dir and args.output_dir.exists():
         shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)

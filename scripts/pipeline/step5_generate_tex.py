@@ -21,6 +21,7 @@ from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_dat
 from src.generation.table_assets import annotate_table_group_records  # noqa: E402
 from src.reasoning.gnn_model import EdgeGATConfig, EdgeRelationGAT  # noqa: E402
 from src.reasoning.postprocess import TreeDecoder, TreeDecoderConfig  # noqa: E402
+from src.reasoning.prediction_io import write_predicted_relations  # noqa: E402
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -32,9 +33,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-threshold", type=float, default=0.5)
     parser.add_argument("--parent-threshold", type=float, default=0.0)
     parser.add_argument("--sibling-threshold", type=float, default=0.5)
-    parser.add_argument("--heading-skeleton-mode", choices=["legacy", "stack", "off"], default="stack")
+    parser.add_argument(
+        "--heading-skeleton-mode",
+        choices=["stack"],
+        default="stack",
+        help="Canonical decoder mode. Only stack is supported.",
+    )
     parser.add_argument("--title", default=None)
     parser.add_argument("--logits-output", type=Path, help="Optional tensor path for raw edge logits")
+    parser.add_argument(
+        "--predicted-relations-output",
+        type=Path,
+        help="Optional JSON sidecar for raw per-edge GNN predictions. Defaults next to --output-tex.",
+    )
     parser.add_argument("--source-pdf", type=Path, help="Optional source PDF used for table/figure crops")
     parser.add_argument("--source-tex", type=Path, help="Optional source TeX used for citation/float style sidecars")
     parser.add_argument("--asset-dir", type=Path, help="Directory for generated table/figure crop assets")
@@ -89,6 +100,21 @@ def main() -> int:
     if args.logits_output:
         args.logits_output.parent.mkdir(parents=True, exist_ok=True)
         torch.save(logits, args.logits_output)
+    predicted_relations_path = args.predicted_relations_output or (args.output_tex.parent / "predicted_relations.json")
+    write_predicted_relations(
+        predicted_relations_path,
+        doc_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem) if args.content_json else args.output_tex.stem,
+        graph_path=str(args.graph),
+        edge_index=data.edge_index.detach().cpu(),
+        scores=logits,
+        threshold_config={
+            "merge": float(args.merge_threshold),
+            "parent_child": float(args.parent_threshold),
+            "sibling": float(args.sibling_threshold),
+        },
+        model_version=str(args.checkpoint),
+        include_logits=False,
+    )
 
     node_records = load_node_records(args.content_json, data)
     decoder = TreeDecoder(
@@ -127,6 +153,7 @@ def main() -> int:
         document_id=document_id_from_content_json(args.content_json, fallback=args.output_tex.stem),
         title=document_title,
         document_metadata=getattr(data, "document_metadata", None),
+        predicted_relations_path=predicted_relations_path,
         table_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
         figure_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
         asset_latex_prefix=args.asset_latex_prefix,
@@ -135,16 +162,17 @@ def main() -> int:
     args.output_tex.write_text(tex, encoding="utf-8")
     pred_counts = torch.bincount(torch.clamp(logits.argmax(dim=-1), max=2), minlength=3).tolist()
     print(f"wrote {args.output_tex}")
+    print(f"wrote {predicted_relations_path}")
     print(f"nodes={len(node_records)} edges={int(data.edge_index.shape[1])}")
     print(f"predicted_argmax_counts={{0: {pred_counts[0]}, 1: {pred_counts[1]}, 2: {pred_counts[2]}}}")
     return 0
 
 
 def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> EdgeGATConfig:
-    """Adapt model dimensions to legacy checkpoints without changing weights."""
+    """Adapt model dimensions to checkpoint tensor shapes without changing weights."""
 
     layout_weight = state_dict.get("projector.layout.0.weight") if isinstance(state_dict, dict) else None
-    legacy_head_weight = state_dict.get("edge_head.3.weight") if isinstance(state_dict, dict) else None
+    checkpoint_head_weight = state_dict.get("edge_head.3.weight") if isinstance(state_dict, dict) else None
     if layout_weight is not None:
         checkpoint_layout_dim = int(layout_weight.shape[1])
         if checkpoint_layout_dim != config.node_projector.layout_input_dim:
@@ -158,7 +186,7 @@ def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> Edge
         raw_edge_dim = checkpoint_edge_dim - extra_dim
         if raw_edge_dim > 0:
             config = replace(config, edge_dim=raw_edge_dim)
-    if legacy_head_weight is not None and "edge_head.4.weight" not in state_dict and "edge_head.12.weight" not in state_dict:
+    if checkpoint_head_weight is not None and "edge_head.4.weight" not in state_dict and "edge_head.12.weight" not in state_dict:
         first_head_weight = state_dict.get("edge_head.0.weight")
         if first_head_weight is not None:
             config = replace(
@@ -166,8 +194,8 @@ def checkpoint_compatible_config(config: EdgeGATConfig, state_dict: Any) -> Edge
                 predictor_hidden_dims=(int(first_head_weight.shape[0]),),
                 predictor_layer_norm=False,
             )
-        if int(legacy_head_weight.shape[0]) != config.num_classes:
-            config = replace(config, num_classes=int(legacy_head_weight.shape[0]))
+        if int(checkpoint_head_weight.shape[0]) != config.num_classes:
+            config = replace(config, num_classes=int(checkpoint_head_weight.shape[0]))
     return config
 
 
@@ -241,25 +269,28 @@ def select_records_for_graph(records: list[dict[str, Any]], data: Any) -> list[d
                 "graph gnn_to_v7_ids length does not match graph.num_nodes: "
                 f"{len(graph_source_ids)} != {expected}"
             )
-        selected = select_records_by_graph_source_ids(records, graph_source_ids)
-        if len(selected) == expected:
-            return selected
-        if source_ids_for_view(view.gnn_items) == graph_source_ids:
-            return view.gnn_items
         fallback_view = build_gnn_view(
             records,
             config=GNNViewAdapterConfig(fuse_micro_nodes=not bool(getattr(data, "micro_fusion_applied", False))),
         )
-        if source_ids_for_view(fallback_view.gnn_items) == graph_source_ids:
-            return fallback_view.gnn_items
-        raise ValueError(
-            "content JSON rebuilt GNN view does not match graph-side gnn_to_v7_ids. "
-            "Refusing to render because logits/edge_index could be bridged to the wrong v7 nodes. "
-            + format_gnn_mapping_mismatches(
-                graph_source_ids,
-                source_ids_for_view(view.gnn_items),
-                source_ids_for_view(fallback_view.gnn_items),
+        current_source_ids = source_ids_for_view(view.gnn_items)
+        fallback_source_ids = source_ids_for_view(fallback_view.gnn_items)
+        if current_source_ids != graph_source_ids and fallback_source_ids != graph_source_ids:
+            # The graph-side mapping is still the source of truth for selecting
+            # full-v7 records, but a rebuilt adapter view must reproduce the
+            # same sequence.  Otherwise the graph was built under a different
+            # adapter policy and logits/edge_index cannot be safely bridged.
+            raise ValueError(
+                "content JSON rebuilt GNN view does not match graph-side gnn_to_v7_ids. "
+                "Refusing to render because logits/edge_index could be bridged to the wrong v7 nodes. "
+                + format_gnn_mapping_mismatches(graph_source_ids, current_source_ids, fallback_source_ids)
             )
+        selected = select_records_by_graph_source_ids(records, graph_source_ids)
+        if len(selected) == expected:
+            return selected
+        raise ValueError(
+            "graph gnn_to_v7_ids did not select graph.num_nodes records: "
+            f"{len(selected)} != {expected}"
         )
     if len(view.gnn_items) == expected:
         return view.gnn_items

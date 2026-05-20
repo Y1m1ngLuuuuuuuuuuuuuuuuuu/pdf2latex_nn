@@ -1241,6 +1241,14 @@ def _figure_fragment_caption(node: dict[str, Any]) -> str:
 
 
 def _figure_fragment_primary(nodes: list[dict[str, Any]], indexes: list[int]) -> int:
+    existing_primary = [
+        index
+        for index in indexes
+        if bool(nodes[index].get("figure_group_primary") or nodes[index].get("image_group_primary"))
+        and bool(_figure_fragment_caption_identity(nodes[index]) or _figure_fragment_caption(nodes[index]))
+    ]
+    if existing_primary:
+        return min(existing_primary, key=lambda index: _figure_fragment_sort_key(nodes[index], index))
     captioned = [index for index in indexes if _figure_fragment_caption_identity(nodes[index])]
     if captioned:
         return min(captioned, key=lambda index: _figure_fragment_sort_key(nodes[index], index))
@@ -1248,7 +1256,9 @@ def _figure_fragment_primary(nodes: list[dict[str, Any]], indexes: list[int]) ->
 
 
 def _figure_fragment_sort_key(node: dict[str, Any], fallback: int) -> tuple[int, float, float, int]:
-    member_index = _numeric_or_none(node.get("figure_group_member_index") or node.get("image_group_member_index"))
+    member_index = _numeric_or_none(node.get("figure_group_member_index"))
+    if member_index is None:
+        member_index = _numeric_or_none(node.get("image_group_member_index"))
     box = _first_bbox(node.get("bbox")) or (0.0, 0.0, 0.0, 0.0)
     if member_index is not None:
         return (0, float(member_index), box[0], fallback)

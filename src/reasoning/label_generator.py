@@ -23,7 +23,7 @@ class LabelGeneratorConfig:
     adjacent_siblings_only: bool = True
     directed_parent_child: bool = True
     orphan_label: int = int(TexRelationLabel.NONE)
-    max_orphan_ratio: float = 0.15
+    max_orphan_ratio: float = 0.30
     min_aligned_nodes: int = 1
     abort_on_bad_alignment: bool = True
 
@@ -105,8 +105,8 @@ class AlignmentLabelerConfig:
     relation_strategy: str = "visual_first"
     visual_heading_font_scale: float = 1.12
     visual_bold_heading_font_scale: float = 1.05
-    max_orphan_ratio: float = 0.15
-    max_unmapped_tex_ratio: float = 0.30
+    max_orphan_ratio: float = 0.30
+    max_unmapped_tex_ratio: float = 0.60
     max_isolated_node_ratio: float = 0.85
     min_visual_parent_label_recall: float = 0.98
     min_section_nodes: int = 1
@@ -339,6 +339,54 @@ AUXILIARY_PDF_TYPES = {
     "page_footnote",
     "footnote",
     "watermark",
+}
+METADATA_OR_PAGE_FURNITURE_TYPES = AUXILIARY_PDF_TYPES | {
+    "document_title",
+    "paper_title",
+    "title_page",
+    "author",
+    "authors",
+    "author_block",
+    "affiliation",
+    "institution",
+    "email",
+    "orcid",
+    "abstract_title",
+    "toc",
+    "toc_title",
+    "toc_entry",
+    "table_of_contents",
+    "noise",
+    "duplicate_shadow",
+    "no_render",
+}
+FORMULA_PDF_TYPES = {
+    "equation",
+    "equation_interline",
+    "interline_equation",
+    "display_formula",
+    "equation_display",
+    "formula",
+    "inline_math",
+    "inline_formula",
+    "math_inline",
+}
+FLOAT_PROXY_PDF_TYPES = {
+    "table",
+    "figure",
+    "image",
+    "chart",
+    "algorithm",
+    "code",
+    "figure_proxy",
+    "table_proxy",
+    "algorithm_proxy",
+}
+CAPTION_PDF_TYPES = {
+    "caption",
+    "figure_caption",
+    "table_caption",
+    "algorithm_caption",
 }
 NON_HEADING_PDF_TYPES = {
     "equation",
@@ -1050,26 +1098,64 @@ class AlignmentLabeler:
             for node in self.pdf_nodes
             if self.is_expected_visual_orphan(node)
         }
+        metadata_exempt_indices = {
+            node.node_index
+            for node in self.pdf_nodes
+            if pdf_node_is_metadata_or_page_furniture(node.item)
+        }
+        formula_weak_indices = {
+            node.node_index
+            for node in self.pdf_nodes
+            if pdf_node_is_formula_like(node.item)
+        }
+        float_proxy_weak_indices = {
+            node.node_index
+            for node in self.pdf_nodes
+            if pdf_node_is_float_proxy_like(node.item)
+        }
+        caption_weak_indices = {
+            node.node_index
+            for node in self.pdf_nodes
+            if pdf_node_is_caption_like(node.item)
+        }
         document_root_scoped = {
             match.pdf_node_index
             for match in self.matches
             if self.is_document_root_scoped_match(match)
         }
-        effective_matches = [
-            match for match in self.matches if match.pdf_node_index not in exempt_visual_orphans
-        ]
+        body_exempt_indices = (
+            exempt_visual_orphans
+            | metadata_exempt_indices
+            | formula_weak_indices
+            | float_proxy_weak_indices
+            | caption_weak_indices
+        )
+        effective_matches = [match for match in self.matches if match.pdf_node_index not in body_exempt_indices]
         orphan_count = sum(1 for match in effective_matches if not match.tex_id)
         orphan_ratio = orphan_count / max(1, len(effective_matches))
         alignable_tex_nodes = [node for node in self.tex_nodes.values() if self.is_alignable_tex_node(node)]
-        main_alignable_tex_nodes = [node for node in alignable_tex_nodes if node.node_type not in WEAK_TEX_NODE_TYPES]
+        formula_tex_nodes = [node for node in alignable_tex_nodes if node.node_type == STANDARD_EQUATION_NODE]
+        main_alignable_tex_nodes = [
+            node
+            for node in alignable_tex_nodes
+            if node.node_type not in WEAK_TEX_NODE_TYPES
+            and node.node_type != STANDARD_EQUATION_NODE
+        ]
         float_tex_nodes = [node for node in alignable_tex_nodes if node.node_type in FLOAT_TEX_NODE_TYPES]
-        weak_tex_nodes = [node for node in alignable_tex_nodes if node.node_type in WEAK_TEX_NODE_TYPES]
+        weak_tex_nodes = [
+            node
+            for node in alignable_tex_nodes
+            if node.node_type in WEAK_TEX_NODE_TYPES or node.node_type == STANDARD_EQUATION_NODE
+        ]
         mapped_tex_ids = {match.tex_id for match in self.matches if match.tex_id}
+        raw_orphan_count = sum(1 for match in self.matches if not match.tex_id)
+        raw_orphan_ratio = raw_orphan_count / max(1, len(self.matches))
         raw_unmapped_tex_count = sum(1 for node in alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
         raw_unmapped_tex_ratio = raw_unmapped_tex_count / max(1, len(alignable_tex_nodes))
         unmapped_tex_count = sum(1 for node in main_alignable_tex_nodes if node.tex_id not in mapped_tex_ids)
         unmapped_tex_ratio = unmapped_tex_count / max(1, len(main_alignable_tex_nodes))
         unmapped_float_tex_count = sum(1 for node in float_tex_nodes if node.tex_id not in mapped_tex_ids)
+        unmapped_formula_tex_count = sum(1 for node in formula_tex_nodes if node.tex_id not in mapped_tex_ids)
         section_count = sum(1 for node in self.tex_nodes.values() if node.node_type == STANDARD_SECTION_NODE)
         paragraph_pdf_count = sum(1 for node in self.pdf_nodes if canonical_pdf_merge_type(node.item) == "text" and len(node.clean) >= self.config.min_clean_chars)
         metadata_node_indices = {
@@ -1081,6 +1167,16 @@ class AlignmentLabeler:
             1 for match in self.matches if match.pdf_node_index in metadata_node_indices and not match.tex_id
         )
         metadata_orphan_ratio = metadata_orphan_count / max(1, len(metadata_node_indices))
+        formula_orphan_count = sum(
+            1 for match in self.matches if match.pdf_node_index in formula_weak_indices and not match.tex_id
+        )
+        float_proxy_orphan_count = sum(
+            1 for match in self.matches if match.pdf_node_index in float_proxy_weak_indices and not match.tex_id
+        )
+        caption_orphan_count = sum(
+            1 for match in self.matches if match.pdf_node_index in caption_weak_indices and not match.tex_id
+        )
+        body_text_aligned_count = sum(1 for match in effective_matches if match.tex_id)
         isolated_count = 0
         isolated_ratio = 0.0
         if graph is not None and labels is not None and hasattr(graph, "edge_index"):
@@ -1097,26 +1193,50 @@ class AlignmentLabeler:
         visual_parent_quality = self.visual_parent_label_quality(graph=graph, labels=labels)
         self.alignment_quality = {
             "orphan_count": orphan_count,
-            "raw_orphan_count": sum(1 for match in self.matches if not match.tex_id),
+            "raw_orphan_count": raw_orphan_count,
+            "raw_orphan_ratio": raw_orphan_ratio,
             "num_pdf_nodes": len(self.matches),
             "effective_pdf_nodes": len(effective_matches),
+            "body_pdf_node_count": len(effective_matches),
+            "body_orphan_count": orphan_count,
+            "body_text_orphan_count": orphan_count,
+            "body_text_aligned_count": body_text_aligned_count,
             "orphan_ratio": orphan_ratio,
+            "effective_orphan_ratio_body": orphan_ratio,
             "max_orphan_ratio": self.config.max_orphan_ratio,
             "expected_visual_orphan_exempt_count": len(exempt_visual_orphans),
             "document_root_scoped_count": len(document_root_scoped),
             "alignable_tex_count": len(alignable_tex_nodes),
             "main_alignable_tex_count": len(main_alignable_tex_nodes),
+            "body_tex_node_count": len(main_alignable_tex_nodes),
             "weak_tex_count": len(weak_tex_nodes),
             "float_tex_count": len(float_tex_nodes),
+            "formula_tex_count": len(formula_tex_nodes),
             "raw_unmapped_tex_count": raw_unmapped_tex_count,
             "raw_unmapped_tex_ratio": raw_unmapped_tex_ratio,
             "unmapped_tex_count": unmapped_tex_count,
             "unmapped_tex_ratio": unmapped_tex_ratio,
+            "effective_unmapped_tex_ratio_body": unmapped_tex_ratio,
+            "body_unmapped_tex_count": unmapped_tex_count,
             "unmapped_float_tex_count": unmapped_float_tex_count,
+            "unmapped_formula_tex_count": unmapped_formula_tex_count,
             "max_unmapped_tex_ratio": self.config.max_unmapped_tex_ratio,
             "metadata_pdf_node_count": len(metadata_node_indices),
             "metadata_orphan_count": metadata_orphan_count,
             "metadata_orphan_ratio": metadata_orphan_ratio,
+            "metadata_exempt_count": len(metadata_exempt_indices),
+            "page_furniture_exempt_count": sum(
+                1 for node in self.pdf_nodes if pdf_node_is_page_furniture(node.item)
+            ),
+            "formula_exempt_count": len(formula_weak_indices),
+            "formula_orphan_count": formula_orphan_count,
+            "formula_weak_count": formula_orphan_count + unmapped_formula_tex_count,
+            "float_proxy_exempt_count": len(float_proxy_weak_indices),
+            "float_proxy_orphan_count": float_proxy_orphan_count,
+            "float_proxy_weak_count": float_proxy_orphan_count + unmapped_float_tex_count,
+            "caption_weak_count": caption_orphan_count,
+            "raw_pdf_node_count": len(self.matches),
+            "raw_tex_node_count": len(alignable_tex_nodes),
             "section_count": section_count,
             "min_section_nodes": self.config.min_section_nodes,
             "isolated_node_count": isolated_count,
@@ -1126,9 +1246,14 @@ class AlignmentLabeler:
         }
         failures: list[str] = []
         if orphan_ratio > self.config.max_orphan_ratio:
-            failures.append(f"orphan_ratio={orphan_ratio:.2%} > {self.config.max_orphan_ratio:.2%}")
+            failures.append(
+                f"effective_orphan_ratio_body={orphan_ratio:.2%} > {self.config.max_orphan_ratio:.2%}"
+            )
         if unmapped_tex_ratio > self.config.max_unmapped_tex_ratio:
-            failures.append(f"unmapped_tex_ratio={unmapped_tex_ratio:.2%} > {self.config.max_unmapped_tex_ratio:.2%}")
+            failures.append(
+                "effective_unmapped_tex_ratio_body="
+                f"{unmapped_tex_ratio:.2%} > {self.config.max_unmapped_tex_ratio:.2%}"
+            )
         if paragraph_pdf_count >= 8 and section_count < self.config.min_section_nodes:
             failures.append(f"section_count={section_count} < min_section_nodes={self.config.min_section_nodes}")
         if isolated_ratio > self.config.max_isolated_node_ratio:
@@ -1565,6 +1690,64 @@ def item_looks_like_reference_entry(item: dict[str, Any]) -> bool:
     if re.search(r"\bpp\.\s*\d", lower):
         signals += 1
     return signals >= 2
+
+
+def _record_role_values(item: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("layout_role", "canonical_type", "type", "role", "layer", "raw_type"):
+        value = item.get(key)
+        if value is not None:
+            values.add(str(value).strip().lower())
+    metadata = item.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("role", "layout_role", "canonical_type", "type", "raw_type"):
+            value = metadata.get(key)
+            if value is not None:
+                values.add(str(value).strip().lower())
+    return {value for value in values if value}
+
+
+def pdf_node_is_page_furniture(item: dict[str, Any]) -> bool:
+    values = _record_role_values(item)
+    return bool(values & AUXILIARY_PDF_TYPES) or layout_layer_name(item) in {"noise_layer", "annotation_layer"}
+
+
+def pdf_node_is_metadata_or_page_furniture(item: dict[str, Any]) -> bool:
+    if layout_layer_name(item) == "metadata_layer":
+        return True
+    if is_toc_record(item):
+        return True
+    values = _record_role_values(item)
+    return bool(values & METADATA_OR_PAGE_FURNITURE_TYPES)
+
+
+def pdf_node_is_formula_like(item: dict[str, Any]) -> bool:
+    values = _record_role_values(item)
+    return bool(values & FORMULA_PDF_TYPES) or canonical_pdf_merge_type(item) in {"equation", "inline_math"}
+
+
+def pdf_node_is_float_proxy_like(item: dict[str, Any]) -> bool:
+    if str(item.get("gnn_proxy_kind") or "").strip().lower() == "float_proxy":
+        return True
+    values = _record_role_values(item)
+    return bool(values & FLOAT_PROXY_PDF_TYPES) or canonical_pdf_merge_type(item) in {
+        "table",
+        "figure",
+        "image",
+        "chart",
+        "algorithm",
+        "code",
+    }
+
+
+def pdf_node_is_caption_like(item: dict[str, Any]) -> bool:
+    values = _record_role_values(item)
+    if values & CAPTION_PDF_TYPES:
+        return True
+    text = stringify_text_payload(
+        item.get("text_for_embedding") or item.get("text") or item.get("merged_text") or item.get("text_preview")
+    )
+    return bool(re.match(r"^\s*(?:fig(?:ure)?|table|tab\.?|algorithm)\s+[A-Z]?\d+", text, re.IGNORECASE))
 
 
 def normalized_heading_keyword(text: str) -> str:

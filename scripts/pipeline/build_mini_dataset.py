@@ -30,11 +30,18 @@ from src.perception.reading_order import (  # noqa: E402
     load_content_list_v2,
     write_json,
 )
+from src.perception.content_resolver import (  # noqa: E402
+    ContentResolverConfig,
+    V7SchemaThresholds,
+    resolve_v7_content_for_doc,
+)
 from src.perception.style_spans import StyleConfig, enrich_content_with_styles  # noqa: E402
 from src.pipeline.v7_contract import assert_v7_content_json, assert_v7_graph_data  # noqa: E402
 from src.reasoning.graph_builder import GraphBuildConfig, build_graph_from_content_v7  # noqa: E402
 from src.reasoning.label_generator import AlignmentLabeler, AlignmentLabelerConfig, AlignmentQualityError  # noqa: E402
 from tools.profile_candidate_edge_recall import profile_candidate_recall  # noqa: E402
+
+MIN_V7_LAYOUT_METADATA_COVERAGE = 0.95
 
 
 def default_mineru_command() -> str:
@@ -121,7 +128,16 @@ class MiniDatasetConfig:
     project_root: Path
     raw_pdf_dir: Path
     tex_source_dir: Path
+    mineru_source_dir: Path | None
     mineru_output_dir: Path
+    mineru_content_roots: tuple[Path, ...]
+    prefer_valid_v7_content: bool
+    require_v7_schema_fields: bool
+    min_layout_layer_coverage: float
+    min_layout_role_coverage: float
+    min_canonical_type_coverage: float
+    allow_stale_v7_content: bool
+    force_refresh_v7_conversion: bool
     graph_output_dir: Path
     ground_truth_dir: Path
     manifest_output: Path
@@ -142,6 +158,7 @@ class MiniDatasetConfig:
     compiled_accepted_manifests: tuple[Path, ...]
     auto_discover_compiled_manifests: bool
     require_compiled_accepted: bool
+    candidate_sort_mode: str
     reuse_existing: bool
     force_mineru: bool
     force_json: bool
@@ -158,7 +175,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mineru-output-dir",
         type=Path,
-        default=REPO_ROOT / "data/02_mineru_outputs/mineru_output",
+        default=REPO_ROOT / "data/02_mineru_outputs/mineru_output_v7_current",
+    )
+    parser.add_argument(
+        "--mineru-source-dir",
+        type=Path,
+        help=(
+            "Optional read-only MinerU raw-output directory. When set, existing "
+            "content_list/content_list_v2 files are read from this directory, "
+            "while rebuilt v7/style JSON is written to --mineru-output-dir."
+        ),
+    )
+    parser.add_argument(
+        "--mineru-output-dirs",
+        nargs="+",
+        type=Path,
+        default=[],
+        help=(
+            "Candidate v7 content roots searched by ContentResolver. Use newer "
+            "schema-valid v7 directories first. --mineru-output-dir is still "
+            "the write/output root."
+        ),
+    )
+    parser.add_argument(
+        "--prefer-valid-v7-content",
+        action="store_true",
+        help="Resolve content_json from schema-valid v7 roots before rebuilding or using --mineru-output-dir.",
+    )
+    parser.add_argument("--require-v7-schema-fields", action="store_true", default=True)
+    parser.add_argument("--no-require-v7-schema-fields", dest="require_v7_schema_fields", action="store_false")
+    parser.add_argument("--min-layout-layer-coverage", type=float, default=0.90)
+    parser.add_argument("--min-layout-role-coverage", type=float, default=0.90)
+    parser.add_argument("--min-canonical-type-coverage", type=float, default=0.00)
+    parser.add_argument("--allow-stale-v7-content", action="store_true")
+    parser.add_argument(
+        "--force-refresh-v7-conversion",
+        action="store_true",
+        help="When resolver finds no valid v7 content, rebuild v7/styles from MinerU raw/v2 if available; does not rerun MinerU by itself.",
     )
     parser.add_argument("--graph-output-dir", type=Path, default=REPO_ROOT / "data/06_graph_features_v7")
     parser.add_argument("--ground-truth-dir", type=Path, default=REPO_ROOT / "data/04_ground_truth_ir")
@@ -213,11 +266,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail closed: do not fall back to id-matched PDF/TeX scanning if no compile accepted manifest yields candidates.",
     )
+    parser.add_argument(
+        "--candidate-sort-mode",
+        choices=("doc_id", "manifest_order"),
+        default="doc_id",
+        help=(
+            "Sort compiled-manifest candidates by arXiv id, or preserve explicit "
+            "manifest order. Use manifest_order for ranked expansion manifests."
+        ),
+    )
     parser.add_argument("--mineru-command", default=default_mineru_command())
     parser.add_argument("--mineru-timeout", type=int, default=900)
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
-    parser.add_argument("--max-orphan-ratio", type=float, default=0.15)
-    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.30)
+    parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
+    parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.60)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
     parser.add_argument("--min-non-none-edges", type=int, default=1)
     parser.add_argument(
@@ -296,7 +358,16 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         project_root=args.project_root.resolve(),
         raw_pdf_dir=args.raw_pdf_dir.resolve(),
         tex_source_dir=args.tex_source_dir.resolve(),
+        mineru_source_dir=args.mineru_source_dir.resolve() if args.mineru_source_dir else None,
         mineru_output_dir=args.mineru_output_dir.resolve(),
+        mineru_content_roots=tuple(path.resolve() for path in args.mineru_output_dirs),
+        prefer_valid_v7_content=bool(args.prefer_valid_v7_content),
+        require_v7_schema_fields=bool(args.require_v7_schema_fields),
+        min_layout_layer_coverage=float(args.min_layout_layer_coverage),
+        min_layout_role_coverage=float(args.min_layout_role_coverage),
+        min_canonical_type_coverage=float(args.min_canonical_type_coverage),
+        allow_stale_v7_content=bool(args.allow_stale_v7_content),
+        force_refresh_v7_conversion=bool(args.force_refresh_v7_conversion),
         graph_output_dir=args.graph_output_dir.resolve(),
         ground_truth_dir=args.ground_truth_dir.resolve(),
         manifest_output=args.manifest_output.resolve(),
@@ -317,6 +388,7 @@ def config_from_args(args: argparse.Namespace) -> MiniDatasetConfig:
         compiled_accepted_manifests=tuple(path.resolve() for path in args.compiled_accepted_manifest),
         auto_discover_compiled_manifests=not bool(args.no_auto_compiled_accepted_manifests),
         require_compiled_accepted=bool(args.require_compiled_accepted),
+        candidate_sort_mode=str(args.candidate_sort_mode),
         reuse_existing=not args.no_reuse_existing,
         force_mineru=bool(args.force_mineru),
         force_json=bool(args.force_json),
@@ -331,7 +403,7 @@ def scan_candidates(config: MiniDatasetConfig) -> list[CandidateSample]:
 
     The preferred path is an explicit compile `accepted.jsonl`, because it
     proves the PDF in `data/01_raw_pdfs` was produced from the same TeX source
-    tree. If no compile manifest is available, the legacy id-matched scan is
+    tree. If no compile manifest is available, the fallback id-matched scan is
     kept as a fallback for local smoke tests and older datasets.
     """
 
@@ -390,6 +462,8 @@ def scan_candidates_from_compile_manifests(config: MiniDatasetConfig) -> list[Ca
                 continue
             candidates.append(candidate)
             seen.add(document_id)
+    if config.candidate_sort_mode == "manifest_order":
+        return candidates
     return sorted(candidates, key=lambda item: item.document_id)
 
 
@@ -562,13 +636,15 @@ def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> 
         config.reuse_existing
         and not config.force_label
         and paths["styles"].exists()
+        and v7_styles_have_current_layout_metadata(paths["styles"])
         and paths["mapping"].exists()
         and graph_is_valid_labeled(paths["labeled_graph"], config)
+        and graph_source_matches_content(paths["labeled_graph"], paths["styles"])
     ):
         return summarize_processed_sample(candidate, paths)
 
-    content_json = ensure_content_v7_styles(candidate, paths, config)
-    graph_path = ensure_graph(content_json, paths["unlabeled_graph"], config)
+    content_json, content_rebuilt = ensure_content_v7_styles(candidate, paths, config)
+    graph_path = ensure_graph(content_json, paths["unlabeled_graph"], config, force_rebuild=content_rebuilt)
     labeled_graph, labeler = label_graph(candidate, content_json, graph_path, paths["labeled_graph"], paths["mapping"], config)
     recall_report = assert_candidate_edge_recall(
         labeled_graph,
@@ -578,7 +654,7 @@ def process_candidate(candidate: CandidateSample, config: MiniDatasetConfig) -> 
     )
     if not graph_is_valid_labeled(paths["labeled_graph"], config):
         raise RuntimeError(f"labeled graph failed validation: {paths['labeled_graph']}")
-    return summarize_processed_sample(candidate, paths, recall_report=recall_report)
+    return summarize_processed_sample(candidate, paths, recall_report=recall_report, content_json=content_json)
 
 
 def sample_paths(candidate: CandidateSample, config: MiniDatasetConfig) -> dict[str, Path]:
@@ -594,11 +670,49 @@ def sample_paths(candidate: CandidateSample, config: MiniDatasetConfig) -> dict[
     }
 
 
-def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> Path:
+def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> tuple[Path, bool]:
     styles_path = paths["styles"]
+    if config.prefer_valid_v7_content:
+        resolution = resolve_v7_content_for_doc(
+            candidate.document_id,
+            raw_pdf_path=candidate.pdf_path,
+            config=content_resolver_config(config),
+        )
+        paths["auto_dir"].mkdir(parents=True, exist_ok=True)
+        resolver_report_path = paths["auto_dir"] / f"{candidate.document_id}_content_resolver_report.json"
+        resolver_report_path.write_text(json.dumps(resolution.to_report(), ensure_ascii=False, indent=2), encoding="utf-8")
+        if resolution.selected_path is not None:
+            print(
+                "[mini-dataset] resolved v7 content "
+                f"id={candidate.document_id} path={resolution.selected_path}",
+                flush=True,
+            )
+            return resolution.selected_path, False
+        if not config.force_refresh_v7_conversion:
+            raise RuntimeError(
+                "no valid v7 content candidate: "
+                f"id={candidate.document_id} reason={resolution.skip_reason} report={resolver_report_path}"
+            )
+
     if config.reuse_existing and not config.force_json and styles_path.exists():
-        assert_v7_content_json(styles_path, require_styles=True)
-        return styles_path
+        try:
+            assert_v7_content_json(styles_path, require_styles=True)
+            if v7_styles_have_current_layout_metadata(styles_path):
+                return styles_path, False
+            report = v7_layout_metadata_report(styles_path)
+            print(
+                "[mini-dataset] stale v7 styles "
+                f"id={candidate.document_id} path={styles_path} "
+                f"layout_layer_coverage={report['layout_layer_coverage']:.2%} "
+                f"layout_role_coverage={report['layout_role_coverage']:.2%}; rebuilding v7/styles",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[mini-dataset] invalid existing v7 styles "
+                f"id={candidate.document_id} path={styles_path} error={type(exc).__name__}: {exc}; rebuilding",
+                flush=True,
+            )
 
     content_v2 = ensure_mineru_content_v2(candidate, paths, config)
     v7_payload = build_content_v7(load_content_list_v2(content_v2))
@@ -607,11 +721,72 @@ def ensure_content_v7_styles(candidate: CandidateSample, paths: dict[str, Path],
 
     enrich_content_with_styles(paths["v7"], candidate.pdf_path, styles_path, StyleConfig())
     assert_v7_content_json(styles_path, require_styles=True)
-    return styles_path
+    report = v7_layout_metadata_report(styles_path)
+    if not report["passes"]:
+        raise RuntimeError(
+            "styled v7 content is missing current layout metadata: "
+            f"path={styles_path} layout_layer_coverage={report['layout_layer_coverage']:.2%} "
+            f"layout_role_coverage={report['layout_role_coverage']:.2%}"
+        )
+    return styles_path, True
+
+
+def content_resolver_config(config: MiniDatasetConfig) -> ContentResolverConfig:
+    roots = list(config.mineru_content_roots)
+    if not roots:
+        roots.append(config.mineru_output_dir)
+    elif config.mineru_output_dir not in roots:
+        roots.append(config.mineru_output_dir)
+    return ContentResolverConfig(
+        mineru_output_dirs=tuple(roots),
+        thresholds=V7SchemaThresholds(
+            min_layout_layer_coverage=config.min_layout_layer_coverage,
+            min_layout_role_coverage=config.min_layout_role_coverage,
+            min_canonical_type_coverage=config.min_canonical_type_coverage,
+            require_v7_schema_fields=config.require_v7_schema_fields,
+            allow_stale_v7_content=config.allow_stale_v7_content,
+        ),
+        force_refresh_v7_conversion=config.force_refresh_v7_conversion,
+    )
+
+
+def v7_layout_metadata_report(path: Path) -> dict[str, Any]:
+    payload = assert_v7_content_json(path, require_styles=True)
+    items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+    total = len(items)
+    if total == 0:
+        return {
+            "total_items": 0,
+            "layout_layer_count": 0,
+            "layout_role_count": 0,
+            "layout_layer_coverage": 1.0,
+            "layout_role_coverage": 1.0,
+            "passes": True,
+        }
+    layout_layer_count = sum(1 for item in items if str(item.get("layout_layer") or "").strip())
+    layout_role_count = sum(1 for item in items if str(item.get("layout_role") or "").strip())
+    layer_coverage = layout_layer_count / total
+    role_coverage = layout_role_count / total
+    return {
+        "total_items": total,
+        "layout_layer_count": layout_layer_count,
+        "layout_role_count": layout_role_count,
+        "layout_layer_coverage": layer_coverage,
+        "layout_role_coverage": role_coverage,
+        "passes": layer_coverage >= MIN_V7_LAYOUT_METADATA_COVERAGE
+        and role_coverage >= MIN_V7_LAYOUT_METADATA_COVERAGE,
+    }
+
+
+def v7_styles_have_current_layout_metadata(path: Path) -> bool:
+    try:
+        return bool(v7_layout_metadata_report(path)["passes"])
+    except Exception:
+        return False
 
 
 def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path], config: MiniDatasetConfig) -> Path:
-    existing = find_mineru_content_source(candidate.document_id, config.mineru_output_dir)
+    existing = find_mineru_content_source(candidate.document_id, mineru_source_dir(config))
     if existing is not None and not config.force_mineru:
         return normalize_mineru_content_to_v2(existing, paths["v2"])
 
@@ -633,6 +808,10 @@ def ensure_mineru_content_v2(candidate: CandidateSample, paths: dict[str, Path],
     if content_source is None:
         raise FileNotFoundError(f"MinerU did not produce content_list_v2 for {candidate.document_id}")
     return normalize_mineru_content_to_v2(content_source, paths["v2"])
+
+
+def mineru_source_dir(config: MiniDatasetConfig) -> Path:
+    return config.mineru_source_dir or config.mineru_output_dir
 
 
 def run_command_with_process_group_timeout(
@@ -785,8 +964,14 @@ def format_mineru_command(candidate: CandidateSample, config: MiniDatasetConfig)
     return config.mineru_command.format(**values)
 
 
-def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig) -> Path:
-    if config.reuse_existing and not config.force_graph and graph_path.exists():
+def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig, *, force_rebuild: bool = False) -> Path:
+    if (
+        config.reuse_existing
+        and not config.force_graph
+        and not force_rebuild
+        and graph_path.exists()
+        and graph_source_matches_content(graph_path, content_json)
+    ):
         import torch
 
         graph = torch.load(graph_path, map_location="cpu", weights_only=False)
@@ -796,6 +981,19 @@ def ensure_graph(content_json: Path, graph_path: Path, config: MiniDatasetConfig
     graph_config = GraphBuildConfig(model_path=config.model_path, embedding_device=config.embedding_device)
     build_graph_from_content_v7(content_json, graph_path, graph_config)
     return graph_path
+
+
+def graph_source_matches_content(graph_path: Path, content_json: Path) -> bool:
+    if not graph_path.exists():
+        return False
+    try:
+        import torch
+
+        graph = torch.load(graph_path, map_location="cpu", weights_only=False)
+        source_path = str(getattr(graph, "source_path", "") or "")
+        return bool(source_path) and Path(source_path).resolve() == content_json.resolve()
+    except Exception:
+        return False
 
 
 def label_graph(
@@ -875,6 +1073,7 @@ def summarize_processed_sample(
     paths: dict[str, Path],
     *,
     recall_report: dict[str, Any] | None = None,
+    content_json: Path | None = None,
 ) -> ProcessedSample:
     import torch
 
@@ -886,7 +1085,7 @@ def summarize_processed_sample(
     return ProcessedSample(
         document_id=candidate.document_id,
         pdf_path=candidate.pdf_path,
-        content_json=paths["styles"],
+        content_json=content_json or paths["styles"],
         graph_path=paths["labeled_graph"],
         tex_path=candidate.main_tex_path,
         alignment_mapping=paths["mapping"],

@@ -1,8 +1,8 @@
 """Canonical public render surface for backend generation.
 
 Production generation should enter here (or directly call
-``OriginalLikeIRLatexRenderer``).  The older ``latex_renderer.render_latex_document``
-module is retained for low-level helpers and legacy tests only.
+``OriginalLikeIRLatexRenderer``). Shared escaping/math/list/float helpers live
+in ``latex_helpers``; the deprecated tree renderer is not part of production.
 """
 
 from __future__ import annotations

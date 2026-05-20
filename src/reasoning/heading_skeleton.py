@@ -111,7 +111,22 @@ def learn_heading_style_profile(
     cluster_scores: dict[float, float] = {}
     numbering_styles: dict[str, int] = {}
     level_by_numbering: dict[str, int] = {}
+    front_matter_roles = {
+        "front_matter",
+        "front_matter_title",
+        "document_title",
+        "author",
+        "authors",
+        "affiliation",
+        "email",
+        "date",
+        "abstract",
+        "abstract_title",
+        "abstract_body",
+    }
     for evidence in evidence_by_id.values():
+        if evidence.layout_role in front_matter_roles:
+            continue
         if evidence.score < 1.25:
             continue
         if evidence.relative_font_size >= 1.03 or evidence.mineru_type in {"title", "section", "subsection"}:

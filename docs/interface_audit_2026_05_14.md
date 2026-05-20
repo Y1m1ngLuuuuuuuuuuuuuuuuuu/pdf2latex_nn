@@ -35,9 +35,10 @@ remain available to the generator.
 | E2E QA | `scripts/pipeline/run_m05_e2e_comparison.py` | Defaults to current clean manifest + M05 checkpoint + `--renderer ir`. |
 | batch visual QA | `scripts/pipeline/batch_visual_qa_inference.py` | Uses `--renderer ir`; production scripts no longer expose `tree`. |
 | single-doc generation | `scripts/pipeline/step5_generate_tex.py` | Defaults to `--renderer ir`; requires `--content-json` for IR rendering. |
-| legacy step5 name | `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper forwarding to `step5_generate_tex.py`; no independent legacy renderer path. |
+| compatibility step5 name | `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper forwarding to `step5_generate_tex.py`; no independent renderer path. |
 | generator | `src/generation/render_surface.py` / `src/generation/ir_renderer.py` | Canonical surface is `OriginalLikeIRLatexRenderer`. |
-| old renderer | `src/generation/latex_renderer.py` | Compatibility helpers and legacy tests only. |
+| LaTeX helper module | `src/generation/latex_helpers.py` | Shared helper functions used by the IR renderer. |
+| deprecated tree renderer | `src/generation/latex_renderer.py` | Historical tests/debug only; not a production render surface. |
 
 ## Removed Or Neutralized Old Paths
 

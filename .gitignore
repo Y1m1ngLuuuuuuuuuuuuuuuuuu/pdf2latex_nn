@@ -77,5 +77,10 @@ qa_label_visuals/
 tmp_qa_visuals/
 tmp_qa_visuals_mergesafe/
 
+# Local final-eval exports and audit bundles are review artifacts, not source.
+local_outputs/
+audit_bundle_*/
+audit_bundle_*.zip
+
 # Local transfer/download staging.
 artifacts/local_arxiv_sources/

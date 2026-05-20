@@ -69,7 +69,7 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "is_main_flow_candidate",
     ]
     assert schema.node_feature_dim == 832
-    assert schema.edge_attr_dim == 22
+    assert schema.edge_attr_dim == 26
     assert schema.edge_attr_fields == [
         "semantic_cosine",
         "delta_y_gap",
@@ -93,6 +93,10 @@ def test_feature_schema_v0_tensor_dimensions_are_fixed():
         "same_band_column",
         "band_order_delta",
         "crosses_band_boundary",
+        "is_float_skip_edge",
+        "has_float_between",
+        "has_figure_between",
+        "has_table_between",
     ]
 
 

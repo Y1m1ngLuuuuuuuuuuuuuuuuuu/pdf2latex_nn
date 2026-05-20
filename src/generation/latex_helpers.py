@@ -1,11 +1,15 @@
-"""Render resolved document trees back into compilable LaTeX."""
+"""Shared LaTeX rendering helpers for the canonical IR renderer.
+
+This module owns escaping, inline/display math repair, list marker handling,
+algorithm formatting, and figure/table crop placeholder helpers.  It deliberately
+does not expose the deprecated tree renderer entrypoint; production generation
+should import helpers from here instead of ``src.generation.latex_renderer``.
+"""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-import warnings
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,15 +27,9 @@ from src.perception.xy_cut import sort_nodes_by_reading_order
 from src.perception.title_features import is_front_matter_date_text, strip_title_numbering, title_numbering_level
 
 
-DEFAULT_PACKAGES = ["graphicx", "amsmath", "amssymb", "booktabs", "hyperref", "float", "algorithm", "algpseudocode"]
-SECTION_COMMANDS = ["section", "subsection", "subsubsection", "paragraph", "subparagraph"]
 DISPLAY_MATH_ENVS = {"equation", "align", "gather", "eqnarray", "flalign", "multline"}
-DEFAULT_PREAMBLE_COMMANDS = [r"\providecommand{\mathbfcal}[1]{\mathbf{\mathcal{#1}}}"]
-DEPRECATED_RENDER_SURFACE_WARNING = (
-    "src.generation.latex_renderer.render_latex_document is a deprecated tree renderer. "
-    "Use src.generation.render_surface.render_original_like_document with "
-    "DocumentIR + RenderTreeIR + StyleProfile for production generation."
-)
+
+
 INLINE_MATH_COMMANDS = {
     "alpha",
     "beta",
@@ -133,38 +131,52 @@ INLINE_MATH_COMMANDS = {
     "langle",
     "rangle",
 }
-# OCR/PyMuPDF spans often attach a bullet directly to the first word
-# (``•Text``), or leak a closing punctuation mark before the bullet
-# (``)•Text``).  Treat those as list markers while keeping ordered markers
-# space-sensitive so section headings such as ``3.2 Title`` are not lists.
-BULLET_LIST_MARKER_RE = re.compile(r"^\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*")
+
+
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+\.|[a-zA-Z]\.)\s+")
+
+
 LIST_MARKER_RE = re.compile(
     r"^(?:\s*[\)\]\}）】、,.;:：;]*\s*[\u2022\u25E6\u25CB\u25AA\-\*]\s*|\s*(?:\d+\.|[a-zA-Z]\.)\s+)"
 )
+
+
 DECIMAL_HEADING_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s+\S")
-NUMERIC_ID_RE = re.compile(r"\d+")
-NOTE_MARKER_RE = re.compile(
-    r"^\s*(?:(?:\[(?P<bracket>[0-9A-Za-z*†‡§¶]+)\])|(?:\((?P<paren>[0-9A-Za-z*†‡§¶]+)\))|(?P<bare>[0-9]{1,3}|[*†‡§¶]))[\s:.\-]*"
-)
-PSEUDOCODE_START_RE = re.compile(
-    r"^\s*(?:Algorithm\s*\d+\b|Input\s*:|Output\s*:|Require\s*:|Ensure\s*:)",
-    re.IGNORECASE,
-)
+
+
 PSEUDOCODE_BREAK_RE = re.compile(
     r"\s+(?=(?:Input|Output|Require|Ensure)\s*:|Algorithm\s*\d+\b|(?:for|while|if|else|elif|return|end)\b)",
     re.IGNORECASE,
 )
-VERBATIM_END_RE = re.compile(r"\\end\s*\{\s*verbatim\s*\}", re.IGNORECASE)
+
+
 ALGORITHM_CAPTION_RE = re.compile(r"^\s*Algorithm\s*(?:\d+)?\s*[:.\-]?\s*(.*)$", re.IGNORECASE)
+
+
 PSEUDOCODE_IO_RE = re.compile(r"^\s*(Input|Require|Output|Ensure)\s*:\s*(.*)$", re.IGNORECASE)
+
+
 PSEUDOCODE_FOR_RE = re.compile(r"^\s*for\s+(.+?)(?:\s+do)?\s*$", re.IGNORECASE)
+
+
 PSEUDOCODE_WHILE_RE = re.compile(r"^\s*while\s+(.+?)(?:\s+do)?\s*$", re.IGNORECASE)
+
+
 PSEUDOCODE_IF_RE = re.compile(r"^\s*if\s+(.+?)(?:\s+then)?\s*$", re.IGNORECASE)
+
+
 PSEUDOCODE_RETURN_RE = re.compile(r"^\s*return\s+(.+)$", re.IGNORECASE)
+
+
 PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECASE)
+
+
 ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
+
+
 TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
+
+
 FLOAT_CAPTION_LABEL_RE = {
     "table": re.compile(
         r"^\s*(?:Table|Tab\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]?\s*",
@@ -175,6 +187,8 @@ FLOAT_CAPTION_LABEL_RE = {
         re.IGNORECASE,
     ),
 }
+
+
 FLOAT_CAPTION_ANY_LABEL_RE = {
     "table": re.compile(
         r"\b(?:Table|Tab\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]\s*",
@@ -185,18 +199,29 @@ FLOAT_CAPTION_ANY_LABEL_RE = {
         re.IGNORECASE,
     ),
 }
+
+
 CAPTION_TEXT_MATH_COMMAND_RE = re.compile(r"\\(?:mathrm|mathbf|mathit|mathsf|mathtt)\s*\{\s*([^{}]+?)\s*\}")
+
+
 LATEX_MATH_MARKER_RE = re.compile(r"(\\[A-Za-z]+|[_^{}]|[<>=+\-*/]|\\\(|\\\[)")
+
+
 MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\*?")
-BARE_OPERATOR_EQUATION_RE = re.compile(r"^\\(?:arc)?(?:sin|cos|tan)\s*=")
+
+
 LATEX_FONTSIZE_WRAPPER_RE = re.compile(
     r"\{\\fontsize\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\\selectfont\s*(?P<body>[^{}]*)\}",
     re.DOTALL,
 )
+
+
 LATEX_FONTSIZE_COMMAND_RE = re.compile(
     r"\\fontsize\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\\selectfont\s*",
     re.DOTALL,
 )
+
+
 STRUCTURAL_LATEX_COMMAND_RE = re.compile(
     r"\\(?:"
     r"(?:sub)*section|paragraph|subparagraph|caption|captionof|label|ref|cite|"
@@ -205,189 +230,9 @@ STRUCTURAL_LATEX_COMMAND_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
 GREEK_CONTEXT_RE = re.compile(r"[αβγδεζηθικλμνξπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΠΡΣΤΥΦΧΨΩ]")
-GREEK_TO_LATEX = {
-    "α": r"\alpha",
-    "β": r"\beta",
-    "γ": r"\gamma",
-    "δ": r"\delta",
-    "ε": r"\epsilon",
-    "ζ": r"\zeta",
-    "η": r"\eta",
-    "θ": r"\theta",
-    "ℓ": r"\ell",
-    "ι": r"\iota",
-    "κ": r"\kappa",
-    "λ": r"\lambda",
-    "μ": r"\mu",
-    "ν": r"\nu",
-    "ξ": r"\xi",
-    "π": r"\pi",
-    "ρ": r"\rho",
-    "σ": r"\sigma",
-    "τ": r"\tau",
-    "υ": r"\upsilon",
-    "φ": r"\phi",
-    "χ": r"\chi",
-    "ψ": r"\psi",
-    "ω": r"\omega",
-    "Γ": r"\Gamma",
-    "Δ": r"\Delta",
-    "Θ": r"\Theta",
-    "Λ": r"\Lambda",
-    "Ξ": r"\Xi",
-    "Π": r"\Pi",
-    "Σ": r"\Sigma",
-    "Φ": r"\Phi",
-    "Ψ": r"\Psi",
-    "Ω": r"\Omega",
-}
-
-
-@dataclass
-class RenderConfig:
-    document_class: str = "article"
-    packages: list[str] = field(default_factory=lambda: list(DEFAULT_PACKAGES))
-    title: str | None = None
-    source_pdf: str | None = None
-    table_asset_output_dir: str | None = None
-    figure_asset_output_dir: str | None = None
-    table_asset_latex_prefix: str = "assets"
-    figure_asset_latex_prefix: str = "assets"
-
-
-def render_latex_document(root: Any, config: RenderConfig | None = None) -> str:
-    warnings.warn(DEPRECATED_RENDER_SURFACE_WARNING, DeprecationWarning, stacklevel=2)
-    cfg = config or RenderConfig()
-    lines = [rf"\documentclass{{{cfg.document_class}}}"]
-    for package in cfg.packages:
-        lines.append(rf"\usepackage{{{package}}}")
-    lines.extend(DEFAULT_PREAMBLE_COMMANDS)
-    lines.append("")
-    if cfg.title:
-        lines.extend([rf"\title{{{escape_latex(cfg.title)}}}", r"\date{}", ""])
-    lines.append(r"\begin{document}")
-    if cfg.title:
-        lines.append(r"\maketitle")
-        lines.append("")
-    for rendered in render_child_blocks_with_dynamic_lists(getattr(root, "children", []), depth=0, config=cfg):
-        if rendered:
-            lines.append(rendered)
-            lines.append("")
-    lines.append(r"\end{document}")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_node(node: Any, *, depth: int = 0, config: RenderConfig | None = None) -> str:
-    cfg = config or RenderConfig()
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    block_type = canonical_render_type(record)
-    text = node_text(node)
-    children = sorted_render_children(getattr(node, "children", record.get("children", [])))
-
-    if is_algorithm_like_node(record, text):
-        return render_algorithm_block(text)
-    if is_toc_title_node(record, text):
-        return render_toc()
-    if block_type == "toc":
-        return ""
-    if block_type == "title" and is_front_matter_date_text(text):
-        body = [render_textual_content(record, text)] if text else []
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
-        return "\n\n".join(part for part in body if part)
-    if block_type == "title":
-        body = [render_title(text, depth=depth)] if text else []
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
-        return "\n\n".join(part for part in body if part)
-    if block_type == "equation":
-        body = [render_equation(text)]
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
-        return "\n\n".join(part for part in body if part)
-    if block_type == "inline_math":
-        body = [render_inline_math(text)]
-        body.extend(render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg))
-        return "\n\n".join(part for part in body if part)
-    if block_type == "table":
-        return render_table_placeholder(
-            record,
-            text,
-            source_pdf=cfg.source_pdf or cfg_source_pdf(record),
-            asset_output_dir=cfg.table_asset_output_dir,
-            asset_latex_prefix=cfg.table_asset_latex_prefix,
-        )
-    if block_type == "figure":
-        if int(record.get("figure_group_size") or record.get("image_group_size") or 1) > 1 and record.get("figure_group_primary") is False:
-            return ""
-        return render_figure_block(
-            record,
-            text,
-            source_pdf=cfg.source_pdf or cfg_source_pdf(record),
-            asset_output_dir=cfg.figure_asset_output_dir or cfg.table_asset_output_dir,
-            asset_latex_prefix=cfg.figure_asset_latex_prefix,
-        )
-    if block_type == "reference":
-        return render_references(record, text)
-    if block_type == "footnote":
-        return rf"\footnote{{{render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
-    if block_type == "margin_note":
-        return rf"\marginpar{{\footnotesize {render_text_with_inline_latex(strip_note_marker(text)[0])}}}" if text else ""
-    if block_type == "list":
-        return render_list_node(node, depth=depth, config=cfg)
-
-    paragraph = render_textual_content(record, text) if text else ""
-    rendered_children = render_child_blocks_with_dynamic_lists(children, depth=depth + 1, config=cfg)
-    parts = [paragraph] if paragraph else []
-    parts.extend(part for part in rendered_children if part)
-    return "\n\n".join(parts)
-
-
-def render_child_blocks_with_dynamic_lists(children: Any, *, depth: int, config: RenderConfig | None = None) -> list[str]:
-    child_list = sorted_render_children(children)
-    rendered: list[str] = []
-    index = 0
-    while index < len(child_list):
-        child = child_list[index]
-        if canonical_render_type(node_record(child)) == "reference":
-            run: list[Any] = []
-            while index < len(child_list) and canonical_render_type(node_record(child_list[index])) == "reference":
-                run.append(child_list[index])
-                index += 1
-            append_nonredundant_rendered(rendered, render_reference_run(run))
-            continue
-        list_environment = list_environment_for_node(child)
-        if list_environment is not None:
-            run: list[Any] = []
-            while index < len(child_list) and list_environment_for_node(child_list[index]) is not None:
-                run.append(child_list[index])
-                index += 1
-            append_nonredundant_rendered(rendered, render_dynamic_list_group(run, environment=list_environment, depth=depth, config=config))
-            continue
-        block = render_child_block(child, depth=depth, config=config)
-        if block:
-            append_nonredundant_rendered(rendered, block)
-        index += 1
-    return rendered
-
-
-def render_child_block(child: Any, *, depth: int, config: RenderConfig | None = None) -> str:
-    rendered = render_node(child, depth=depth, config=config)
-    return rendered.strip()
-
-
-def is_bullet_list_candidate(node: Any) -> bool:
-    return list_environment_for_node(node) is not None
-
-
-def list_environment_for_node(node: Any) -> str | None:
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    block_type = canonical_render_type(record)
-    text = node_text(node)
-    children = getattr(node, "children", record.get("children", []))
-    if block_type == "list" and not children:
-        return list_environment_for_record(record, fallback_text=text)
-    if block_type != "text":
-        return None
-    return list_environment_for_text(text)
 
 
 def list_environment_for_record(record: dict[str, Any], *, fallback_text: str = "") -> str:
@@ -407,126 +252,8 @@ def list_environment_for_text(text: str) -> str | None:
     return "enumerate" if ORDERED_LIST_MARKER_RE.match(value) else "itemize"
 
 
-def render_dynamic_list_group(
-    items: list[Any],
-    *,
-    environment: str,
-    depth: int,
-    config: RenderConfig | None = None,
-) -> str:
-    lines = [rf"\begin{{{environment}}}"]
-    for item in items:
-        item_body = render_textual_node_without_list_marker(item) if node_text(item) else ""
-        nested = render_child_blocks_with_dynamic_lists(getattr(item, "children", []), depth=depth + 1, config=config)
-        if nested:
-            item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
-        lines.append(rf"\item {item_body}".rstrip())
-    lines.append(rf"\end{{{environment}}}")
-    return "\n".join(lines)
-
-
-def render_dynamic_itemize(items: list[Any], *, depth: int, config: RenderConfig | None = None) -> str:
-    return render_dynamic_list_group(items, environment="itemize", depth=depth, config=config)
-
-
 def strip_list_marker(text: str) -> str:
     return LIST_MARKER_RE.sub("", str(text or ""), count=1).strip()
-
-
-def render_list_node(node: Any, *, depth: int, config: RenderConfig | None = None) -> str:
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    children = sorted_render_children(getattr(node, "children", record.get("children", [])))
-    environment = list_environment_for_record(record, fallback_text=node_text(node))
-    if not children:
-        text = node_text(node)
-        item_body = render_textual_node_without_list_marker(node) if text else ""
-        return rf"\begin{{{environment}}}" + "\n" + rf"\item {item_body}".rstrip() + "\n" + rf"\end{{{environment}}}"
-    first_child_environment = list_environment_for_node(children[0])
-    if first_child_environment is not None:
-        environment = first_child_environment
-    lines = [rf"\begin{{{environment}}}"]
-    for child in children:
-        item_body = render_list_item(child, depth=depth + 1, config=config)
-        lines.append(rf"\item {item_body}".rstrip())
-    lines.append(rf"\end{{{environment}}}")
-    return "\n".join(lines)
-
-
-def render_list_item(node: Any, *, depth: int, config: RenderConfig | None = None) -> str:
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    block_type = canonical_render_type(record)
-    text = node_text(node)
-    if is_algorithm_like_node(record, text):
-        item_body = render_algorithm_block(text)
-    elif block_type == "equation":
-        item_body = render_equation(text)
-    elif block_type == "inline_math":
-        item_body = render_inline_math(text)
-    else:
-        item_body = render_textual_node_without_list_marker(node) if text else ""
-    nested = [render_node(grandchild, depth=depth + 1, config=config) for grandchild in sorted_render_children(getattr(node, "children", []))]
-    if nested:
-        item_body = (item_body + "\n" + "\n".join(part for part in nested if part)).strip()
-    return item_body
-
-
-def render_references(record: dict[str, Any], fallback_text: str) -> str:
-    items = collect_reference_items(record)
-    if not items:
-        items = [line.strip() for line in re.split(r"\n+|\s{2,}", fallback_text) if line.strip()]
-    if not items:
-        return ""
-    lines = [r"\begin{thebibliography}{99}"]
-    for idx, item in enumerate(items, start=1):
-        lines.append(rf"\bibitem{{ref{idx}}} {escape_latex(item)}")
-    lines.append(r"\end{thebibliography}")
-    return "\n".join(lines)
-
-
-def render_reference_run(nodes: list[Any]) -> str:
-    if not nodes:
-        return ""
-    primary = dict(node_record(nodes[0]))
-    merged_records = list(primary.get("merged_records") or [])
-    for node in nodes[1:]:
-        record = node_record(node)
-        merged_records.append(record)
-        merged_records.extend(record.get("merged_records") or [])
-    primary["merged_records"] = merged_records
-    fallback = "\n".join(node_text(node) for node in nodes if node_text(node))
-    return render_references(primary, fallback)
-
-
-def collect_reference_items(record: dict[str, Any]) -> list[str]:
-    items = normalize_reference_items(record.get("reference_items"))
-    for merged_record in record.get("merged_records", []):
-        if isinstance(merged_record, dict):
-            items.extend(normalize_reference_items(merged_record.get("reference_items")))
-    return [item for item in items if item]
-
-
-def normalize_reference_items(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    items = []
-    for item in value:
-        text = item.get("text") if isinstance(item, dict) else item
-        text = strip_reference_label(str(text or "").strip())
-        if text:
-            items.append(text)
-    return items
-
-
-def render_verbatim_like(text: str, label: str) -> str:
-    if not text:
-        return f"% empty {label} block"
-    return "\\begin{verbatim}\n" + safe_verbatim_text(text.strip()) + "\n\\end{verbatim}"
-
-
-def is_algorithm_like_node(record: dict[str, Any], text: str) -> bool:
-    if canonical_render_type(record) in {"algorithm", "code"}:
-        return True
-    return bool(PSEUDOCODE_START_RE.match(str(text or "")))
 
 
 def render_algorithm_block(text: str, *, label: str | None = None) -> str:
@@ -661,11 +388,6 @@ def restore_algorithm_line_breaks(text: str) -> str:
         return body
     body = PSEUDOCODE_BREAK_RE.sub("\n", body)
     return re.sub(r"\n{3,}", "\n\n", body).strip()
-
-
-def sanitize_verbatim_body(text: str) -> str:
-    sanitized = VERBATIM_END_RE.sub(r"\\end {verbatim}", str(text or ""))
-    return "".join(_safe_code_verbatim_char(char) for char in sanitized)
 
 
 def render_table_placeholder(
@@ -1134,56 +856,6 @@ def _safe_code_verbatim_char(char: str) -> str:
     return ascii_fallback or "?"
 
 
-def render_title(text: str, *, depth: int) -> str:
-    command = title_command(text, depth=depth)
-    title_text = strip_title_numbering(text)
-    star = "*" if is_unnumbered_frontmatter_title(text) else ""
-    return rf"\{command}{star}{{{escape_latex(title_text)}}}"
-
-
-def is_unnumbered_frontmatter_title(text: str) -> bool:
-    normalized = normalize_structural_heading_text(text)
-    return normalized in {"abstract", "references", "bibliography"} or normalized.startswith("appendix")
-
-
-def is_toc_title_node(record: dict[str, Any], text: str) -> bool:
-    role = str(record.get("layout_role") or "").casefold()
-    canonical = str(record.get("canonical_type") or "").casefold()
-    if role == "toc_title" or canonical == "toc_title":
-        return True
-    raw = str(record.get("type") or record.get("raw_type") or record.get("block_type") or "").casefold()
-    normalized = re.sub(r"[^a-z]+", "", str(text or "").casefold())
-    return raw in {"title", "section", "heading"} and normalized in {"contents", "tableofcontents"}
-
-
-def render_toc() -> str:
-    return r"\tableofcontents"
-
-
-def strip_note_marker(text: str) -> tuple[str, str | None]:
-    value = str(text or "").strip()
-    match = NOTE_MARKER_RE.match(value)
-    if not match:
-        return value, None
-    marker = next((group for group in match.groups() if group), None)
-    return value[match.end() :].strip(), marker
-
-
-def normalize_structural_heading_text(text: str) -> str:
-    lowered = str(text or "").casefold().strip()
-    without_punctuation = "".join(
-        char for char in lowered if not unicodedata.category(char).startswith("P")
-    )
-    return " ".join(without_punctuation.split())
-
-
-def title_command(text: str, *, depth: int) -> str:
-    numbered_level = title_numbering_level(text)
-    if numbered_level is not None:
-        return SECTION_COMMANDS[min(numbered_level - 1, len(SECTION_COMMANDS) - 1)]
-    return SECTION_COMMANDS[min(max(0, depth), len(SECTION_COMMANDS) - 1)]
-
-
 def render_equation(text: str, *, label: str | None = None) -> str:
     stripped = normalize_display_math_text(str(text or "").strip())
     if not stripped:
@@ -1313,13 +985,23 @@ def inject_display_math_label(latex: str, label: str | None) -> str:
 
 
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
+
+
 TRAILING_EQUATION_NUMBER_RE = re.compile(r"^(?P<body>.+?)\s*(?:\((?P<tag>[A-Za-z]?\d+(?:\.\d+)*)\))\s*$", re.DOTALL)
+
+
 SINGLE_EXPLICIT_TAG_RE = re.compile(r"^(?P<body>.+?)\s*\\tag\s*\{\s*(?P<tag>[^{}]+?)\s*\}\s*$", re.DOTALL)
+
+
 WIDE_DISPLAY_MATH_ENV_RE = re.compile(
     r"\\begin\s*\{\s*(?:array|aligned|alignedat|split|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\s*\}",
     re.DOTALL,
 )
+
+
 DISPLAY_MATH_SCALE_MIN_COMPACT_CHARS = 180
+
+
 DISPLAY_MATH_SCALE_MIN_ROW_CHARS = 150
 
 
@@ -1507,6 +1189,8 @@ MATH_TEXT_BRACE_COMMANDS = {
     "boldsymbol",
     "pmb",
 }
+
+
 SPACED_OPERATOR_COMMANDS = {
     "min": r"\min",
     "max": r"\max",
@@ -1516,7 +1200,11 @@ SPACED_OPERATOR_COMMANDS = {
     "argmin": r"\arg\min",
     "argmax": r"\arg\max",
 }
+
+
 MATH_COMMAND_BRACE_RE = re.compile(r"\\(?P<cmd>[A-Za-z]+)\s*\{\s*(?P<body>[^{}]+?)\s*\}")
+
+
 SPACED_OPERATORNAME_RE = re.compile(r"\\operatorname\*?\s*\{\s*(?P<body>[A-Za-z](?:\s+[A-Za-z]){1,16})\s*\}")
 
 
@@ -1594,300 +1282,12 @@ def is_plausible_inline_math_payload(text: str) -> bool:
     return any(char.isalnum() for char in value) or bool(GREEK_CONTEXT_RE.search(value)) or "\\" in value
 
 
-def render_textual_content(record: dict[str, Any], fallback_text: str) -> str:
-    segments = extract_content_segments(record)
-    if not segments:
-        return render_text_with_inline_latex(fallback_text)
-    rendered: list[str] = []
-    plain_context = ""
-    for segment in segments:
-        segment_type = str(segment.get("type") or "").lower()
-        content = str(segment.get("content") or segment.get("text") or "")
-        if not content:
-            continue
-        if segment_type in {"equation_inline", "inline_equation", "inline_math", "inline_formula"}:
-            repaired_content, insert_as_marker = repair_inline_math_ocr_segment(content, plain_context)
-            if insert_as_marker:
-                marker = "as: " if rendered and rendered[-1].endswith((" ", "\n")) else " as: "
-                rendered.append(render_text_with_inline_latex(marker, strip=False))
-                plain_context += marker
-            rendered.append(render_inline_math(repaired_content))
-        elif segment_type in {"equation_interline", "interline_equation", "display_formula", "formula", "equation"}:
-            rendered.append("\n\n" + render_equation(content) + "\n\n")
-        else:
-            rendered.append(render_text_with_inline_latex(content, strip=False))
-            plain_context += content
-    return normalize_latex_text("".join(rendered))
-
-
-def repair_inline_math_ocr_segment(content: str, left_context: str) -> tuple[str, bool]:
-    value = str(content or "").strip()
-    if not BARE_OPERATOR_EQUATION_RE.match(value):
-        return value, False
-    replacement = last_greek_variable_in_context(left_context)
-    if not replacement:
-        return value, False
-    repaired = BARE_OPERATOR_EQUATION_RE.sub(lambda _match: replacement + " =", value, count=1)
-    return repaired, should_insert_as_marker_before_repaired_math(left_context)
-
-
-def last_greek_variable_in_context(text: str) -> str | None:
-    matches = list(GREEK_CONTEXT_RE.finditer(str(text or "")))
-    if not matches:
-        return None
-    return GREEK_TO_LATEX.get(matches[-1].group(0))
-
-
-def should_insert_as_marker_before_repaired_math(text: str) -> bool:
-    normalized = " ".join(str(text or "").split()).casefold()
-    if not normalized or normalized.endswith((":", " as", " as:")):
-        return False
-    return normalized.endswith(("modeled", "modelled", "defined", "expressed", "written", "given"))
-
-
-def render_textual_node_without_list_marker(node: Any) -> str:
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    records = [record] + [item for item in record.get("merged_records", []) if isinstance(item, dict)]
-    rendered_parts: list[str] = []
-    used_structured_content = False
-    marker_stripped = False
-    for current_record in records:
-        prepared_record = strip_list_marker_from_record(current_record) if not marker_stripped else current_record
-        if prepared_record is not current_record:
-            marker_stripped = True
-        rendered = render_textual_content(prepared_record, node_text(prepared_record))
-        if extract_content_segments(prepared_record):
-            used_structured_content = True
-        if rendered:
-            append_nonredundant_rendered(rendered_parts, rendered)
-    if rendered_parts:
-        if used_structured_content:
-            return merge_latex_fragments(rendered_parts)
-        return normalize_latex_text(" ".join(rendered_parts))
-    return escape_latex(strip_list_marker(node_text(node)))
-
-
-def append_nonredundant_rendered(parts: list[str], rendered: str) -> None:
-    if not is_redundant_rendered_text(rendered, parts):
-        parts.append(rendered)
-
-
-def is_redundant_rendered_text(rendered: str, previous_parts: Sequence[str], *, min_chars: int = 60) -> bool:
-    key = rendered_text_dedupe_key(rendered)
-    if len(key) < min_chars:
-        return False
-    for previous in previous_parts[-4:]:
-        previous_key = rendered_text_dedupe_key(previous)
-        if len(previous_key) >= len(key) and key in previous_key:
-            return True
-    return False
-
-
-def rendered_text_dedupe_key(value: str) -> str:
-    text = re.sub(r"\\(section|subsection|subsubsection|paragraph)\*?\{([^{}]*)\}", r"\2", str(value or ""))
-    text = re.sub(r"\\[a-zA-Z]+\*?", "", text)
-    return re.sub(r"[^a-z0-9]+", "", text.lower())
-
-
-def strip_list_marker_from_record(record: dict[str, Any]) -> dict[str, Any]:
-    prepared = dict(record)
-    changed = False
-    for key in ("merged_text", "text_for_embedding", "text", "text_preview"):
-        value = prepared.get(key)
-        if isinstance(value, str) and LIST_MARKER_RE.match(value):
-            prepared[key] = strip_list_marker(value)
-            changed = True
-            break
-
-    block = prepared.get("block")
-    if isinstance(block, dict):
-        block_copy = dict(block)
-        content = block_copy.get("content")
-        content_copy: Any = content
-        segments = extract_content_segments(prepared)
-        if segments:
-            stripped_segments = []
-            stripped = False
-            for segment in segments:
-                segment_copy = dict(segment)
-                if not stripped and str(segment_copy.get("type") or "").lower() == "text":
-                    content_text = str(segment_copy.get("content") or segment_copy.get("text") or "")
-                    if LIST_MARKER_RE.match(content_text):
-                        replacement = strip_list_marker(content_text)
-                        if "content" in segment_copy:
-                            segment_copy["content"] = replacement
-                        else:
-                            segment_copy["text"] = replacement
-                        stripped = True
-                        changed = True
-                stripped_segments.append(segment_copy)
-            if isinstance(content, dict):
-                content_copy = dict(content)
-                for key in ("paragraph_content", "title_content", "content"):
-                    if isinstance(content_copy.get(key), list):
-                        content_copy[key] = stripped_segments
-                        break
-            elif isinstance(content, list):
-                content_copy = stripped_segments
-            block_copy["content"] = content_copy
-            prepared["block"] = block_copy
-    return prepared if changed else record
-
-
-def extract_content_segments(record: dict[str, Any]) -> list[dict[str, Any]]:
-    block = record.get("block")
-    if not isinstance(block, dict):
-        return []
-    content = block.get("content")
-    if isinstance(content, dict):
-        for key in ("paragraph_content", "title_content", "content"):
-            value = content.get(key)
-            if isinstance(value, list):
-                return [segment for segment in value if isinstance(segment, dict)]
-    if isinstance(content, list):
-        return [segment for segment in content if isinstance(segment, dict)]
-    return []
-
-
-def normalize_latex_text(text: str) -> str:
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-def merge_latex_fragments(parts: list[str]) -> str:
-    text = ""
-    for part in parts:
-        part = str(part or "").strip()
-        if not part:
-            continue
-        if not text:
-            text = part
-        elif part.startswith((",", ".", ";", ":", ")", "]", "}")):
-            text += part
-        else:
-            text += " " + part
-    return normalize_latex_text(text)
-
-
 def node_text(node: Any) -> str:
     if hasattr(node, "text"):
         return str(node.text).strip()
     if isinstance(node, dict):
         return str(node.get("text") or node.get("text_for_embedding") or node.get("text_preview") or "").strip()
     return ""
-
-
-def node_record(node: Any) -> dict[str, Any]:
-    return getattr(node, "record", node if isinstance(node, dict) else {})
-
-
-def sorted_render_children(children: Any) -> list[Any]:
-    child_list = list(children or [])
-    if any(has_explicit_reading_order(getattr(child, "record", child if isinstance(child, dict) else {})) for child in child_list):
-        return sorted(child_list, key=node_reading_order_key)
-    if any(record_has_bbox(getattr(child, "record", child if isinstance(child, dict) else {})) for child in child_list):
-        return sort_nodes_by_reading_order(child_list, fallback_key=node_reading_order_key)
-    return sorted(child_list, key=node_reading_order_key)
-
-
-def has_explicit_reading_order(record: Any) -> bool:
-    if not isinstance(record, dict):
-        return False
-    for key in ("regime_reading_order", "dag_reading_order", "global_order", "reading_order", "original_order", "original_index", "index"):
-        if numeric_value(record.get(key)) is not None:
-            return True
-    return False
-
-
-def node_reading_order_key(node: Any) -> tuple[int, float, float, str]:
-    record = getattr(node, "record", node if isinstance(node, dict) else {})
-    for key in ("regime_reading_order", "dag_reading_order", "xycut_reading_order", "global_order", "reading_order", "original_order", "original_index", "index"):
-        value = numeric_value(record.get(key))
-        if value is not None:
-            return (0, value, 0.0, "")
-
-    source_id = min_numeric_sequence(record.get("source_node_ids"))
-    if source_id is not None:
-        return (1, source_id, 0.0, "")
-
-    merged_ids = getattr(node, "merged_node_ids", None)
-    merged_id = min_numeric_sequence(merged_ids)
-    if merged_id is not None:
-        return (1, merged_id, 0.0, "")
-
-    node_id = numeric_value(getattr(node, "node_id", None))
-    if node_id is not None and node_id >= 0:
-        return (1, node_id, 0.0, "")
-
-    page = numeric_value(record.get("page_idx"))
-    visual = numeric_value(record.get("visual_order"))
-    if page is not None or visual is not None:
-        return (2, page if page is not None else 0.0, visual if visual is not None else 0.0, "")
-
-    for key in ("id", "node_id", "block_id"):
-        value = numeric_value(record.get(key))
-        if value is not None:
-            return (3, value, 0.0, "")
-
-    return (4, 0.0, 0.0, "")
-
-
-def record_has_bbox(record: Any) -> bool:
-    if not isinstance(record, dict):
-        return False
-    value = record.get("bbox")
-    return isinstance(value, (list, tuple)) and len(value) >= 4
-
-
-def numeric_value(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        match = NUMERIC_ID_RE.search(value)
-        if match:
-            return float(match.group(0))
-    return None
-
-
-def min_numeric_sequence(value: Any) -> float | None:
-    if not isinstance(value, (list, tuple)):
-        return None
-    numbers = [number for number in (numeric_value(item) for item in value) if number is not None]
-    return min(numbers) if numbers else None
-
-
-def canonical_render_type(record: dict[str, Any]) -> str:
-    if str(record.get("list_type") or "").lower() == "reference_list":
-        return "reference"
-    raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or record.get("block_type") or "").lower()
-    if raw in {"toc", "toc_title", "toc_entry", "index", "table_of_contents"}:
-        return "toc"
-    if raw in {"paragraph", "text", "paragraph_text"}:
-        return "text"
-    if raw in {"title", "section", "subsection", "subsubsection", "heading"}:
-        return "title"
-    if raw in {"equation", "equation_interline", "interline_equation", "display_formula", "formula"}:
-        return "equation"
-    if raw in {"inline_math", "inline_formula", "math_inline"}:
-        return "inline_math"
-    if raw in {"table"}:
-        return "table"
-    if raw in {"figure", "image", "chart"}:
-        return "figure"
-    if raw in {"algorithm"}:
-        return "algorithm"
-    if raw in {"list", "item", "itemize", "enumerate"}:
-        return "list"
-    if raw in {"code"}:
-        return "code"
-    if raw in {"page_footnote", "footnote", "foot_note"}:
-        return "footnote"
-    if raw in {"margin_note", "marginnote", "side_note", "sidenote", "sidebar"}:
-        return "margin_note"
-    if raw in {"reference", "references", "bibliography"}:
-        return "reference"
-    return "text"
 
 
 def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 from src.generation.citations import strip_reference_label
@@ -242,7 +242,7 @@ class TreeDecoderConfig:
     figure_asset_output_dir: str | None = None
     table_asset_latex_prefix: str = "assets"
     figure_asset_latex_prefix: str = "assets"
-    heading_skeleton_mode: str = "legacy"
+    heading_skeleton_mode: str = "stack"
 
 
 @dataclass
@@ -300,7 +300,11 @@ class TreeDecoder:
     """Three-stage tree decoder: merge contraction, NetworkX MSA, DFS render."""
 
     def __init__(self, config: TreeDecoderConfig | None = None) -> None:
-        self.config = config or TreeDecoderConfig()
+        active_config = config or TreeDecoderConfig()
+        self.config = replace(
+            active_config,
+            heading_skeleton_mode=normalize_heading_skeleton_mode(active_config.heading_skeleton_mode),
+        )
 
     def decode(
         self,
@@ -316,7 +320,7 @@ class TreeDecoder:
             index: ResolvedNode(node_id=index, record=dict(record), merged_node_ids=[index])
             for index, record in enumerate(node_records)
         }
-        raw_skeleton = None if heading_mode == "off" else build_heading_skeleton(raw_nodes, mode=heading_mode)
+        raw_skeleton = build_heading_skeleton(raw_nodes, mode=heading_mode)
         contracted = self.contract_merge_nodes(
             node_records,
             edge_index,
@@ -324,15 +328,12 @@ class TreeDecoder:
             raw_skeleton=raw_skeleton,
         )
         contracted = self.semantic_title_deduplication(contracted)
-        if heading_mode == "off":
-            parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=None)
-            return self.build_tree(contracted, parent_edges)
         skeleton = build_heading_skeleton(contracted.nodes, mode=heading_mode)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=skeleton)
         return self.build_skeleton_tree(contracted, skeleton, parent_edges)
 
     def decode_edges(self, edge_index: Any, scores: Any, *, num_nodes: int | None = None) -> list[DecodedEdge]:
-        """Return decoded edges while preserving the legacy function API."""
+        """Return decoded edges while preserving older call-site compatibility."""
 
         probs = self.edge_probabilities(scores)
         node_count = resolve_num_nodes(edge_index, scores, num_nodes=num_nodes)
@@ -773,16 +774,13 @@ class TreeDecoder:
         for target_id, edge in best_parent_edge.items():
             if target_id in skeleton.heading_ids:
                 continue
-            if normalize_heading_skeleton_mode(self.config.heading_skeleton_mode) == "stack":
-                # In stack mode the active heading state machine owns section
-                # attachment.  GNN parent edges remain useful for diagnostics
-                # and non-stack modes, but they must not re-parent body nodes
-                # away from the current heading scope.
-                if target_id in parent_of:
-                    continue
-                if not stack_mode_allows_local_parent(edge, nodes, skeleton):
-                    continue
-            elif target_id in parent_of:
+            # The active heading state machine owns section attachment. GNN
+            # parent edges remain useful for local non-heading relations, but
+            # they must not re-parent body nodes away from the current heading
+            # scope.
+            if target_id in parent_of:
+                continue
+            if not stack_mode_allows_local_parent(edge, nodes, skeleton):
                 continue
             parent_of[target_id] = edge.source
 
@@ -1234,31 +1232,25 @@ def sort_tree_children(node: ResolvedNode) -> None:
 
 
 def normalize_heading_skeleton_mode(mode: str | None) -> str:
-    value = str(mode or "legacy").casefold().replace("-", "_")
+    value = str(mode or "stack").casefold().replace("-", "_")
     aliases = {
-        "none": "off",
-        "disabled": "off",
-        "disable": "off",
-        "old": "off",
-        "current": "legacy",
-        "default": "legacy",
+        "current": "stack",
+        "default": "stack",
         "strict": "stack",
         "stack_strict": "stack",
     }
     value = aliases.get(value, value)
-    if value not in {"off", "legacy", "stack"}:
+    if value != "stack":
         raise ValueError(f"Unknown heading skeleton mode: {mode!r}")
     return value
 
 
-def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legacy") -> HeadingSkeleton:
+def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "stack") -> HeadingSkeleton:
     """Build a deterministic heading tree from physical reading order."""
 
     if not nodes:
         return HeadingSkeleton(frozenset(), {}, {}, {})
     mode = normalize_heading_skeleton_mode(mode)
-    if mode == "off":
-        return HeadingSkeleton(frozenset(), {}, {}, {})
 
     records_by_id = {node_id: node.record for node_id, node in nodes.items()}
     text_by_id = {node_id: node.text for node_id, node in nodes.items()}
@@ -1286,65 +1278,11 @@ def build_heading_skeleton(nodes: dict[int, ResolvedNode], *, mode: str = "legac
             if node_id in nodes:
                 nodes[node_id].record.update(hints)
 
-    if mode == "stack":
-        return build_strict_heading_stack_skeleton(
-            nodes,
-            evidence_by_id=evidence_by_id,
-            profile=profile,
-            layout_result=layout_result,
-        )
-
-    if layout_result is not None:
-        if layout_result.heading_ids or layout_result.parent_by_node:
-            for node_id in layout_result.heading_ids:
-                if node_id not in nodes:
-                    continue
-                nodes[node_id].record["_skeleton_heading_level"] = layout_result.heading_levels.get(node_id, 1)
-                nodes[node_id].record["canonical_type"] = "title"
-            return HeadingSkeleton(
-                heading_ids=frozenset(layout_result.heading_ids),
-                heading_levels=layout_result.heading_levels,
-                heading_parent=layout_result.heading_parent,
-                scope_by_node=layout_result.scope_by_node,
-                parent_by_node=layout_result.parent_by_node,
-                render_hints=layout_result.render_hints,
-                events=layout_result.events,
-            )
-
-    ordered_ids = sorted(nodes, key=lambda node_id: node_reading_order_key(nodes[node_id]))
-    body_font_size = infer_body_font_size_from_nodes(nodes.values())
-    heading_decisions = resolve_heading_decisions(nodes, ordered_ids=ordered_ids, body_font_size=body_font_size)
-    heading_ids: set[int] = set()
-    heading_levels: dict[int, int] = {}
-    heading_parent: dict[int, int | None] = {}
-    scope_by_node: dict[int, int | None] = {}
-    stack: list[tuple[int, int]] = []
-
-    for order_pos, node_id in enumerate(ordered_ids):
-        node = nodes[node_id]
-        decision = heading_decisions.get(node_id)
-        if decision is not None:
-            apply_heading_decision(node, decision)
-        if decision is not None and decision.is_structural:
-            level = decision.level
-            node.record["_skeleton_heading_level"] = level
-            node.record["canonical_type"] = "title"
-            heading_ids.add(node_id)
-            heading_levels[node_id] = level
-            while stack and stack[-1][0] >= level:
-                stack.pop()
-            parent_id = stack[-1][1] if stack else None
-            heading_parent[node_id] = parent_id
-            scope_by_node[node_id] = node_id
-            stack.append((level, node_id))
-            continue
-        scope_by_node[node_id] = stack[-1][1] if stack else None
-
-    return HeadingSkeleton(
-        heading_ids=frozenset(heading_ids),
-        heading_levels=heading_levels,
-        heading_parent=heading_parent,
-        scope_by_node=scope_by_node,
+    return build_strict_heading_stack_skeleton(
+        nodes,
+        evidence_by_id=evidence_by_id,
+        profile=profile,
+        layout_result=layout_result,
     )
 
 
@@ -1384,6 +1322,11 @@ def build_strict_heading_stack_skeleton(
         if is_page_noise_node(node):
             events.append(f"{node_id}:skip-noise")
             continue
+        if stack and strict_is_abstract_heading(nodes[stack[-1][1]]) and not strict_node_is_front_matter(node):
+            # Abstract is a front-matter scope.  Once the scanner reaches the
+            # main text flow, subsequent body headings must not become children
+            # of Abstract.
+            stack.clear()
         if strict_node_is_front_matter(node) and not seen_body_heading and not strict_is_abstract_heading(node):
             scope_by_node[node_id] = None
             events.append(f"{node_id}:front-matter")
@@ -1660,6 +1603,8 @@ def strict_heading_level(
 ) -> int:
     text = " ".join(node.text.split())
     explicit = title_numbering_level(text)
+    if evidence is not None and evidence.numbering_style == "alpha" and current_level >= 1:
+        return max(2, min(current_level + 1, 5))
     if explicit is not None:
         return max(1, min(explicit, 5))
     if evidence is not None and evidence.numbering_level is not None:
@@ -2206,13 +2151,18 @@ def heading_prefix_signature(text: str) -> tuple[str, int | None]:
         return ("numeric_paren", 2)
     if NUMERIC_PREFIX_RE.match(value):
         return ("numeric", 1)
+    alpha_match = ALPHA_PREFIX_RE.match(value)
+    if alpha_match:
+        token = value.split(maxsplit=1)[0].rstrip(".").rstrip(")")
+        tail = value[alpha_match.end() :].strip()
+        if ROMAN_PREFIX_RE.match(value) and (len(token) > 1 or looks_like_all_caps_heading(tail)):
+            return ("roman", 1)
+        return ("alpha", 2)
     numbered_level = title_numbering_level(value)
     if numbered_level is not None:
         return ("bare_numbered", numbered_level)
     if ROMAN_PREFIX_RE.match(value):
         return ("roman", 1)
-    if ALPHA_PREFIX_RE.match(value):
-        return ("alpha", 2)
     if CUSTOM_COLON_PREFIX_RE.match(value):
         return ("custom_colon", None)
     return ("freeform", None)
@@ -2377,6 +2327,14 @@ def looks_like_standalone_heading(text: str) -> bool:
     if value.endswith((".", "。", "?", "!", "？", "！")):
         return False
     return True
+
+
+def looks_like_all_caps_heading(text: str) -> bool:
+    letters = [char for char in str(text or "") if char.isalpha()]
+    if len(letters) < 4:
+        return False
+    uppercase = sum(1 for char in letters if char.isupper())
+    return uppercase / max(1, len(letters)) >= 0.75
 
 
 def infer_body_font_size_from_nodes(nodes: Any) -> float:

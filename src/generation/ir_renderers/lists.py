@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.generation.ir_renderers.context import RenderContext
-from src.generation.latex_renderer import strip_list_marker
+from src.generation.latex_helpers import strip_list_marker
 from src.ir import RenderRole
 
 
