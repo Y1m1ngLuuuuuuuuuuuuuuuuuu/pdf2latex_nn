@@ -33,6 +33,7 @@ from src.generation.source_float_layout import SourceFloatLayout, SourceTableLay
 from src.generation.table_assets import ensure_pdf_region_crop
 from src.ir import BBox, BlockType, DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode, StyleProfile, StyleSpan
 from src.perception.title_features import strip_title_numbering, title_numbering_info
+from src.reasoning.front_matter_extractor import FrontMatterIR, FrontMatterSpan, extract_front_matter
 
 
 CITE_COMMAND_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|ref|autoref|cref)\*?(?:\[[^\]]*\])?\{[^{}]+\}")
@@ -102,6 +103,7 @@ class OriginalLikeIRLatexRenderer:
         self._active_cross_refs: _CrossReferenceRegistry | None = None
         self._rendered_float_groups: set[tuple[str, str]] = set()
         self._consumed_float_caption_keys: set[str] = set()
+        self._consumed_front_matter_source_ids: set[str] = set()
         self._render_registry = build_default_registry()
 
     def render(
@@ -118,12 +120,14 @@ class OriginalLikeIRLatexRenderer:
         previous_cross_refs = self._active_cross_refs
         previous_rendered_float_groups = self._rendered_float_groups
         previous_consumed_float_caption_keys = self._consumed_float_caption_keys
+        previous_consumed_front_matter_source_ids = self._consumed_front_matter_source_ids
         self._active_style = style
         self._active_notes = _NoteContext.from_document(document)
         self._active_source_float_layout = source_float_layout
         self._active_cross_refs = _CrossReferenceRegistry.from_document(document)
         self._rendered_float_groups = set()
         self._consumed_float_caption_keys = set()
+        self._consumed_front_matter_source_ids = set()
         try:
             return self._render_with_active_style(document, tree, style, citations)
         finally:
@@ -133,6 +137,7 @@ class OriginalLikeIRLatexRenderer:
             self._active_cross_refs = previous_cross_refs
             self._rendered_float_groups = previous_rendered_float_groups
             self._consumed_float_caption_keys = previous_consumed_float_caption_keys
+            self._consumed_front_matter_source_ids = previous_consumed_front_matter_source_ids
 
     def _render_with_active_style(
         self,
@@ -148,6 +153,7 @@ class OriginalLikeIRLatexRenderer:
 
         lines = self._render_preamble(style, citations)
         title = self.config.title or self._infer_title(document)
+        extracted_front_matter = self._front_matter_for_original_like(document, tree)
         use_maketitle = self._use_maketitle()
         if title and use_maketitle:
             lines.extend([rf"\title{{{escape_latex(title)}}}", r"\date{}", ""])
@@ -161,6 +167,11 @@ class OriginalLikeIRLatexRenderer:
         if title and use_maketitle:
             lines.append(r"\maketitle")
             lines.append("")
+        elif extracted_front_matter is not None:
+            front_lines = self._render_extracted_front_matter(extracted_front_matter, document_nodes, style)
+            if front_lines:
+                lines.extend(front_lines)
+                lines.append("")
         elif title and self._use_original_like_front_matter() and not _tree_has_role(tree, RenderRole.DOCUMENT_TITLE):
             lines.append(render_document_title_original_like(title, [], style))
             lines.append("")
@@ -345,6 +356,79 @@ class OriginalLikeIRLatexRenderer:
         lines.append("")
         return lines
 
+    def _front_matter_for_original_like(self, document: DocumentIR, tree: RenderTreeIR) -> FrontMatterIR | None:
+        if not self._use_original_like_front_matter():
+            return None
+        if _tree_has_role(tree, RenderRole.DOCUMENT_TITLE) and _tree_has_role(tree, RenderRole.AUTHOR_BLOCK):
+            return None
+        extracted = extract_front_matter(document)
+        if not extracted.all_spans():
+            return None
+        return extracted
+
+    def _render_extracted_front_matter(
+        self,
+        front_matter: FrontMatterIR,
+        document_nodes: dict[str, DocumentNode],
+        style: StyleProfile,
+    ) -> list[str]:
+        lines: list[str] = []
+        if front_matter.title is not None:
+            title_sources = self._front_matter_span_source_nodes(front_matter.title, document_nodes)
+            rendered_title = render_document_title_original_like(front_matter.title.text, title_sources, style)
+            if rendered_title:
+                lines.append(rendered_title)
+                self._consume_front_matter_span(front_matter.title)
+
+        author_like_spans = [
+            *front_matter.authors,
+            *front_matter.affiliations,
+            *front_matter.emails,
+            *front_matter.notes,
+            *front_matter.misc,
+        ]
+        if author_like_spans:
+            source_nodes: list[DocumentNode] = []
+            for span in author_like_spans:
+                source_nodes.extend(self._front_matter_span_source_nodes(span, document_nodes))
+            rendered_author = render_author_block_original_like(
+                "\n".join(span.text for span in author_like_spans if span.text.strip()),
+                _dedupe_document_nodes(source_nodes),
+                style,
+            )
+            if rendered_author:
+                lines.append(rendered_author)
+                for span in author_like_spans:
+                    self._consume_front_matter_span(span)
+
+        if front_matter.abstract is not None and front_matter.abstract.body is not None:
+            abstract_body = front_matter.abstract.body.text.strip()
+            if abstract_body:
+                lines.extend(
+                    [
+                        r"\begin{abstract}",
+                        render_text_with_citations(abstract_body),
+                        r"\end{abstract}",
+                    ]
+                )
+                if front_matter.abstract.title is not None:
+                    self._consume_front_matter_span(front_matter.abstract.title)
+                self._consume_front_matter_span(front_matter.abstract.body)
+
+        return lines
+
+    def _front_matter_span_source_nodes(
+        self,
+        span: FrontMatterSpan,
+        document_nodes: dict[str, DocumentNode],
+    ) -> list[DocumentNode]:
+        return _dedupe_document_nodes(
+            [document_nodes[node_id] for node_id in span.source_node_ids if node_id in document_nodes]
+        )
+
+    def _consume_front_matter_span(self, span: FrontMatterSpan) -> None:
+        self._consumed_front_matter_source_ids.update(span.source_node_ids)
+
     def _render_original_like_layout_commands(self, style: StyleProfile) -> list[str]:
         options = style.renderer_options or {}
         lines: list[str] = []
@@ -404,6 +488,8 @@ class OriginalLikeIRLatexRenderer:
         source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
         text = node.latex or node.text or self._source_text(source_nodes, citations)
         text = _clean_render_text(text)
+        if self._should_skip_consumed_front_matter(node, source_nodes):
+            return ""
         if self._should_skip_consumed_float_caption(node, source_nodes, text):
             return ""
 
@@ -1262,6 +1348,21 @@ class OriginalLikeIRLatexRenderer:
     def _remember_float_caption(self, text: str, kind: str) -> None:
         for key in _float_caption_dedup_keys(text, kind):
             self._consumed_float_caption_keys.add(key)
+
+    def _should_skip_consumed_front_matter(
+        self,
+        node: RenderTreeNode,
+        source_nodes: list[DocumentNode],
+    ) -> bool:
+        if not self._consumed_front_matter_source_ids or not node.source_node_ids:
+            return False
+        if not all(source_id in self._consumed_front_matter_source_ids for source_id in node.source_node_ids):
+            return False
+        if node.role in {RenderRole.DOCUMENT_TITLE, RenderRole.AUTHOR_BLOCK, RenderRole.ABSTRACT, RenderRole.TOC_PLACEHOLDER}:
+            return True
+        if source_nodes and all(_document_node_is_front_matter_source(source) for source in source_nodes):
+            return True
+        return False
 
     def _should_skip_consumed_float_caption(
         self,
@@ -2715,6 +2816,17 @@ def _tree_has_role(tree: RenderTreeIR, role: RenderRole) -> bool:
     return any(node.role == role for node in tree.nodes)
 
 
+def _dedupe_document_nodes(nodes: list[DocumentNode]) -> list[DocumentNode]:
+    result: list[DocumentNode] = []
+    seen: set[str] = set()
+    for node in nodes:
+        if node.node_id in seen:
+            continue
+        result.append(node)
+        seen.add(node.node_id)
+    return result
+
+
 def _is_front_matter_render_node(
     node: RenderTreeNode,
     document_nodes: dict[str, DocumentNode],
@@ -2743,6 +2855,37 @@ def _document_node_is_author_block(node: DocumentNode) -> bool:
     layer = str(node.metadata.get("layout_layer") or "").casefold()
     role = str(node.metadata.get("layout_role") or "").casefold()
     return layer == "metadata_layer" and role in {"affiliation", "author", "authors", "date", "email", "correspondence"}
+
+
+def _document_node_is_front_matter_source(node: DocumentNode) -> bool:
+    layer = str(node.metadata.get("layout_layer") or "").casefold()
+    role = str(node.metadata.get("layout_role") or "").casefold()
+    canonical = str(node.metadata.get("canonical_type") or node.raw_type or "").casefold()
+    if layer == "metadata_layer":
+        return True
+    front_roles = {
+        "front_matter",
+        "document_title",
+        "paper_title",
+        "title_page",
+        "author",
+        "authors",
+        "author_block",
+        "affiliation",
+        "institution",
+        "email",
+        "orcid",
+        "date",
+        "correspondence",
+        "abstract",
+        "abstract_title",
+        "abstract_body",
+    }
+    if role in front_roles or canonical in front_roles:
+        return True
+    if node.page_idx == 0 and node.reading_index <= 30 and node.node_type == BlockType.TITLE:
+        return True
+    return False
 
 
 def _document_node_no_render(node: DocumentNode) -> bool:
