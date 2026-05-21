@@ -35,16 +35,37 @@ FLOAT_ROLES = {
 }
 DEFAULT_EXCLUDED_METADATA_ROLES = {
     "document_title",
+    "title_page",
+    "paper_title",
     "front_matter_title",
     "author",
     "authors",
+    "author_block",
     "affiliation",
+    "institution",
     "email",
+    "orcid",
     "date",
     "correspondence",
     "abstract",
     "abstract_title",
     "front_matter",
+    "metadata",
+}
+PAGE_FURNITURE_ROLES = {
+    "page_header",
+    "page_footer",
+    "page_number",
+    "header",
+    "footer",
+    "toc",
+    "table_of_contents",
+    "watermark",
+}
+NO_RENDER_ROLES = {
+    "noise",
+    "duplicate_shadow",
+    "no_render",
 }
 
 
@@ -144,9 +165,59 @@ def _include_item_in_gnn_view(item: dict[str, Any], cfg: GNNViewAdapterConfig) -
         return False, "annotation_layer"
     if layer == "metadata_layer" and not cfg.include_metadata:
         return False, f"metadata:{role or raw_type or 'unknown'}"
+    role_reason = _metadata_or_page_furniture_reason(item, layer=layer)
+    if role_reason and not cfg.include_metadata:
+        return False, role_reason
     if is_float_item and not cfg.include_float:
         return False, f"float:{role or raw_type or 'unknown'}"
     return True, "included"
+
+
+def _metadata_or_page_furniture_reason(item: dict[str, Any], *, layer: str) -> str | None:
+    """Defensively exclude front matter/page furniture from the body GNN view.
+
+    Full v7 keeps these records for generation.  The graph-visible body view
+    should still exclude them when upstream layout_layer annotations are
+    incomplete.  Records explicitly assigned to main_text_flow are trusted as
+    body headings and are not excluded merely because their raw type is title.
+    """
+
+    values = _role_candidates(item)
+    for value in values:
+        if value in NO_RENDER_ROLES:
+            return value
+        if value in PAGE_FURNITURE_ROLES:
+            return f"page_furniture:{value}"
+    main_text_heading = _is_explicit_main_text_heading(item, layer=layer)
+    for value in values:
+        if value in DEFAULT_EXCLUDED_METADATA_ROLES:
+            if main_text_heading and value == "title":
+                continue
+            return f"metadata_role:{value}"
+    return None
+
+
+def _is_explicit_main_text_heading(item: dict[str, Any], *, layer: str) -> bool:
+    if layer != "main_text_flow":
+        return False
+    raw_type = str(item.get("canonical_type") or item.get("type") or item.get("raw_type") or "").casefold()
+    role = str(item.get("layout_role") or item.get("role") or item.get("semantic_role") or "").casefold()
+    return raw_type in {"title", "section", "subsection", "subsubsection", "heading"} and role not in DEFAULT_EXCLUDED_METADATA_ROLES
+
+
+def _role_candidates(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("layout_role", "canonical_type", "type", "role", "layer", "raw_type", "semantic_role"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip().casefold())
+    metadata = item.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("role", "layout_role", "canonical_type", "type", "layer", "raw_type"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip().casefold())
+    return list(dict.fromkeys(values))
 
 
 def _is_float_item(*, layer: str, role: str, raw_type: str) -> bool:
