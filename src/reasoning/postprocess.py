@@ -305,6 +305,8 @@ class TreeDecoder:
             active_config,
             heading_skeleton_mode=normalize_heading_skeleton_mode(active_config.heading_skeleton_mode),
         )
+        self.last_trace: dict[str, Any] = {}
+        self._active_trace: dict[str, Any] | None = None
 
     def decode(
         self,
@@ -316,11 +318,23 @@ class TreeDecoder:
 
         probs = self.edge_probabilities(scores)
         heading_mode = normalize_heading_skeleton_mode(self.config.heading_skeleton_mode)
+        self.last_trace = {
+            "schema_version": "gnn_decoder_trace_v1",
+            "node_count": len(node_records),
+            "edge_count": int(normalize_edge_index(edge_index).shape[1]),
+            "thresholds": {
+                "merge": float(self.config.merge_threshold),
+                "parent_child": float(self.config.parent_threshold),
+            },
+            "heading_skeleton_mode": heading_mode,
+        }
+        self._active_trace = self.last_trace
         raw_nodes = {
             index: ResolvedNode(node_id=index, record=dict(record), merged_node_ids=[index])
             for index, record in enumerate(node_records)
         }
         raw_skeleton = build_heading_skeleton(raw_nodes, mode=heading_mode)
+        self.last_trace["raw_heading_skeleton"] = summarize_heading_skeleton(raw_skeleton)
         contracted = self.contract_merge_nodes(
             node_records,
             edge_index,
@@ -328,9 +342,14 @@ class TreeDecoder:
             raw_skeleton=raw_skeleton,
         )
         contracted = self.semantic_title_deduplication(contracted)
+        self.last_trace["merge_components"] = summarize_merge_components(contracted.nodes, contracted.merge_edges)
         skeleton = build_heading_skeleton(contracted.nodes, mode=heading_mode)
+        self.last_trace["contracted_heading_skeleton"] = summarize_heading_skeleton(skeleton)
         parent_edges = self.maximum_parent_arborescence(contracted, edge_index, probs, skeleton=skeleton)
-        return self.build_skeleton_tree(contracted, skeleton, parent_edges)
+        root = self.build_skeleton_tree(contracted, skeleton, parent_edges)
+        self.last_trace["root_child_count"] = len(root.children)
+        self._active_trace = None
+        return root
 
     def decode_edges(self, edge_index: Any, scores: Any, *, num_nodes: int | None = None) -> list[DecodedEdge]:
         """Return decoded edges while preserving older call-site compatibility."""
@@ -375,28 +394,40 @@ class TreeDecoder:
             raise ValueError("scores rows must match edge_index edge count")
         union_find = UnionFind(len(node_records))
         merge_edges: list[DecodedEdge] = []
+        reject_reasons: dict[str, int] = {}
+
+        def reject(reason: str) -> None:
+            reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
 
         for edge_pos in range(edge_index.shape[1]):
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
             if not valid_node_pair(source, target, len(node_records)) or source == target:
+                reject("invalid_or_self")
                 continue
             if raw_skeleton is not None and merge_crosses_section_boundary(source, target, raw_skeleton):
+                reject("section_boundary")
                 continue
             if merge_crosses_intermediate_list_marker(source, target, node_records):
+                reject("intermediate_list_marker")
                 continue
             if not self.can_merge(node_records[source], node_records[target]):
+                reject("hard_gate_can_merge")
                 continue
             merge_score = float(probs[edge_pos, MERGE].item())
             label = int(probs[edge_pos].argmax().item())
             merge_threshold = self.merge_threshold_for(node_records[source], node_records[target])
             if merge_score < merge_threshold:
+                reject("below_threshold")
                 continue
             if self.config.require_merge_argmax and label != MERGE:
+                reject("not_argmax")
                 continue
             if union_find.find(source) != union_find.find(target):
                 union_find.union(source, target)
                 merge_edges.append(DecodedEdge(source=source, target=target, label=MERGE, score=merge_score))
+            else:
+                reject("already_same_component")
 
         groups: dict[int, list[int]] = {}
         for index in range(len(node_records)):
@@ -413,6 +444,13 @@ class TreeDecoder:
             record["merged_text"] = merged_text
             record["merged_records"] = [dict(node_records[idx]) for idx in ordered_members[1:]]
             record["source_node_ids"] = ordered_members
+            if len(ordered_members) > 1:
+                record["_merge_source"] = "gnn_merge"
+                record["_accepted_merge_edge_count"] = sum(
+                    1
+                    for edge in merge_edges
+                    if edge.source in ordered_members and edge.target in ordered_members
+                )
             nodes[canonical_id] = ResolvedNode(
                 node_id=canonical_id,
                 record=record,
@@ -420,6 +458,15 @@ class TreeDecoder:
             )
             for member in ordered_members:
                 old_to_super[member] = canonical_id
+
+        if self._active_trace is not None:
+            self._active_trace["merge_decoding"] = {
+                "accepted_merge_edges": [decoded_edge_to_dict(edge) for edge in merge_edges],
+                "accepted_merge_edge_count": len(merge_edges),
+                "reject_reasons": reject_reasons,
+                "contracted_node_count": len(nodes),
+                "merged_supernode_count": sum(1 for node in nodes.values() if len(node.merged_node_ids) > 1),
+            }
 
         return ContractedGraph(nodes=nodes, old_to_super=old_to_super, merge_edges=merge_edges)
 
@@ -515,11 +562,21 @@ class TreeDecoder:
         from networkx.algorithms.tree.branchings import maximum_spanning_arborescence
 
         parent_candidates = self.collect_parent_candidate_edges(contracted, edge_index, probs)
+        parent_trace: dict[str, Any] = {
+            "collected_parent_candidates": len(parent_candidates),
+        }
         parent_candidates = self.enforce_reference_topology(contracted.nodes, parent_candidates)
+        parent_trace["after_reference_topology"] = len(parent_candidates)
         if self.config.enforce_parent_causality:
+            before = len(parent_candidates)
             parent_candidates = self.apply_causality_barrier(contracted.nodes, parent_candidates)
+            parent_trace["causality_rejected"] = before - len(parent_candidates)
+            parent_trace["after_causality_barrier"] = len(parent_candidates)
         if skeleton is not None:
+            before = len(parent_candidates)
             parent_candidates = self.apply_structure_barrier(contracted.nodes, parent_candidates, skeleton)
+            parent_trace["structure_rejected"] = before - len(parent_candidates)
+            parent_trace["after_structure_barrier"] = len(parent_candidates)
 
         graph = nx.DiGraph()
         graph.add_node(VIRTUAL_ROOT)
@@ -568,6 +625,10 @@ class TreeDecoder:
                 )
             )
         decoded.sort(key=lambda edge: (min(contracted.nodes[edge.target].merged_node_ids), edge.source, edge.target))
+        parent_trace["arborescence_parent_edges"] = len(decoded)
+        parent_trace["arborescence_edges"] = [decoded_edge_to_dict(edge) for edge in decoded]
+        if self._active_trace is not None:
+            self._active_trace["parent_decoder"] = parent_trace
         return decoded
 
     def collect_parent_candidate_edges(
@@ -742,6 +803,8 @@ class TreeDecoder:
 
         nodes = {node_id: clone_resolved_node(node) for node_id, node in contracted.nodes.items()}
         parent_of: dict[int, int] = {}
+        parent_source_by_node: dict[int, str] = {}
+        parent_edge_score_by_node: dict[int, float] = {}
 
         for node_id, hints in skeleton.render_hints.items():
             if node_id in nodes:
@@ -750,10 +813,12 @@ class TreeDecoder:
         for child_id, parent_id in skeleton.parent_by_node.items():
             if child_id in nodes and parent_id in nodes and child_id != parent_id:
                 parent_of[child_id] = int(parent_id)
+                parent_source_by_node[child_id] = "heading_stack_scope"
 
         for heading_id, parent_id in skeleton.heading_parent.items():
             if heading_id not in parent_of and heading_id in nodes and parent_id in nodes:
                 parent_of[heading_id] = int(parent_id)
+                parent_source_by_node[heading_id] = "heading_stack_outline"
 
         best_parent_edge: dict[int, DecodedEdge] = {}
         for edge in decoded_edges:
@@ -769,35 +834,97 @@ class TreeDecoder:
                 best_parent_edge[edge.target] = edge
 
         if normalize_heading_skeleton_mode(self.config.heading_skeleton_mode) == "stack":
+            before_parent_keys = set(parent_of)
             self.apply_strict_scope_defaults(nodes, parent_of, skeleton)
+            for node_id in set(parent_of) - before_parent_keys:
+                parent_source_by_node[node_id] = "active_heading_stack"
 
+        parent_usage = {
+            "best_gnn_parent_edges": len(best_parent_edge),
+            "gnn_applied": 0,
+            "gnn_blocked_by_heading_target": 0,
+            "gnn_blocked_by_existing_parent": 0,
+            "gnn_blocked_by_local_parent_gate": 0,
+            "blocked_examples": [],
+            "applied_examples": [],
+        }
         for target_id, edge in best_parent_edge.items():
             if target_id in skeleton.heading_ids:
+                parent_usage["gnn_blocked_by_heading_target"] += 1
+                append_trace_example(parent_usage["blocked_examples"], edge, "heading_target")
                 continue
             # The active heading state machine owns section attachment. GNN
             # parent edges remain useful for local non-heading relations, but
             # they must not re-parent body nodes away from the current heading
             # scope.
             if target_id in parent_of:
+                parent_usage["gnn_blocked_by_existing_parent"] += 1
+                append_trace_example(
+                    parent_usage["blocked_examples"],
+                    edge,
+                    f"existing_parent:{parent_source_by_node.get(target_id, 'unknown')}",
+                )
                 continue
             if not stack_mode_allows_local_parent(edge, nodes, skeleton):
+                parent_usage["gnn_blocked_by_local_parent_gate"] += 1
+                append_trace_example(parent_usage["blocked_examples"], edge, "local_parent_gate")
                 continue
             parent_of[target_id] = edge.source
+            parent_source_by_node[target_id] = "gnn_parent"
+            parent_edge_score_by_node[target_id] = float(edge.score)
+            parent_usage["gnn_applied"] += 1
+            append_trace_example(parent_usage["applied_examples"], edge, "gnn_parent")
 
+        before_parent_map = dict(parent_of)
         self.apply_scope_fallbacks(nodes, parent_of, skeleton)
+        for node_id in set(parent_of) - set(before_parent_map):
+            parent_source_by_node[node_id] = "scope_fallback"
 
+        before_parent_map = dict(parent_of)
         apply_float_caption_grouping(nodes, parent_of, skeleton)
+        for node_id, parent_id in parent_of.items():
+            if before_parent_map.get(node_id) != parent_id:
+                parent_source_by_node[node_id] = "float_caption_grouping"
+
+        before_parent_map = dict(parent_of)
         enforce_numbered_list_parent_continuity(nodes, parent_of)
+        for node_id, parent_id in parent_of.items():
+            if before_parent_map.get(node_id) != parent_id:
+                parent_source_by_node[node_id] = "list_continuity"
 
         for child_id, parent_id in parent_of.items():
             if child_id in nodes and parent_id in nodes and child_id != parent_id:
+                nodes[child_id].record["_parent_source"] = parent_source_by_node.get(child_id, "unknown")
+                nodes[child_id].record["_parent_node_id"] = int(parent_id)
+                if child_id in parent_edge_score_by_node:
+                    nodes[child_id].record["_parent_edge_score"] = parent_edge_score_by_node[child_id]
                 nodes[parent_id].children.append(nodes[child_id])
 
         root = ResolvedNode(node_id=-1, record={"type": "root", "text": "ROOT"}, merged_node_ids=[])
         for node_id in sorted(nodes, key=lambda idx: node_reading_order_key(nodes[idx])):
             if node_id not in parent_of:
+                nodes[node_id].record["_parent_source"] = "root"
                 root.children.append(nodes[node_id])
         sort_tree_children(root)
+        if self._active_trace is not None:
+            final_assignments = []
+            for child_id, parent_id in sorted(parent_of.items(), key=lambda item: node_reading_order_key(nodes[item[0]])):
+                final_assignments.append(
+                    {
+                        "child": child_id,
+                        "parent": parent_id,
+                        "source": parent_source_by_node.get(child_id, "unknown"),
+                        "child_type": canonical_render_type(nodes[child_id].record),
+                        "parent_type": canonical_render_type(nodes[parent_id].record) if parent_id in nodes else "root",
+                    }
+                )
+            source_distribution: dict[str, int] = {}
+            for item in final_assignments:
+                source = str(item["source"])
+                source_distribution[source] = source_distribution.get(source, 0) + 1
+            self._active_trace["parent_usage"] = parent_usage
+            self._active_trace["final_parent_assignments"] = final_assignments
+            self._active_trace["final_parent_source_distribution"] = source_distribution
         return root
 
     def apply_strict_scope_defaults(
@@ -1223,6 +1350,71 @@ def clone_resolved_node(node: ResolvedNode) -> ResolvedNode:
         children=[],
         sibling_after=list(node.sibling_after),
     )
+
+
+def decoded_edge_to_dict(edge: DecodedEdge) -> dict[str, Any]:
+    return {
+        "source": int(edge.source),
+        "target": int(edge.target),
+        "label": int(edge.label),
+        "score": float(edge.score),
+    }
+
+
+def append_trace_example(items: list[Any], edge: DecodedEdge, reason: str, *, limit: int = 25) -> None:
+    if len(items) >= limit:
+        return
+    payload = decoded_edge_to_dict(edge)
+    payload["reason"] = reason
+    items.append(payload)
+
+
+def summarize_heading_skeleton(skeleton: HeadingSkeleton) -> dict[str, Any]:
+    return {
+        "heading_count": len(skeleton.heading_ids),
+        "scope_count": sum(1 for value in skeleton.scope_by_node.values() if value is not None),
+        "parent_by_node_count": len(skeleton.parent_by_node),
+        "heading_parent_count": len(skeleton.heading_parent),
+        "events": list(skeleton.events[:100]),
+    }
+
+
+def summarize_merge_components(
+    nodes: dict[int, ResolvedNode],
+    merge_edges: list[DecodedEdge],
+) -> list[dict[str, Any]]:
+    edge_scores_by_component: dict[int, list[float]] = {}
+    member_sets = {
+        node_id: set(node.merged_node_ids or [node_id])
+        for node_id, node in nodes.items()
+    }
+    for edge in merge_edges:
+        for node_id, members in member_sets.items():
+            if edge.source in members and edge.target in members:
+                edge_scores_by_component.setdefault(node_id, []).append(float(edge.score))
+                break
+
+    components: list[dict[str, Any]] = []
+    for node_id, node in sorted(nodes.items(), key=lambda item: min(item[1].merged_node_ids or [item[0]])):
+        members = list(node.merged_node_ids or [node_id])
+        if len(members) <= 1:
+            continue
+        scores = edge_scores_by_component.get(node_id, [])
+        components.append(
+            {
+                "super_node_id": int(node_id),
+                "member_node_ids": [int(value) for value in members],
+                "member_count": len(members),
+                "accepted_merge_edge_count": len(scores),
+                "max_merge_prob": max(scores) if scores else None,
+                "mean_merge_prob": (sum(scores) / len(scores)) if scores else None,
+                "text_preview": node.text[:240],
+                "node_type": canonical_render_type(node.record),
+                "render_tree_node_id": None,
+                "rendered_once": None,
+            }
+        )
+    return components
 
 
 def sort_tree_children(node: ResolvedNode) -> None:

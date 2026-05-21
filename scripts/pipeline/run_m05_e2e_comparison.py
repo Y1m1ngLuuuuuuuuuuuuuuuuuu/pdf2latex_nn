@@ -120,6 +120,7 @@ def main() -> int:
                 skip_compile=args.skip_compile,
                 renderer=args.renderer,
                 render_table_crops=args.render_table_crops,
+                model_version=str(args.checkpoint),
             )
             row.update(evaluate_generated_document(doc, row, args))
         except Exception as exc:  # noqa: BLE001 - E2E batches should keep moving.

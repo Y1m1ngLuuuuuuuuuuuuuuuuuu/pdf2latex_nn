@@ -157,6 +157,8 @@ def main() -> int:
         table_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
         figure_asset_output_dir=(args.asset_dir or (args.output_tex.parent / "assets")) if args.render_table_crops else None,
         asset_latex_prefix=args.asset_latex_prefix,
+        decoder_trace=decoder.last_trace,
+        attribution_output_path=args.output_tex.parent / "relation_trace_report.json",
     )
     args.output_tex.parent.mkdir(parents=True, exist_ok=True)
     args.output_tex.write_text(tex, encoding="utf-8")

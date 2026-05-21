@@ -140,6 +140,7 @@ def main() -> int:
                 skip_compile=args.skip_compile,
                 renderer=args.renderer,
                 render_table_crops=args.render_table_crops,
+                model_version=str(args.checkpoint),
             )
         except Exception as exc:  # noqa: BLE001 - QA must keep the batch moving.
             doc_dir = args.output_dir / f"{index:02d}_{safe_filename(str(doc.get('document_id', 'unknown')))}"
@@ -244,6 +245,7 @@ def run_one_document(
     skip_compile: bool,
     renderer: str,
     render_table_crops: bool,
+    model_version: str,
 ) -> dict[str, Any]:
     document_id = str(doc["document_id"])
     safe_id = safe_filename(document_id)
@@ -276,7 +278,7 @@ def run_one_document(
             "parent_child": float(decoder.config.parent_threshold),
             "sibling": float(decoder.config.sibling_threshold),
         },
-        model_version=str(checkpoint),
+        model_version=model_version,
         include_logits=False,
     )
 
@@ -296,6 +298,7 @@ def run_one_document(
         )
     )
     root = local_decoder.decode(node_records, data.edge_index.detach().cpu(), logits)
+    relation_trace_path = doc_dir / "relation_trace_report.json"
     title = infer_document_title(node_records)
     if renderer != "ir":
         raise ValueError("Production E2E rendering only supports --renderer ir")
@@ -309,6 +312,8 @@ def run_one_document(
         title=title,
         document_metadata=getattr(data, "document_metadata", None),
         predicted_relations_path=predicted_relations_path,
+        decoder_trace=local_decoder.last_trace,
+        attribution_output_path=relation_trace_path,
         table_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
         figure_asset_output_dir=doc_dir / "assets" if render_table_crops else None,
         asset_latex_prefix="assets",
@@ -340,6 +345,7 @@ def run_one_document(
         "source_content_json": str(content_json),
         "edge_logits": str(logits_path),
         "predicted_relations": str(predicted_relations_path),
+        "relation_trace_report": str(relation_trace_path),
         "original_pdf": str(original_pdf),
         "generated_tex": str(tex_path),
         "generated_pdf": str(generated_pdf),
@@ -369,6 +375,8 @@ def render_decoded_tree_with_ir_backend(
     table_asset_output_dir: Path | None,
     figure_asset_output_dir: Path | None,
     asset_latex_prefix: str,
+    decoder_trace: dict[str, Any] | None = None,
+    attribution_output_path: Path | None = None,
 ) -> str:
     """Render a TreeDecoder result through the canonical decoupled IR backend."""
 
@@ -393,6 +401,15 @@ def render_decoded_tree_with_ir_backend(
         predicted_relations_path=str(predicted_relations_path) if predicted_relations_path else None,
     )
     tree = inject_full_v7_front_matter(tree, document)
+    if attribution_output_path is not None:
+        write_json(
+            attribution_output_path,
+            build_relation_trace_report(
+                document_id=document.doc_id,
+                decoder_trace=decoder_trace or {},
+                tree=tree,
+            ),
+        )
     from src.generation.ir_renderer import IRLatexRenderConfig
 
     config = IRLatexRenderConfig(
@@ -501,6 +518,13 @@ def render_tree_from_resolved_root(
         ]
         latex = latex_override_for_resolved_node(node, role)
         text = None if latex else node.text
+        attributes = render_attributes_for_resolved_node(node)
+        source_graph_indexes = source_indexes_for_resolved_node(node)
+        if source_graph_indexes:
+            attributes["source_graph_indexes"] = source_graph_indexes
+        if len(node.merged_node_ids or []) > 1:
+            attributes["merged_source_graph_indexes"] = list(node.merged_node_ids)
+            attributes["merge_source"] = str(node.record.get("_merge_source") or "unknown")
         nodes.append(
             RenderTreeNode(
                 render_id=render_id,
@@ -509,7 +533,7 @@ def render_tree_from_resolved_root(
                 text=text,
                 latex=latex,
                 children=children,
-                attributes=render_attributes_for_resolved_node(node),
+                attributes=attributes,
             )
         )
         if parent_role not in {None, RenderRole.ROOT} and role in {
@@ -557,6 +581,131 @@ def v7_source_node_ids_for_graph_record(record: dict[str, Any], *, fallback_posi
     if isinstance(value, str) and value:
         return [value]
     return [stable_node_id(record, fallback_position=fallback_position)]
+
+
+def build_relation_trace_report(
+    *,
+    document_id: str,
+    decoder_trace: dict[str, Any],
+    tree: RenderTreeIR,
+) -> dict[str, Any]:
+    """Join decoder attribution with the concrete RenderTreeIR surface.
+
+    The decoder knows which graph indexes were merged or parented.  The render
+    tree knows which resolved nodes survived as render nodes.  This read-only
+    report answers the main audit question: did accepted relations actually
+    become render-tree structure?
+    """
+
+    render_nodes = {node.render_id: node for node in tree.nodes}
+    render_merged_nodes = []
+    render_parent_sources: dict[str, int] = {}
+    source_index_to_render_ids: dict[int, list[str]] = {}
+    for node in tree.nodes:
+        attrs = node.attributes or {}
+        parent_source = str(attrs.get("parent_source") or ("root" if node.render_id == tree.root_id else "unknown"))
+        render_parent_sources[parent_source] = render_parent_sources.get(parent_source, 0) + 1
+        for raw_index in attrs.get("source_graph_indexes") or []:
+            if isinstance(raw_index, int):
+                source_index_to_render_ids.setdefault(raw_index, []).append(node.render_id)
+        merged_indexes = attrs.get("merged_source_graph_indexes") or []
+        if isinstance(merged_indexes, list) and len(merged_indexes) > 1:
+            render_merged_nodes.append(
+                {
+                    "render_id": node.render_id,
+                    "role": node.role.value if hasattr(node.role, "value") else str(node.role),
+                    "source_graph_indexes": attrs.get("source_graph_indexes") or [],
+                    "merged_source_graph_indexes": merged_indexes,
+                    "source_node_ids": node.source_node_ids,
+                    "merge_source": attrs.get("merge_source"),
+                    "text_preview": str(node.text or "")[:240],
+                }
+            )
+
+    merge_components = list(decoder_trace.get("merge_components") or [])
+    accepted_not_rendered = []
+    rendered_components = []
+    duplicate_rendered_merge_members = []
+    for component in merge_components:
+        members = component.get("member_node_ids") or []
+        if not isinstance(members, list):
+            continue
+        member_set = {int(value) for value in members if isinstance(value, int)}
+        matching_render_ids = []
+        for node in tree.nodes:
+            attrs = node.attributes or {}
+            render_members = attrs.get("merged_source_graph_indexes") or attrs.get("source_graph_indexes") or []
+            if not isinstance(render_members, list):
+                continue
+            render_set = {int(value) for value in render_members if isinstance(value, int)}
+            if member_set and member_set.issubset(render_set):
+                matching_render_ids.append(node.render_id)
+        updated = dict(component)
+        updated["render_tree_node_ids"] = matching_render_ids
+        updated["rendered_once"] = len(matching_render_ids) == 1
+        if matching_render_ids:
+            rendered_components.append(updated)
+        else:
+            accepted_not_rendered.append(updated)
+        member_render_hits = {
+            member: source_index_to_render_ids.get(member, [])
+            for member in sorted(member_set)
+            if source_index_to_render_ids.get(member)
+        }
+        component_render_id_set = set(matching_render_ids)
+        duplicate_member_hits = {
+            member: [render_id for render_id in render_ids if render_id not in component_render_id_set]
+            for member, render_ids in member_render_hits.items()
+            if any(render_id not in component_render_id_set for render_id in render_ids)
+        }
+        if duplicate_member_hits:
+            duplicate_rendered_merge_members.append(
+                {
+                    "component": component,
+                    "component_render_ids": matching_render_ids,
+                    "member_render_hits_outside_component": duplicate_member_hits,
+                }
+            )
+
+    node_parent_map: dict[str, str] = {}
+    for parent in tree.nodes:
+        for child_id in parent.children:
+            node_parent_map[child_id] = parent.render_id
+
+    return {
+        "schema_version": "relation_trace_report_v1",
+        "doc_id": document_id,
+        "predicted_relations_path": tree.predicted_relations_path,
+        "render_tree": {
+            "node_count": len(tree.nodes),
+            "root_id": tree.root_id,
+            "merged_node_count": len(render_merged_nodes),
+            "parent_source_distribution": render_parent_sources,
+            "source_index_to_render_ids": {
+                str(index): render_ids
+                for index, render_ids in sorted(source_index_to_render_ids.items())
+            },
+        },
+        "decoder_trace": decoder_trace,
+        "merge_rendering": {
+            "accepted_merge_component_count": len(merge_components),
+            "render_tree_merged_node_count": len(render_merged_nodes),
+            "rendered_merge_components": rendered_components,
+            "accepted_merges_not_in_render_tree": accepted_not_rendered,
+            "duplicate_rendered_merge_members": duplicate_rendered_merge_members,
+            "render_tree_merged_nodes": render_merged_nodes,
+        },
+        "parent_rendering": {
+            "render_tree_parent_source_distribution": render_parent_sources,
+            "render_tree_parent_map_sample": dict(list(node_parent_map.items())[:200]),
+            "gnn_parent_render_node_count": render_parent_sources.get("gnn_parent", 0),
+            "stack_parent_render_node_count": (
+                render_parent_sources.get("active_heading_stack", 0)
+                + render_parent_sources.get("heading_stack_scope", 0)
+                + render_parent_sources.get("heading_stack_outline", 0)
+            ),
+        },
+    }
 
 
 def inject_full_v7_front_matter(tree: RenderTreeIR, document: DocumentIR) -> RenderTreeIR:
@@ -946,6 +1095,12 @@ def render_attributes_for_resolved_node(node: ResolvedNode) -> dict[str, Any]:
     order_bias = render_order_bias_for_resolved_node(node, role)
     if order_bias is not None:
         attrs["render_order_bias"] = order_bias
+    if node.record.get("_parent_source"):
+        attrs["parent_source"] = str(node.record.get("_parent_source"))
+    if node.record.get("_parent_node_id") is not None:
+        attrs["parent_node_id"] = node.record.get("_parent_node_id")
+    if node.record.get("_parent_edge_score") is not None:
+        attrs["parent_edge_score"] = node.record.get("_parent_edge_score")
     if str(node.record.get("list_type") or "").casefold() in {"ordered", "enumerate", "numbered"}:
         attrs["ordered"] = True
     if node.record.get("_render_as_paragraph_heading"):
