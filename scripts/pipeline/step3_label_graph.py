@@ -28,6 +28,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
     parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.60)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
+    parser.add_argument(
+        "--merge-label-policy",
+        choices=("strict", "skip_over_continuation"),
+        default="strict",
+        help=(
+            "MERGE supervision policy. Use skip_over_continuation only for "
+            "explicit ablation/relabel runs; strict is the historical default."
+        ),
+    )
     parser.add_argument("--abort-on-bad-alignment", action="store_true")
     return parser.parse_args()
 
@@ -42,6 +51,7 @@ def main() -> None:
         max_orphan_ratio=args.max_orphan_ratio,
         max_unmapped_tex_ratio=args.max_unmapped_tex_ratio,
         max_isolated_node_ratio=args.max_isolated_node_ratio,
+        merge_label_policy=args.merge_label_policy,
         abort_on_bad_alignment=args.abort_on_bad_alignment,
         output_mapping_json=args.mapping_output,
     )

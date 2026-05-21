@@ -2001,6 +2001,178 @@ def test_alignment_labeler_blocks_same_tex_merge_across_column_gutter_without_ed
     assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
 
 
+def test_alignment_labeler_strict_policy_keeps_float_skip_continuation_none(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The result keeps the first half and",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "continues after the intervening figure.",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 9,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The result keeps the first half and continues after the intervening figure.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+    )
+    data.edge_attr_schema = {"fields": ["index_delta_bin_far", "source_ends_with_hyphen"]}
+    data.edge_source_types = ["float_skip"]
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(content_json_path=content_path, tex_path=tex_path, graph_path=graph_path).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    assert graph.alignment_schema["merge_label_policy"] == "strict"
+
+
+def test_alignment_labeler_skip_over_policy_labels_float_skip_continuation_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The result keeps the first half and",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "continues after the intervening figure.",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 9,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The result keeps the first half and continues after the intervening figure.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+    )
+    data.edge_attr_schema = {"fields": ["index_delta_bin_far", "source_ends_with_hyphen"]}
+    data.edge_source_types = ["float_skip"]
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(merge_label_policy="skip_over_continuation"),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+    assert graph.alignment_schema["merge_label_policy"] == "skip_over_continuation"
+    assert graph.alignment_schema["label_policy_stats"]["skip_over_continuation_merge"] == 1
+
+
+def test_alignment_labeler_skip_over_policy_still_rejects_sentence_boundary(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction"},
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The first sentence is complete.",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 1,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The next sentence begins after a figure.",
+                        "layout_layer": "main_text_flow",
+                        "layout_band_id": 9,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The first sentence is complete. The next sentence begins after a figure.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+    )
+    data.edge_attr_schema = {"fields": ["index_delta_bin_far", "source_ends_with_hyphen"]}
+    data.edge_source_types = ["float_skip"]
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(merge_label_policy="skip_over_continuation"),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
 def test_alignment_labeler_recovers_hyphenated_visual_merge_across_tex_alignment_boundary(tmp_path):
     if not has_alignment_deps():
         return

@@ -16,6 +16,13 @@ from src.reasoning.latex_flattener import LatexFlattenerConfig, flatten_latex_fi
 from src.reasoning.tex_ast_builder import build_tex_ast_from_file, tex_nodes_by_id
 from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relation
 
+MERGE_LABEL_POLICY_STRICT = "strict"
+MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION = "skip_over_continuation"
+MERGE_LABEL_POLICIES = {
+    MERGE_LABEL_POLICY_STRICT,
+    MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION,
+}
+
 
 @dataclass(frozen=True)
 class LabelGeneratorConfig:
@@ -103,6 +110,7 @@ class AlignmentLabelerConfig:
     tail_absorption_nodes: int = 3
     equation_blind_alignment_window: int = 2
     relation_strategy: str = "visual_first"
+    merge_label_policy: str = MERGE_LABEL_POLICY_STRICT
     visual_heading_font_scale: float = 1.12
     visual_bold_heading_font_scale: float = 1.05
     max_orphan_ratio: float = 0.30
@@ -435,6 +443,11 @@ class AlignmentLabeler:
         self.pdf_view_includes_float = True
         self._edge_attr: Any | None = None
         self._edge_attr_fields: dict[str, int] = {}
+        self._edge_source_types: list[str] = []
+        self.label_policy_stats: Counter[str] = Counter()
+        if self.config.merge_label_policy not in MERGE_LABEL_POLICIES:
+            allowed = ", ".join(sorted(MERGE_LABEL_POLICIES))
+            raise ValueError(f"Unsupported merge_label_policy={self.config.merge_label_policy!r}; expected one of: {allowed}")
 
     def run(self, *, output_graph_path: Path | None = None, overwrite: bool = True) -> Any:
         graph = self.load_graph()
@@ -464,6 +477,8 @@ class AlignmentLabeler:
             "tail_absorption_nodes": self.config.tail_absorption_nodes,
             "equation_blind_alignment_window": self.config.equation_blind_alignment_window,
             "relation_strategy": self.config.relation_strategy,
+            "merge_label_policy": self.config.merge_label_policy,
+            "label_policy_stats": dict(self.label_policy_stats),
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
@@ -827,6 +842,8 @@ class AlignmentLabeler:
         edge_index = graph.edge_index.detach().cpu()
         self._edge_attr = graph.edge_attr.detach().cpu() if hasattr(graph, "edge_attr") and graph.edge_attr is not None else None
         self._edge_attr_fields = edge_attr_fields_from_graph(graph)
+        raw_edge_sources = getattr(graph, "edge_source_types", None)
+        self._edge_source_types = list(raw_edge_sources) if isinstance(raw_edge_sources, list) else []
         for edge_pos in range(edge_index.shape[1]):
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
@@ -852,6 +869,9 @@ class AlignmentLabeler:
         if path_u == path_v:
             if self.is_document_root_scoped_match(source_match) or self.is_document_root_scoped_match(target_match):
                 return int(TexRelationLabel.NONE)
+            if self.is_skip_over_continuation_positive(source_index, target_index, edge_pos=edge_pos):
+                self.label_policy_stats["skip_over_continuation_merge"] += 1
+                return int(TexRelationLabel.MERGE)
             if not self.same_tex_node_are_adjacent_fragments(source_index, target_index, source_match.tex_id):
                 return int(TexRelationLabel.NONE)
             if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
@@ -870,6 +890,58 @@ class AlignmentLabeler:
         ):
             return int(TexRelationLabel.PARENT_CHILD)
         return int(TexRelationLabel.NONE)
+
+    def is_skip_over_continuation_positive(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        edge_pos: int | None = None,
+    ) -> bool:
+        """Optionally label strong skip-over text continuations as MERGE.
+
+        The default strict label policy keeps long-range float/list/formula
+        skip candidates as NONE unless they are local adjacent fragments.  For
+        ablation, ``skip_over_continuation`` promotes only conservative
+        same-TeX text/reference continuations carried by explicit long-sight
+        candidate edges.  This teaches the model that a paragraph can resume
+        after a visual obstacle without weakening the normal inference gates.
+        """
+
+        if self.config.merge_label_policy != MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION:
+            return False
+        if edge_pos is None:
+            return False
+        edge_source = self.edge_source_type(edge_pos)
+        if edge_source not in {"float_skip", "same_column_long_sight"}:
+            return False
+        if not (0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(self.pdf_nodes)):
+            return False
+        if target_index <= source_index:
+            return False
+        source_node = self.pdf_nodes[source_index]
+        target_node = self.pdf_nodes[target_index]
+        if item_is_author_biography_or_backmatter(source_node.item) or item_is_author_biography_or_backmatter(target_node.item):
+            return False
+        if strict_pdf_merge_type(source_node.item) != strict_pdf_merge_type(target_node.item):
+            return False
+        if strict_pdf_merge_type(source_node.item) not in MERGE_COMPATIBLE_PDF_TYPES:
+            return False
+        if relation_layers_are_incompatible(source_node.item, target_node.item):
+            return False
+        source_layer = layout_layer_name(source_node.item)
+        target_layer = layout_layer_name(target_node.item)
+        if source_layer != target_layer:
+            return False
+        if LIST_MARKER_RE.match(target_node.text) or is_run_in_heading_like(target_node):
+            return False
+        if len(source_node.clean) < self.config.min_clean_chars or len(target_node.clean) < self.config.min_clean_chars:
+            return False
+        if ends_with_hyphen(source_node.text):
+            return True
+        if ends_with_terminal_punctuation(source_node.text):
+            return False
+        return True
 
     def infer_visual_relation(
         self,
@@ -1083,6 +1155,11 @@ class AlignmentLabeler:
         if column is None or self._edge_attr is None:
             return 0.0
         return float(self._edge_attr[edge_pos, column].item())
+
+    def edge_source_type(self, edge_pos: int) -> str:
+        if 0 <= edge_pos < len(self._edge_source_types):
+            return str(self._edge_source_types[edge_pos])
+        return ""
 
     def same_reference_scope(self, source_index: int, target_index: int) -> bool:
         return False

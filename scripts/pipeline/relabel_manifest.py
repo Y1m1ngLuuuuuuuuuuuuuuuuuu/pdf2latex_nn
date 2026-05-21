@@ -44,6 +44,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-visual-parent-label-recall", type=float, default=0.98)
     parser.add_argument("--min-section-nodes", type=int, default=1)
     parser.add_argument(
+        "--merge-label-policy",
+        choices=("strict", "skip_over_continuation"),
+        default="strict",
+        help=(
+            "MERGE supervision policy. 'strict' preserves historical labels. "
+            "'skip_over_continuation' additionally marks conservative same-TeX "
+            "float_skip/same_column_long_sight text continuations as MERGE for ablation."
+        ),
+    )
+    parser.add_argument(
         "--allow-bad-alignment",
         action="store_true",
         help="Keep graphs even when the current quality gates fail. Default skips them.",
@@ -86,6 +96,7 @@ def main() -> int:
                 "min_visual_parent_label_recall": args.min_visual_parent_label_recall,
                 "min_section_nodes": args.min_section_nodes,
                 "abort_on_bad_alignment": not args.allow_bad_alignment,
+                "merge_label_policy": args.merge_label_policy,
             },
         }
         for record in input_records
@@ -116,6 +127,7 @@ def main() -> int:
     manifest_payload = {
         "schema_version": "v7_relabel_manifest_v1",
         "source_manifest": str(args.input_manifest),
+        "merge_label_policy": args.merge_label_policy,
         "num_documents": len(successes),
         "num_failed": len(failures),
         "label_totals": aggregate_label_counts(successes, key="label_counts"),
@@ -128,6 +140,7 @@ def main() -> int:
     report = build_delta_report(
         source_manifest=str(args.input_manifest),
         output_manifest=str(args.output_manifest),
+        merge_label_policy=str(args.merge_label_policy),
         successes=successes,
         failures=failures,
         elapsed_seconds=time.time() - start,
@@ -197,6 +210,7 @@ def relabel_one(job: dict[str, Any]) -> dict[str, Any]:
             "alignment_quality": quality,
             "candidate_edge_recall": getattr(graph, "candidate_edge_recall", record.get("candidate_edge_recall", None)),
             "candidate_edge_missing": getattr(graph, "candidate_edge_missing", record.get("candidate_edge_missing", None)),
+            "merge_label_policy": str(job.get("config", {}).get("merge_label_policy", "strict")),
         }
         return {"ok": True, "record": out_record}
     except AlignmentQualityError as exc:
@@ -286,6 +300,7 @@ def build_delta_report(
     *,
     source_manifest: str,
     output_manifest: str,
+    merge_label_policy: str,
     successes: list[dict[str, Any]],
     failures: list[dict[str, Any]],
     elapsed_seconds: float,
@@ -305,6 +320,7 @@ def build_delta_report(
         "schema_version": "v7_relabel_delta_report_v1",
         "source_manifest": source_manifest,
         "output_manifest": output_manifest,
+        "merge_label_policy": merge_label_policy,
         "num_success": len(successes),
         "num_failed": len(failures),
         "elapsed_seconds": elapsed_seconds,

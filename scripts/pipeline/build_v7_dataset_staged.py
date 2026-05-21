@@ -186,6 +186,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-orphan-ratio", type=float, default=0.30)
     parser.add_argument("--max-unmapped-tex-ratio", type=float, default=0.60)
     parser.add_argument("--max-isolated-node-ratio", type=float, default=0.85)
+    parser.add_argument(
+        "--merge-label-policy",
+        choices=("strict", "skip_over_continuation"),
+        default="strict",
+        help=(
+            "MERGE supervision policy for generated labels. Keep strict for "
+            "mainline data; use skip_over_continuation only in explicitly named ablation runs."
+        ),
+    )
     parser.add_argument("--min-non-none-edges", type=int, default=1)
     parser.add_argument("--min-candidate-recall", type=float, default=1.0)
     parser.add_argument("--mineru-command", default=default_mineru_command())
@@ -308,6 +317,7 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         max_orphan_ratio=float(args.max_orphan_ratio),
         max_unmapped_tex_ratio=float(args.max_unmapped_tex_ratio),
         max_isolated_node_ratio=float(args.max_isolated_node_ratio),
+        merge_label_policy=str(args.merge_label_policy),
         min_non_none_edges=int(args.min_non_none_edges),
         min_candidate_recall=float(args.min_candidate_recall),
         compiled_accepted_manifests=tuple(path.resolve() for path in args.compiled_accepted_manifest),
@@ -447,6 +457,7 @@ def preflight_tex_worker(candidate: CandidateSample, config: MiniDatasetConfig) 
                 max_orphan_ratio=config.max_orphan_ratio,
                 max_unmapped_tex_ratio=config.max_unmapped_tex_ratio,
                 max_isolated_node_ratio=config.max_isolated_node_ratio,
+                merge_label_policy=config.merge_label_policy,
                 min_section_nodes=1,
                 abort_on_bad_alignment=False,
             ),

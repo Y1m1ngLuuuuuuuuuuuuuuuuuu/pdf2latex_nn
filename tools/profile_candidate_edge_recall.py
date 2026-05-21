@@ -53,6 +53,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tex", type=Path, required=True, help="Flattenable TeX entrypoint, usually main.tex")
     parser.add_argument("--graph", type=Path, required=True, help="Graph .pt built from the same content JSON")
     parser.add_argument("--similarity-threshold", type=float, default=65.0)
+    parser.add_argument(
+        "--merge-label-policy",
+        choices=("strict", "skip_over_continuation"),
+        default="strict",
+        help="MERGE supervision policy used when building oracle positive edges.",
+    )
     parser.add_argument("--max-examples", type=int, default=30)
     parser.add_argument("--output-json", type=Path, help="Optional JSON report path")
     parser.add_argument(
@@ -66,7 +72,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    graph, labeler = prepare_labeler(args.content_json, args.tex, args.graph, args.similarity_threshold)
+    graph, labeler = prepare_labeler(
+        args.content_json,
+        args.tex,
+        args.graph,
+        args.similarity_threshold,
+        merge_label_policy=args.merge_label_policy,
+    )
     report = profile_candidate_recall(graph, labeler, max_examples=args.max_examples)
     print_report(report)
     if args.output_json is not None:
@@ -84,9 +96,12 @@ def prepare_labeler(
     tex_path: Path,
     graph_path: Path,
     similarity_threshold: float,
+    *,
+    merge_label_policy: str = "strict",
 ) -> tuple[Any, AlignmentLabeler]:
     config = AlignmentLabelerConfig(
         similarity_threshold=similarity_threshold,
+        merge_label_policy=merge_label_policy,
         abort_on_bad_alignment=False,
     )
     labeler = AlignmentLabeler(
