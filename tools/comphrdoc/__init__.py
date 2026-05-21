@@ -1,0 +1,2 @@
+"""CompHRDoc benchmark bridge utilities."""
+

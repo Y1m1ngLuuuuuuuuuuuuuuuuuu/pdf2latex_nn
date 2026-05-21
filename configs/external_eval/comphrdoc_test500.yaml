@@ -1,0 +1,31 @@
+schema_version: comphrdoc_test500_eval_v1
+
+remote_project_root: /root/autodl-tmp/pdf2latex_nn
+
+paths:
+  comphrdoc_repo: /root/autodl-tmp/pdf2latex_nn/third_party/CompHRDoc
+  gold_test_eval_dir: /root/autodl-tmp/pdf2latex_nn/third_party/comphrdoc_dataset/datasets/Comp-HRDoc/HRDH_MSRA_POD_TEST/test_eval
+  hrdh_images_dir: /root/autodl-tmp/pdf2latex_nn/third_party/hrdoc_dataset/HRDH_test500/HRDH/images
+  official_images_symlink: /root/autodl-tmp/pdf2latex_nn/third_party/comphrdoc_dataset/datasets/Comp-HRDoc/HRDH_MSRA_POD_TEST/Images
+  hrdh_test_json_dir: /root/autodl-tmp/pdf2latex_nn/third_party/hrdoc_dataset/HRDH_test500/HRDH/test
+
+outputs:
+  manifest: /root/autodl-tmp/pdf2latex_nn/data/00_manifests/comphrdoc_test500_manifest.json
+  pdf_dir: /root/autodl-tmp/pdf2latex_nn/data/external/comphrdoc_test500/pdfs
+  pdf_sidecar_dir: /root/autodl-tmp/pdf2latex_nn/data/external/comphrdoc_test500/pdf_sidecars
+  ours_ir_root: /root/autodl-tmp/pdf2latex_nn/data/external/comphrdoc_test500/ours_ir
+  prediction_root: /root/autodl-tmp/pdf2latex_nn/data/external/comphrdoc_test500/predictions
+  report_root: /root/autodl-tmp/pdf2latex_nn/data/09_eval_reports/comphrdoc_test500
+
+model:
+  checkpoint: /root/autodl-tmp/pdf2latex_nn/data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926/M06_y_network_plus_merge_gate/seed_7/best_model.pth
+  tau_merge: 0.37
+  tau_parent: 0.45
+  schema:
+    node_dim: 832
+    edge_attr_dim: 26
+
+smoke:
+  oracle_limit: 20
+  ours_limit: 20
+  extended_limit: 50
