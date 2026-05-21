@@ -1,0 +1,17 @@
+Convert the entire provided scientific PDF into LaTeX.
+
+Goal:
+Produce a layout-aware, block-structure-preserving LaTeX reconstruction.
+
+Requirements:
+1. Output LaTeX body code unless explicitly requested otherwise.
+2. Do not include package imports, preamble, \begin{document}, or \end{document}.
+3. Preserve document title, authors, abstract, block-level headings, paragraphs, lists, equations, figures, tables, captions, citations, cross-references, references, and appendix content.
+4. Use \section, \subsection, and \subsubsection for block-level headings.
+5. Treat run-in bold prefixes as paragraph text unless the document clearly uses them as block-level headings.
+6. Preserve figures/tables with captions and labels. Use placeholders if the visual asset cannot be reproduced.
+7. Preserve reference entries and citation markers as consistently as possible.
+8. Do not include page headers, footers, page numbers, watermarks, or decorative elements.
+9. Do not invent content not visible in the PDF.
+10. Keep uncertain content conservative.
+11. Output only LaTeX, no explanation.

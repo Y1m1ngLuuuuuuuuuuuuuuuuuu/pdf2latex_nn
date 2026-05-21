@@ -1,0 +1,36 @@
+runs:
+  - name: openai_frontier_w6
+    provider: openai
+    model: ${OPENAI_MODEL}
+    input_mode: image_window
+    window_size: 6
+    overlap: 1
+    prompt_template: configs/prompts/multipage_to_latex_structure.txt
+
+  - name: gemini_full_pdf
+    provider: gemini
+    model: ${GEMINI_MODEL}
+    input_mode: full_pdf
+    prompt_template: configs/prompts/full_document_to_latex_structure.txt
+
+  - name: anthropic_full_pdf
+    provider: anthropic
+    model: ${ANTHROPIC_MODEL}
+    input_mode: full_pdf
+    prompt_template: configs/prompts/full_document_to_latex_structure.txt
+
+  - name: qwen3vl_w6
+    provider: dashscope
+    model: ${DASHSCOPE_MODEL}
+    input_mode: image_window
+    window_size: 6
+    overlap: 1
+    prompt_template: configs/prompts/multipage_to_latex_structure.txt
+
+  - name: mock_w6
+    provider: mock
+    model: mock
+    input_mode: image_window
+    window_size: 6
+    overlap: 1
+    prompt_template: configs/prompts/multipage_to_latex_structure.txt

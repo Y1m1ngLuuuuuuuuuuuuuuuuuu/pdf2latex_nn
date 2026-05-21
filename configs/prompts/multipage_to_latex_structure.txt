@@ -1,0 +1,39 @@
+You are reconstructing a scientific PDF into LaTeX from a consecutive multi-page window.
+
+Input:
+- A consecutive window of pages from the same scientific paper.
+- Pages are provided in document order.
+- Some content may begin before this window or continue after this window.
+
+Task:
+Reconstruct the visible content in this window as LaTeX while preserving document-level structure.
+
+Requirements:
+1. Output only LaTeX body code. Do not include package imports, preamble, \begin{document}, or \end{document}.
+2. Preserve reading order across all pages in the window.
+3. Preserve block-level section hierarchy using \section, \subsection, and \subsubsection.
+4. Preserve visible paragraphs without inventing missing text.
+5. If a paragraph begins before the first page or continues after the last page, keep only the visible part and mark it with comments:
+   % CONTINUES_FROM_PREVIOUS_WINDOW
+   % CONTINUES_TO_NEXT_WINDOW
+6. Preserve equations using inline math or display math environments.
+7. Preserve figures and tables as LaTeX environments when possible. If visual assets cannot be reproduced, use placeholder filenames.
+8. Use consistent labels:
+   fig:figure_N
+   tab:table_N
+   eq:equation_N
+9. Preserve captions and attach them to the correct figure/table/algorithm when visible.
+10. Preserve citations as \cite{...} when possible. Do not invent unsupported bibliography keys.
+11. Preserve reference entries if visible.
+12. Do not include headers, footers, page numbers, watermarks, or decorative elements.
+13. Do not summarize. Do not explain. Output only LaTeX.
+
+At the end, include a compact state block using LaTeX comments:
+% STATE_BEGIN
+% active_heading: ...
+% seen_figures: ...
+% seen_tables: ...
+% seen_equations: ...
+% seen_citations: ...
+% open_paragraph_tail: ...
+% STATE_END
