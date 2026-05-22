@@ -45,12 +45,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-section-nodes", type=int, default=1)
     parser.add_argument(
         "--merge-label-policy",
-        choices=("strict", "skip_over_continuation"),
+        choices=(
+            "strict",
+            "skip_over_continuation",
+            "tex_node_type_gated",
+            "merge_v2_pdf_first",
+            "merge_v2b_pdf_first",
+            "merge_v2c_precision_first",
+        ),
         default="strict",
         help=(
             "MERGE supervision policy. 'strict' preserves historical labels. "
             "'skip_over_continuation' additionally marks conservative same-TeX "
-            "float_skip/same_column_long_sight text continuations as MERGE for ablation."
+            "float_skip/same_column_long_sight text continuations as MERGE for ablation. "
+            "'tex_node_type_gated' preserves strict geometry but only allows MERGE "
+            "labels from body/list/reference TeX nodes and reports blocked suspects. "
+            "'merge_v2_pdf_first' additionally uses channel-aware PDF-first endpoints, "
+            "promotes safe skip-over body/list/reference continuations, and keeps "
+            "formula/float/caption weak relations out of MERGE positives. "
+            "'merge_v2b_pdf_first' further relaxes safe body/list/reference same-TeX "
+            "continuations blocked by local source-span, formula/float/list interruption, "
+            "or relaxable geometry gates for audit-only comparison. "
+            "'merge_v2c_precision_first' is a narrower precision-first policy that only "
+            "keeps forward hyphen/lowercase/connector continuations without math/list/"
+            "front-matter/code signals."
         ),
     )
     parser.add_argument(
@@ -62,6 +80,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--profile-candidate-recall",
         action="store_true",
         help="Also run the oracle candidate-edge recall probe for each relabeled document.",
+    )
+    parser.add_argument(
+        "--audit-supervision-channels",
+        action="store_true",
+        help=(
+            "Emit audit-only channel/family/strength statistics for relation supervision. "
+            "This does not change graph.y labels or training data semantics."
+        ),
+    )
+    parser.add_argument(
+        "--emit-supervision-weights",
+        action="store_true",
+        help=(
+            "Write edge_train_mask and edge_loss_weight tensors into relabeled graphs. "
+            "This keeps the 3-class y labels but lets diagnostic training mask/downweight "
+            "weak/noisy MERGE supervision."
+        ),
     )
     return parser
 
@@ -97,6 +132,8 @@ def main() -> int:
                 "min_section_nodes": args.min_section_nodes,
                 "abort_on_bad_alignment": not args.allow_bad_alignment,
                 "merge_label_policy": args.merge_label_policy,
+                "audit_supervision_channels": args.audit_supervision_channels,
+                "emit_supervision_weights": args.emit_supervision_weights,
             },
         }
         for record in input_records
@@ -196,6 +233,7 @@ def relabel_one(job: dict[str, Any]) -> dict[str, Any]:
         label_counts = graph_label_counts(graph.y)
         old_label_counts = normalize_manifest_label_counts(record.get("label_counts", {}))
         quality = getattr(graph, "alignment_quality", {}) if hasattr(graph, "alignment_quality") else {}
+        alignment_schema = getattr(graph, "alignment_schema", {}) if hasattr(graph, "alignment_schema") else {}
 
         out_record = {
             **record,
@@ -211,6 +249,10 @@ def relabel_one(job: dict[str, Any]) -> dict[str, Any]:
             "candidate_edge_recall": getattr(graph, "candidate_edge_recall", record.get("candidate_edge_recall", None)),
             "candidate_edge_missing": getattr(graph, "candidate_edge_missing", record.get("candidate_edge_missing", None)),
             "merge_label_policy": str(job.get("config", {}).get("merge_label_policy", "strict")),
+            "merge_subtype_stats": dict(alignment_schema.get("merge_subtype_stats", {})),
+            "suspect_merge_stats": dict(alignment_schema.get("suspect_merge_stats", {})),
+            "channel_supervision_audit": dict(alignment_schema.get("channel_supervision_audit", {})),
+            "edge_supervision_weights": edge_supervision_weight_summary(graph),
         }
         return {"ok": True, "record": out_record}
     except AlignmentQualityError as exc:
@@ -273,6 +315,30 @@ def graph_label_counts(labels: Any) -> dict[str, int]:
     return {LABEL_NAMES[idx]: int(counts[idx]) for idx in range(3)}
 
 
+def edge_supervision_weight_summary(graph: Any) -> dict[str, Any]:
+    import torch
+
+    if not hasattr(graph, "edge_train_mask") or not hasattr(graph, "edge_loss_weight"):
+        return {"enabled": False}
+    mask = graph.edge_train_mask.detach().cpu().to(dtype=torch.bool)
+    weight = graph.edge_loss_weight.detach().cpu().to(dtype=torch.float32)
+    if int(mask.numel()) == 0:
+        return {"enabled": True, "edge_count": 0, "train_edges": 0, "masked_edges": 0}
+    rounded_weight_counts: dict[str, int] = {}
+    for value in weight.tolist():
+        key = f"{float(value):.2f}"
+        rounded_weight_counts[key] = rounded_weight_counts.get(key, 0) + 1
+    return {
+        "enabled": True,
+        "edge_count": int(mask.numel()),
+        "train_edges": int(mask.sum().item()),
+        "masked_edges": int((~mask).sum().item()),
+        "mean_loss_weight": float(weight.mean().item()),
+        "nonzero_weight_edges": int((weight > 0).sum().item()),
+        "loss_weight_counts": dict(sorted(rounded_weight_counts.items())),
+    }
+
+
 def normalize_manifest_label_counts(value: Any) -> dict[str, int]:
     result = {name: 0 for name in LABEL_NAMES.values()}
     if not isinstance(value, dict):
@@ -294,6 +360,17 @@ def aggregate_label_counts(records: list[dict[str, Any]], *, key: str) -> dict[s
         for name, count in counts.items():
             totals[name] += int(count)
     return totals
+
+
+def aggregate_counter_dict(records: list[dict[str, Any]], *, key: str) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for record in records:
+        value = record.get(key, {})
+        if not isinstance(value, dict):
+            continue
+        for name, count in value.items():
+            totals[str(name)] = totals.get(str(name), 0) + int(count)
+    return dict(sorted(totals.items()))
 
 
 def build_delta_report(
@@ -327,6 +404,10 @@ def build_delta_report(
         "old_label_totals": old_totals,
         "new_label_totals": new_totals,
         "delta": deltas,
+        "merge_subtype_totals": aggregate_counter_dict(successes, key="merge_subtype_stats"),
+        "suspect_merge_totals": aggregate_counter_dict(successes, key="suspect_merge_stats"),
+        "channel_supervision_audit_totals": aggregate_channel_supervision_audit(successes),
+        "edge_supervision_weight_totals": aggregate_edge_supervision_weights(successes),
         "failures": failures[:200],
     }
 
@@ -365,6 +446,57 @@ def safe_ratio(numerator: int | float, denominator: int | float) -> float:
     if denominator == 0:
         return 0.0
     return float(numerator) / denominator
+
+
+def aggregate_channel_supervision_audit(records: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    aggregate_keys = (
+        "node_alignment_channel_stats",
+        "node_alignment_strength_stats",
+        "edge_relation_family_stats",
+        "edge_label_strength_stats",
+        "edge_proposed_train_mask_stats",
+        "edge_proposed_loss_weight_stats",
+        "weak_same_tex_not_merged_reason_stats",
+        "weak_same_tex_not_merged_reason_channel_stats",
+        "missing_same_tex_candidate_edge_stats",
+        "missing_same_tex_candidate_edge_channel_stats",
+    )
+    totals: dict[str, dict[str, int]] = {key: {} for key in aggregate_keys}
+    for record in records:
+        audit = record.get("channel_supervision_audit", {})
+        if not isinstance(audit, dict):
+            continue
+        for key in aggregate_keys:
+            values = audit.get(key, {})
+            if not isinstance(values, dict):
+                continue
+            bucket = totals[key]
+            for name, count in values.items():
+                bucket[str(name)] = bucket.get(str(name), 0) + int(count)
+    return {key: dict(sorted(value.items())) for key, value in totals.items()}
+
+
+def aggregate_edge_supervision_weights(records: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "enabled_docs": 0,
+        "edge_count": 0,
+        "train_edges": 0,
+        "masked_edges": 0,
+        "nonzero_weight_edges": 0,
+        "loss_weight_counts": {},
+    }
+    loss_weight_counts: dict[str, int] = {}
+    for record in records:
+        summary = record.get("edge_supervision_weights", {})
+        if not isinstance(summary, dict) or not summary.get("enabled"):
+            continue
+        totals["enabled_docs"] += 1
+        for key in ("edge_count", "train_edges", "masked_edges", "nonzero_weight_edges"):
+            totals[key] += int(summary.get(key, 0))
+        for weight, count in dict(summary.get("loss_weight_counts", {})).items():
+            loss_weight_counts[str(weight)] = loss_weight_counts.get(str(weight), 0) + int(count)
+    totals["loss_weight_counts"] = dict(sorted(loss_weight_counts.items()))
+    return totals
 
 
 def safe_filename(value: str) -> str:

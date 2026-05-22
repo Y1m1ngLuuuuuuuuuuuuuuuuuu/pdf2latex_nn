@@ -18,9 +18,17 @@ from src.reasoning.tex_relation_labeler import TexRelationLabel, label_tex_relat
 
 MERGE_LABEL_POLICY_STRICT = "strict"
 MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION = "skip_over_continuation"
+MERGE_LABEL_POLICY_TEX_NODE_TYPE_GATED = "tex_node_type_gated"
+MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST = "merge_v2_pdf_first"
+MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST = "merge_v2b_pdf_first"
+MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST = "merge_v2c_precision_first"
 MERGE_LABEL_POLICIES = {
     MERGE_LABEL_POLICY_STRICT,
     MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION,
+    MERGE_LABEL_POLICY_TEX_NODE_TYPE_GATED,
+    MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST,
+    MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+    MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
 }
 
 
@@ -127,6 +135,8 @@ class AlignmentLabelerConfig:
     caption_fallback_threshold: float = 80.0
     global_text_fallback_threshold: float = 92.0
     global_text_fallback_min_chars: int = 18
+    audit_supervision_channels: bool = False
+    emit_supervision_weights: bool = False
 
 
 SECTION_LEVELS = {
@@ -182,6 +192,11 @@ FLOAT_TEX_NODE_TYPES = {
     STANDARD_TABLE_CAPTION_NODE,
 }
 WEAK_TEX_NODE_TYPES = FLOAT_TEX_NODE_TYPES | {STANDARD_REFERENCE_NODE}
+MERGEABLE_TEX_NODE_TYPES = {
+    STANDARD_PARAGRAPH_NODE,
+    STANDARD_LIST_ITEM_NODE,
+    STANDARD_REFERENCE_NODE,
+}
 POISON_TEX_ENV_NAMES = {
     "tikzpicture",
     "pgfpicture",
@@ -396,6 +411,7 @@ CAPTION_PDF_TYPES = {
     "table_caption",
     "algorithm_caption",
 }
+MERGE_V2_POSITIVE_CHANNELS = {"BODY_TEXT", "LIST_ITEM", "REFERENCE_ITEM"}
 NON_HEADING_PDF_TYPES = {
     "equation",
     "equation_interline",
@@ -445,6 +461,26 @@ class AlignmentLabeler:
         self._edge_attr_fields: dict[str, int] = {}
         self._edge_source_types: list[str] = []
         self.label_policy_stats: Counter[str] = Counter()
+        self.merge_subtype_stats: Counter[str] = Counter()
+        self.suspect_merge_stats: Counter[str] = Counter()
+        self.suspect_merge_examples: list[dict[str, Any]] = []
+        self.node_alignment_channel_stats: Counter[str] = Counter()
+        self.node_alignment_strength_stats: Counter[str] = Counter()
+        self.node_alignment_records: list[dict[str, Any]] = []
+        self._node_alignment_records_by_index: dict[int, dict[str, Any]] = {}
+        self.edge_relation_family_stats: Counter[str] = Counter()
+        self.edge_label_strength_stats: Counter[str] = Counter()
+        self.edge_proposed_train_mask_stats: Counter[str] = Counter()
+        self.edge_proposed_loss_weight_stats: Counter[str] = Counter()
+        self.edge_train_mask_values: list[bool] = []
+        self.edge_loss_weight_values: list[float] = []
+        self.edge_supervision_examples: list[dict[str, Any]] = []
+        self.weak_same_tex_not_merged_reason_stats: Counter[str] = Counter()
+        self.weak_same_tex_not_merged_reason_channel_stats: Counter[str] = Counter()
+        self.weak_same_tex_not_merged_examples: list[dict[str, Any]] = []
+        self.missing_same_tex_candidate_edge_stats: Counter[str] = Counter()
+        self.missing_same_tex_candidate_edge_channel_stats: Counter[str] = Counter()
+        self.missing_same_tex_candidate_edge_examples: list[dict[str, Any]] = []
         if self.config.merge_label_policy not in MERGE_LABEL_POLICIES:
             allowed = ", ".join(sorted(MERGE_LABEL_POLICIES))
             raise ValueError(f"Unsupported merge_label_policy={self.config.merge_label_policy!r}; expected one of: {allowed}")
@@ -462,9 +498,26 @@ class AlignmentLabeler:
         self.tex_nodes = {node.tex_id: node for node in self.parse_tex_nodes()}
         self.matches = self.align_pdf_to_tex()
         self.visual_hierarchy = build_visual_hierarchy(self.pdf_nodes, config=self.config)
+        if self.config.audit_supervision_channels or self.config.emit_supervision_weights:
+            self.build_node_alignment_audit()
         labels = self.build_edge_labels(graph)
         graph.y = labels
         graph.edge_label = labels
+        if self.config.emit_supervision_weights:
+            import torch
+
+            if len(self.edge_train_mask_values) != int(labels.shape[0]):
+                raise ValueError(
+                    "edge_train_mask length mismatch: "
+                    f"{len(self.edge_train_mask_values)} != {int(labels.shape[0])}"
+                )
+            if len(self.edge_loss_weight_values) != int(labels.shape[0]):
+                raise ValueError(
+                    "edge_loss_weight length mismatch: "
+                    f"{len(self.edge_loss_weight_values)} != {int(labels.shape[0])}"
+                )
+            graph.edge_train_mask = torch.tensor(self.edge_train_mask_values, dtype=torch.bool)
+            graph.edge_loss_weight = torch.tensor(self.edge_loss_weight_values, dtype=torch.float32)
         graph.pdf_to_tex = [match.tex_id for match in self.matches]
         graph.pdf_to_tex_scores = [match.score for match in self.matches]
         graph.label_counts = label_counts(labels)
@@ -479,11 +532,23 @@ class AlignmentLabeler:
             "relation_strategy": self.config.relation_strategy,
             "merge_label_policy": self.config.merge_label_policy,
             "label_policy_stats": dict(self.label_policy_stats),
+            "merge_subtype_stats": dict(self.merge_subtype_stats),
+            "suspect_merge_stats": dict(self.suspect_merge_stats),
+            "suspect_merge_examples": self.suspect_merge_examples[:200],
             "content_json_path": str(self.content_json_path),
             "tex_path": str(self.tex_path),
             "flattener": self.flattener_summary,
             "gnn_view": self.gnn_view_summary,
         }
+        if self.config.emit_supervision_weights:
+            graph.alignment_schema["edge_supervision_weights"] = {
+                "schema_version": "edge_supervision_weights_v1",
+                "policy": "merge_precision_weighting_v1",
+                "edge_train_mask_counts": dict(self.edge_proposed_train_mask_stats),
+                "edge_loss_weight_stats": dict(self.edge_proposed_loss_weight_stats),
+            }
+        if self.config.audit_supervision_channels:
+            graph.alignment_schema["channel_supervision_audit"] = self.channel_supervision_audit_payload()
         self.assert_alignment_quality(graph=graph, labels=labels)
         graph.alignment_quality = self.alignment_quality
         if self.config.output_mapping_json is not None:
@@ -844,10 +909,17 @@ class AlignmentLabeler:
         self._edge_attr_fields = edge_attr_fields_from_graph(graph)
         raw_edge_sources = getattr(graph, "edge_source_types", None)
         self._edge_source_types = list(raw_edge_sources) if isinstance(raw_edge_sources, list) else []
+        self.edge_train_mask_values = []
+        self.edge_loss_weight_values = []
         for edge_pos in range(edge_index.shape[1]):
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
-            labels.append(self.infer_relation(source, target, edge_pos=edge_pos))
+            label = self.infer_relation(source, target, edge_pos=edge_pos)
+            labels.append(label)
+            if self.config.audit_supervision_channels or self.config.emit_supervision_weights:
+                self.record_edge_supervision_audit(source, target, label=label, edge_pos=edge_pos)
+        if self.config.audit_supervision_channels or self.config.emit_supervision_weights:
+            self.record_missing_same_tex_candidate_edges(edge_index)
         return torch.tensor(labels, dtype=torch.long)
 
     def infer_relation(self, source_index: int, target_index: int, *, edge_pos: int | None = None) -> int:
@@ -867,18 +939,57 @@ class AlignmentLabeler:
         path_u = self.tex_nodes[source_match.tex_id].path_ids
         path_v = self.tex_nodes[target_match.tex_id].path_ids
         if path_u == path_v:
+            tex_node = self.tex_nodes.get(source_match.tex_id)
+            if self.config.merge_label_policy in {
+                MERGE_LABEL_POLICY_TEX_NODE_TYPE_GATED,
+                MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST,
+                MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+                MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
+            } and not tex_node_can_emit_merge(tex_node):
+                self.record_suspect_merge(
+                    source_index,
+                    target_index,
+                    tex_node,
+                    reason=f"disallowed_tex_node_type:{tex_node_type_name(tex_node)}",
+                    edge_pos=edge_pos,
+                )
+                return int(TexRelationLabel.NONE)
             if self.is_document_root_scoped_match(source_match) or self.is_document_root_scoped_match(target_match):
                 return int(TexRelationLabel.NONE)
             if self.is_skip_over_continuation_positive(source_index, target_index, edge_pos=edge_pos):
                 self.label_policy_stats["skip_over_continuation_merge"] += 1
+                self.record_merge_subtype(source_index, target_index, tex_node, source="skip_over_continuation")
                 return int(TexRelationLabel.MERGE)
             if not self.same_tex_node_are_adjacent_fragments(source_index, target_index, source_match.tex_id):
+                reason = self.same_tex_not_merged_reason(source_index, target_index, edge_pos=edge_pos)
+                if self.is_merge_v2b_relaxed_same_tex_continuation(
+                    source_index,
+                    target_index,
+                    tex_id=source_match.tex_id,
+                    edge_pos=edge_pos,
+                    reason=reason,
+                ):
+                    self.label_policy_stats[f"merge_v2b_relaxed_same_tex_merge:{reason}"] += 1
+                    self.record_merge_subtype(source_index, target_index, tex_node, source="merge_v2b_relaxed")
+                    return int(TexRelationLabel.MERGE)
                 return int(TexRelationLabel.NONE)
             if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
                 return int(TexRelationLabel.NONE)
             if self.same_tex_node_merge_hits_visual_boundary(source_index, target_index, edge_pos=edge_pos):
+                reason = self.same_tex_not_merged_reason(source_index, target_index, edge_pos=edge_pos)
+                if self.is_merge_v2b_relaxed_same_tex_continuation(
+                    source_index,
+                    target_index,
+                    tex_id=source_match.tex_id,
+                    edge_pos=edge_pos,
+                    reason=reason,
+                ):
+                    self.label_policy_stats[f"merge_v2b_relaxed_same_tex_merge:{reason}"] += 1
+                    self.record_merge_subtype(source_index, target_index, tex_node, source="merge_v2b_relaxed")
+                    return int(TexRelationLabel.MERGE)
                 return int(TexRelationLabel.NONE)
-            if same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
+            if self.same_tex_node_can_emit_merge(source_index, target_index):
+                self.record_merge_subtype(source_index, target_index, tex_node, source="same_tex_node")
                 return int(TexRelationLabel.MERGE)
             return int(TexRelationLabel.NONE)
         if self.config.relation_strategy == "visual_only":
@@ -890,6 +1001,566 @@ class AlignmentLabeler:
         ):
             return int(TexRelationLabel.PARENT_CHILD)
         return int(TexRelationLabel.NONE)
+
+    def record_merge_subtype(
+        self,
+        source_index: int,
+        target_index: int,
+        tex_node: TexAlignmentNode | None,
+        *,
+        source: str,
+    ) -> None:
+        subtype = classify_merge_subtype(
+            self.pdf_nodes[source_index],
+            self.pdf_nodes[target_index],
+            tex_node,
+        )
+        self.merge_subtype_stats[subtype] += 1
+        self.label_policy_stats[f"merge_subtype:{subtype}"] += 1
+        self.label_policy_stats[f"merge_source:{source}"] += 1
+
+    def record_suspect_merge(
+        self,
+        source_index: int,
+        target_index: int,
+        tex_node: TexAlignmentNode | None,
+        *,
+        reason: str,
+        edge_pos: int | None = None,
+    ) -> None:
+        self.suspect_merge_stats[reason] += 1
+        self.label_policy_stats[f"suspect_merge:{reason}"] += 1
+        if len(self.suspect_merge_examples) >= 200:
+            return
+        self.suspect_merge_examples.append(
+            {
+                "source_index": int(source_index),
+                "target_index": int(target_index),
+                "edge_pos": edge_pos,
+                "reason": reason,
+                "tex_id": tex_node.tex_id if tex_node is not None else None,
+                "tex_node_type": tex_node_type_name(tex_node),
+                "tex_text_preview": text_preview(tex_node.text if tex_node is not None else ""),
+                "source_text_preview": text_preview(self.pdf_nodes[source_index].text),
+                "target_text_preview": text_preview(self.pdf_nodes[target_index].text),
+            }
+        )
+
+    def same_tex_node_can_emit_merge(self, source_index: int, target_index: int) -> bool:
+        if self.config.merge_label_policy in {
+            MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
+        }:
+            source_node = self.pdf_nodes[source_index]
+            target_node = self.pdf_nodes[target_index]
+            source_channel = self.node_alignment_channel(source_index)
+            target_channel = self.node_alignment_channel(target_index)
+            if not same_tex_node_can_merge_v2_pdf_first(
+                source_node,
+                target_node,
+                source_channel=source_channel,
+                target_channel=target_channel,
+            ):
+                return False
+            if self.config.merge_label_policy == MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST:
+                return merge_v2c_precision_continuation_is_safe(
+                    source_node,
+                    target_node,
+                    source_channel=source_channel,
+                    target_channel=target_channel,
+                )
+            return True
+        return same_tex_node_can_merge(self.pdf_nodes[source_index], self.pdf_nodes[target_index])
+
+    def is_merge_v2b_relaxed_same_tex_continuation(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        tex_id: str | None,
+        edge_pos: int | None,
+        reason: str,
+    ) -> bool:
+        """Promote only safe PDF-first same-TeX continuations for MERGE v2b.
+
+        v2b intentionally keeps formula/float/caption endpoint relations masked,
+        but allows body/list/reference text to resume across a local visual
+        interruption or a conservative long-sight edge when the text itself still
+        looks like one continuing block.
+        """
+
+        if self.config.merge_label_policy not in {
+            MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
+        }:
+            return False
+        if not tex_id:
+            return False
+        if not (0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(self.pdf_nodes)):
+            return False
+        if target_index <= source_index:
+            return False
+        source_channel = self.node_alignment_channel(source_index)
+        target_channel = self.node_alignment_channel(target_index)
+        if source_channel not in MERGE_V2_POSITIVE_CHANNELS or target_channel not in MERGE_V2_POSITIVE_CHANNELS:
+            return False
+        if source_channel != target_channel:
+            return False
+        allowed_reasons = {
+            "SOURCE_SPAN_NOT_ADJACENT",
+            "FORMULA_INTERRUPTED",
+            "FLOAT_INTERRUPTED",
+            "LIST_INTERRUPTED",
+            "GEOMETRY_GATE",
+        }
+        if reason not in allowed_reasons:
+            return False
+        source_node = self.pdf_nodes[source_index]
+        target_node = self.pdf_nodes[target_index]
+        if not same_tex_node_can_merge_v2_pdf_first(
+            source_node,
+            target_node,
+            source_channel=source_channel,
+            target_channel=target_channel,
+        ):
+            return False
+        if self.config.merge_label_policy == MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST and not merge_v2c_precision_continuation_is_safe(
+            source_node,
+            target_node,
+            source_channel=source_channel,
+            target_channel=target_channel,
+        ):
+            return False
+        if self.same_tex_node_merge_crosses_section_boundary(source_index, target_index):
+            return False
+        if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
+            return False
+        if relation_layers_are_incompatible(source_node.item, target_node.item):
+            return False
+        if not same_layout_scope_can_merge(source_node.item, target_node.item):
+            return False
+        source_hyphen = ends_with_hyphen(source_node.text)
+        if not source_hyphen and ends_with_terminal_punctuation(source_node.text):
+            return False
+        if not source_hyphen and starts_with_uppercase_text(target_node.text):
+            return False
+        if LIST_MARKER_RE.match(target_node.text) or is_run_in_heading_like(target_node):
+            return False
+        if len(source_node.clean) < self.config.min_clean_chars or len(target_node.clean) < self.config.min_clean_chars:
+            return False
+        edge_source = self.edge_source_type(edge_pos) if edge_pos is not None else ""
+        if reason == "SOURCE_SPAN_NOT_ADJACENT":
+            if edge_source not in {"float_skip", "same_column_long_sight"} and target_index - source_index > 5:
+                return False
+        if reason == "GEOMETRY_GATE" and not self.merge_v2b_geometry_gate_is_relaxable(edge_pos):
+            return False
+        if reason in {"FORMULA_INTERRUPTED", "FLOAT_INTERRUPTED", "LIST_INTERRUPTED"}:
+            if target_index - source_index > 12 and edge_source not in {"float_skip", "same_column_long_sight"}:
+                return False
+        return True
+
+    def merge_v2b_geometry_gate_is_relaxable(self, edge_pos: int | None) -> bool:
+        if edge_pos is None:
+            return False
+        if self._edge_attr is None or not self._edge_attr_fields:
+            return False
+        reverse = self.edge_attr_value(edge_pos, "index_delta_bin_reverse")
+        if reverse >= 0.5:
+            return False
+        has_gutter = self.edge_attr_value(edge_pos, "has_x_gutter")
+        y_overlap = self.edge_attr_value(edge_pos, "y_overlap_ratio")
+        if has_gutter >= 0.5 and y_overlap > 0.3:
+            return False
+        far = self.edge_attr_value(edge_pos, "index_delta_bin_far")
+        if far >= 0.5:
+            return self.edge_source_type(edge_pos) in {"float_skip", "same_column_long_sight"}
+        return True
+
+    def build_node_alignment_audit(self) -> None:
+        self.node_alignment_channel_stats.clear()
+        self.node_alignment_strength_stats.clear()
+        self.node_alignment_records = []
+        self._node_alignment_records_by_index = {}
+        for node in self.pdf_nodes:
+            record = self.node_alignment_record(node.node_index)
+            self.node_alignment_records.append(record)
+            self._node_alignment_records_by_index[node.node_index] = record
+            self.node_alignment_channel_stats[str(record["alignment_channel"])] += 1
+            self.node_alignment_strength_stats[str(record["alignment_strength"])] += 1
+
+    def node_alignment_record(self, node_index: int) -> dict[str, Any]:
+        node = self.pdf_nodes[node_index]
+        match = self.matches[node_index] if 0 <= node_index < len(self.matches) else None
+        tex_node = self.tex_nodes.get(match.tex_id) if match is not None and match.tex_id else None
+        channel = self.node_alignment_channel(node_index, tex_node=tex_node)
+        strength = self.node_alignment_strength(channel, match=match)
+        return {
+            "pdf_node_index": int(node_index),
+            "source_v7_ids": source_v7_ids(node.item),
+            "pdf_type": canonical_pdf_type(node.item),
+            "layout_layer": layout_layer_name(node.item),
+            "alignment_channel": channel,
+            "alignment_strength": strength,
+            "tex_id": match.tex_id if match is not None else None,
+            "tex_node_type": tex_node_type_name(tex_node),
+            "alignment_score": float(match.score) if match is not None else 0.0,
+            "text_preview": text_preview(node.text),
+        }
+
+    def node_alignment_channel(self, node_index: int, *, tex_node: TexAlignmentNode | None = None) -> str:
+        node = self.pdf_nodes[node_index]
+        item = node.item
+        raw_type = canonical_pdf_type(item)
+        layer = layout_layer_name(item)
+        if layer == "noise_layer" or raw_type in {"noise", "duplicate_shadow", "no_render"}:
+            return "NOISE_OR_NO_RENDER"
+        if pdf_node_is_page_furniture(item):
+            return "PAGE_FURNITURE"
+        if pdf_node_is_metadata_or_page_furniture(item) and not metadata_layer_heading_override(item):
+            return "FRONT_MATTER"
+        if pdf_node_is_formula_like(item):
+            return "DISPLAY_MATH"
+        if pdf_node_is_caption_like(item):
+            return "CAPTION"
+        if pdf_node_is_float_proxy_like(item):
+            return "FLOAT_PROXY"
+        if str(item.get("list_type") or "").lower() == "reference_list" or item_looks_like_reference_entry(item):
+            return "REFERENCE_ITEM"
+        if self.visual_hierarchy is not None and node_index in self.visual_hierarchy.heading_ids:
+            return "BODY_HEADING"
+        if raw_type in HEADING_TYPES:
+            return "BODY_HEADING"
+        if raw_type in {"list", "list_item", "item"} or LIST_MARKER_RE.match(node.text):
+            return "LIST_ITEM"
+        tex_type = tex_node_type_name(tex_node)
+        if tex_type == STANDARD_SECTION_NODE:
+            return "BODY_HEADING"
+        if tex_type == STANDARD_LIST_ITEM_NODE:
+            return "LIST_ITEM"
+        if tex_type == STANDARD_EQUATION_NODE:
+            return "DISPLAY_MATH"
+        if tex_type in CAPTION_TEX_NODE_TYPES:
+            return "CAPTION"
+        if tex_type == STANDARD_REFERENCE_NODE:
+            return "REFERENCE_ITEM"
+        return "BODY_TEXT"
+
+    def node_alignment_strength(self, channel: str, *, match: AlignmentMatch | None) -> str:
+        if channel in {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"}:
+            return "exempt"
+        if channel in {"DISPLAY_MATH", "FLOAT_PROXY"}:
+            return "weak" if match is not None and match.tex_id else "unmatched"
+        if match is None or not match.tex_id:
+            return "unmatched"
+        if float(match.score) >= float(self.config.similarity_threshold):
+            return "strong"
+        return "weak"
+
+    def record_edge_supervision_audit(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        label: int,
+        edge_pos: int | None,
+    ) -> None:
+        record = self.edge_supervision_record(source_index, target_index, label=label, edge_pos=edge_pos)
+        self.edge_relation_family_stats[str(record["relation_family"])] += 1
+        self.edge_label_strength_stats[str(record["label_strength"])] += 1
+        self.edge_proposed_train_mask_stats["train" if record["proposed_train_mask"] else "mask"] += 1
+        self.edge_proposed_loss_weight_stats[f"{float(record['proposed_loss_weight']):.2f}"] += 1
+        if self.config.emit_supervision_weights:
+            self.edge_train_mask_values.append(bool(record["proposed_train_mask"]))
+            self.edge_loss_weight_values.append(float(record["proposed_loss_weight"]))
+        if len(self.edge_supervision_examples) < 200 and should_keep_edge_supervision_example(record):
+            self.edge_supervision_examples.append(record)
+
+    def edge_supervision_record(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        label: int,
+        edge_pos: int | None,
+    ) -> dict[str, Any]:
+        source_record = self._node_alignment_records_by_index.get(source_index) or self.node_alignment_record(source_index)
+        target_record = self._node_alignment_records_by_index.get(target_index) or self.node_alignment_record(target_index)
+        source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
+        target_match = self.matches[target_index] if 0 <= target_index < len(self.matches) else None
+        source_tex = self.tex_nodes.get(source_match.tex_id) if source_match is not None and source_match.tex_id else None
+        target_tex = self.tex_nodes.get(target_match.tex_id) if target_match is not None and target_match.tex_id else None
+        family = self.edge_relation_family(
+            source_index,
+            target_index,
+            label=label,
+            edge_pos=edge_pos,
+            source_record=source_record,
+            target_record=target_record,
+            source_tex=source_tex,
+            target_tex=target_tex,
+        )
+        merge_precision_safe = False
+        if label == int(TexRelationLabel.MERGE) and 0 <= source_index < len(self.pdf_nodes) and 0 <= target_index < len(
+            self.pdf_nodes
+        ):
+            merge_precision_safe = merge_v2c_precision_continuation_is_safe(
+                self.pdf_nodes[source_index],
+                self.pdf_nodes[target_index],
+                source_channel=str(source_record["alignment_channel"]),
+                target_channel=str(target_record["alignment_channel"]),
+            )
+        strength, train_mask, weight = relation_audit_training_proposal(
+            label=label,
+            family=family,
+            source_channel=str(source_record["alignment_channel"]),
+            target_channel=str(target_record["alignment_channel"]),
+            source_strength=str(source_record["alignment_strength"]),
+            target_strength=str(target_record["alignment_strength"]),
+            merge_precision_safe=merge_precision_safe,
+        )
+        return {
+            "edge_pos": edge_pos,
+            "src": int(source_index),
+            "dst": int(target_index),
+            "label": tex_relation_label_name(label),
+            "relation_family": family,
+            "label_strength": strength,
+            "proposed_train_mask": bool(train_mask),
+            "proposed_loss_weight": float(weight),
+            "src_channel": source_record["alignment_channel"],
+            "dst_channel": target_record["alignment_channel"],
+            "src_strength": source_record["alignment_strength"],
+            "dst_strength": target_record["alignment_strength"],
+            "src_tex_node_type": tex_node_type_name(source_tex),
+            "dst_tex_node_type": tex_node_type_name(target_tex),
+            "same_tex_node": bool(source_match and target_match and source_match.tex_id and source_match.tex_id == target_match.tex_id),
+            "merge_precision_safe": bool(merge_precision_safe),
+            "src_text_preview": text_preview(self.pdf_nodes[source_index].text),
+            "dst_text_preview": text_preview(self.pdf_nodes[target_index].text),
+        }
+
+    def edge_relation_family(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        label: int,
+        edge_pos: int | None,
+        source_record: dict[str, Any],
+        target_record: dict[str, Any],
+        source_tex: TexAlignmentNode | None,
+        target_tex: TexAlignmentNode | None,
+    ) -> str:
+        source_channel = str(source_record["alignment_channel"])
+        target_channel = str(target_record["alignment_channel"])
+        if label == int(TexRelationLabel.MERGE):
+            if source_channel == "LIST_ITEM" or target_channel == "LIST_ITEM":
+                return "LIST_ITEM_CONTINUATION"
+            if source_channel == "REFERENCE_ITEM" or target_channel == "REFERENCE_ITEM":
+                return "REFERENCE_CONTINUATION"
+            if source_channel == "CAPTION" or target_channel == "CAPTION":
+                return "CAPTION_TEXT_CONTINUATION"
+            if source_channel == "BODY_TEXT" and target_channel == "BODY_TEXT":
+                if ends_with_hyphen(self.pdf_nodes[source_index].text):
+                    return "BODY_TEXT_HYPHEN_CONTINUATION"
+                return "BODY_TEXT_CONTINUATION"
+            return "OTHER_MERGE"
+        if label == int(TexRelationLabel.PARENT_CHILD):
+            if source_channel == "BODY_HEADING" and target_channel == "BODY_HEADING":
+                return "HEADING_TO_HEADING"
+            if source_channel == "BODY_HEADING":
+                if target_channel == "DISPLAY_MATH":
+                    return "HEADING_TO_DISPLAY_MATH"
+                if target_channel == "LIST_ITEM":
+                    return "HEADING_TO_LIST"
+                if target_channel == "REFERENCE_ITEM":
+                    return "REFERENCE_SECTION_TO_ITEM"
+                if target_channel == "BODY_TEXT":
+                    return self.heading_parent_family_by_rank(source_index, target_index)
+            if {source_channel, target_channel} & {"CAPTION"} and {source_channel, target_channel} & {"FLOAT_PROXY"}:
+                return "CAPTION_TO_FLOAT"
+            if source_channel == "BODY_HEADING" and target_channel == "REFERENCE_ITEM":
+                return "REFERENCE_SECTION_TO_ITEM"
+            return "OTHER_STRUCTURAL_ATTACHMENT"
+        if source_channel in {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"} or target_channel in {
+            "FRONT_MATTER",
+            "PAGE_FURNITURE",
+            "NOISE_OR_NO_RENDER",
+        }:
+            return "MASKED_UNKNOWN_METADATA_OR_NOISE"
+        if same_tex_alignment(source_tex, target_tex):
+            reason = self.same_tex_not_merged_reason(source_index, target_index, edge_pos=edge_pos)
+            family = f"WEAK_SAME_TEX_{reason}"
+            self.record_weak_same_tex_not_merged_reason(
+                source_index,
+                target_index,
+                reason=reason,
+                edge_pos=edge_pos,
+            )
+            return family
+        if source_channel in {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION"} or target_channel in {
+            "DISPLAY_MATH",
+            "FLOAT_PROXY",
+            "CAPTION",
+        }:
+            return "MASKED_UNKNOWN_WEAK_VISUAL"
+        if source_channel == "BODY_TEXT" and target_channel == "BODY_TEXT":
+            return "BODY_TEXT_HARD_NEGATIVE"
+        return "OTHER_NONE"
+
+    def heading_parent_family_by_rank(self, source_index: int, target_index: int) -> str:
+        if self.visual_hierarchy is None:
+            return "HEADING_TO_BODY_SCOPE"
+        rank = self.visual_hierarchy.child_rank_by_node.get(target_index)
+        if self.visual_hierarchy.parent_by_node.get(target_index) == source_index and rank is not None and rank <= 1:
+            return "HEADING_TO_FIRST_BODY_ANCHOR"
+        return "HEADING_TO_BODY_SCOPE"
+
+    def same_tex_not_merged_reason(self, source_index: int, target_index: int, *, edge_pos: int | None) -> str:
+        source_channel = self.node_alignment_channel(source_index)
+        target_channel = self.node_alignment_channel(target_index)
+        endpoint_channels = {source_channel, target_channel}
+        if endpoint_channels & {"DISPLAY_MATH"}:
+            return "FORMULA_ENDPOINT"
+        if endpoint_channels & {"FLOAT_PROXY"}:
+            return "FLOAT_ENDPOINT"
+        if endpoint_channels & {"CAPTION"}:
+            return "CAPTION_ENDPOINT"
+        if endpoint_channels & {"BODY_HEADING"}:
+            return "SECTION_BOUNDARY"
+
+        source_match = self.matches[source_index] if 0 <= source_index < len(self.matches) else None
+        target_match = self.matches[target_index] if 0 <= target_index < len(self.matches) else None
+        tex_id = source_match.tex_id if source_match is not None else None
+        if not tex_id or target_match is None or target_match.tex_id != tex_id:
+            return "NO_SHARED_TEX_ID"
+
+        interruption = self.same_tex_interruption_reason(source_index, target_index)
+        if interruption is not None:
+            return interruption
+        if not self.same_tex_node_are_adjacent_fragments(source_index, target_index, tex_id):
+            return "SOURCE_SPAN_NOT_ADJACENT"
+        if self.same_tex_node_merge_crosses_list_marker(source_index, target_index):
+            return "LIST_INTERRUPTED"
+        if self.same_tex_node_merge_crosses_section_boundary(source_index, target_index):
+            return "SECTION_BOUNDARY"
+        if self.same_tex_merge_hits_geometry_boundary(self.pdf_nodes[source_index], self.pdf_nodes[target_index]):
+            return "GEOMETRY_GATE"
+        if edge_pos is not None and self.edge_attr_blocks_same_tex_merge(edge_pos):
+            return "GEOMETRY_GATE"
+        if not self.same_tex_node_can_emit_merge(source_index, target_index):
+            return "TYPE_GATE"
+        return "UNKNOWN_GATE"
+
+    def same_tex_interruption_reason(self, source_index: int, target_index: int) -> str | None:
+        lower, upper = sorted((source_index, target_index))
+        if upper - lower <= 1:
+            return None
+        seen_channels: set[str] = set()
+        for index in range(lower + 1, upper):
+            if 0 <= index < len(self.pdf_nodes):
+                seen_channels.add(self.node_alignment_channel(index))
+        if "FLOAT_PROXY" in seen_channels:
+            return "FLOAT_INTERRUPTED"
+        if "DISPLAY_MATH" in seen_channels:
+            return "FORMULA_INTERRUPTED"
+        if "LIST_ITEM" in seen_channels:
+            return "LIST_INTERRUPTED"
+        if "CAPTION" in seen_channels:
+            return "CAPTION_INTERRUPTED"
+        if "BODY_HEADING" in seen_channels:
+            return "SECTION_BOUNDARY"
+        return None
+
+    def same_tex_node_merge_crosses_section_boundary(self, source_index: int, target_index: int) -> bool:
+        source_node = self.pdf_nodes[source_index]
+        target_node = self.pdf_nodes[target_index]
+        if is_run_in_heading_like(source_node) or is_run_in_heading_like(target_node):
+            return True
+        if canonical_pdf_merge_type(source_node.item) == "title" or canonical_pdf_merge_type(target_node.item) == "title":
+            return True
+        return False
+
+    def record_weak_same_tex_not_merged_reason(
+        self,
+        source_index: int,
+        target_index: int,
+        *,
+        reason: str,
+        edge_pos: int | None,
+    ) -> None:
+        self.weak_same_tex_not_merged_reason_stats[reason] += 1
+        source_channel = self.node_alignment_channel(source_index)
+        target_channel = self.node_alignment_channel(target_index)
+        self.weak_same_tex_not_merged_reason_channel_stats[f"{reason}:{source_channel}->{target_channel}"] += 1
+        if len(self.weak_same_tex_not_merged_examples) >= 200:
+            return
+        self.weak_same_tex_not_merged_examples.append(
+            {
+                "source_index": int(source_index),
+                "target_index": int(target_index),
+                "edge_pos": edge_pos,
+                "reason": reason,
+                "source_channel": source_channel,
+                "target_channel": target_channel,
+                "source_text_preview": text_preview(self.pdf_nodes[source_index].text),
+                "target_text_preview": text_preview(self.pdf_nodes[target_index].text),
+            }
+        )
+
+    def record_missing_same_tex_candidate_edges(self, edge_index: Any) -> None:
+        edge_pairs = {
+            (int(edge_index[0, pos].item()), int(edge_index[1, pos].item()))
+            for pos in range(int(edge_index.shape[1]))
+        }
+        for tex_id, raw_indices in self.tex_to_pdf_indices.items():
+            indices = sorted(set(int(index) for index in raw_indices if 0 <= int(index) < len(self.pdf_nodes)))
+            for source_index, target_index in zip(indices, indices[1:]):
+                if (source_index, target_index) in edge_pairs or (target_index, source_index) in edge_pairs:
+                    continue
+                reason = self.same_tex_interruption_reason(source_index, target_index) or "CANDIDATE_EDGE_MISSING"
+                self.missing_same_tex_candidate_edge_stats[reason] += 1
+                source_channel = self.node_alignment_channel(source_index)
+                target_channel = self.node_alignment_channel(target_index)
+                self.missing_same_tex_candidate_edge_channel_stats[f"{reason}:{source_channel}->{target_channel}"] += 1
+                if len(self.missing_same_tex_candidate_edge_examples) >= 200:
+                    continue
+                self.missing_same_tex_candidate_edge_examples.append(
+                    {
+                        "tex_id": tex_id,
+                        "source_index": int(source_index),
+                        "target_index": int(target_index),
+                        "reason": reason,
+                        "source_channel": source_channel,
+                        "target_channel": target_channel,
+                        "source_text_preview": text_preview(self.pdf_nodes[source_index].text),
+                        "target_text_preview": text_preview(self.pdf_nodes[target_index].text),
+                    }
+                )
+
+    def channel_supervision_audit_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": "channel_supervision_audit_v1",
+            "enabled": True,
+            "node_alignment_channel_stats": dict(sorted(self.node_alignment_channel_stats.items())),
+            "node_alignment_strength_stats": dict(sorted(self.node_alignment_strength_stats.items())),
+            "edge_relation_family_stats": dict(sorted(self.edge_relation_family_stats.items())),
+            "edge_label_strength_stats": dict(sorted(self.edge_label_strength_stats.items())),
+            "edge_proposed_train_mask_stats": dict(sorted(self.edge_proposed_train_mask_stats.items())),
+            "edge_proposed_loss_weight_stats": dict(sorted(self.edge_proposed_loss_weight_stats.items())),
+            "edge_supervision_examples": self.edge_supervision_examples[:200],
+            "weak_same_tex_not_merged_reason_stats": dict(sorted(self.weak_same_tex_not_merged_reason_stats.items())),
+            "weak_same_tex_not_merged_reason_channel_stats": dict(
+                sorted(self.weak_same_tex_not_merged_reason_channel_stats.items())
+            ),
+            "weak_same_tex_not_merged_examples": self.weak_same_tex_not_merged_examples[:200],
+            "missing_same_tex_candidate_edge_stats": dict(sorted(self.missing_same_tex_candidate_edge_stats.items())),
+            "missing_same_tex_candidate_edge_channel_stats": dict(
+                sorted(self.missing_same_tex_candidate_edge_channel_stats.items())
+            ),
+            "missing_same_tex_candidate_edge_examples": self.missing_same_tex_candidate_edge_examples[:200],
+        }
 
     def is_skip_over_continuation_positive(
         self,
@@ -908,7 +1579,12 @@ class AlignmentLabeler:
         after a visual obstacle without weakening the normal inference gates.
         """
 
-        if self.config.merge_label_policy != MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION:
+        if self.config.merge_label_policy not in {
+            MERGE_LABEL_POLICY_SKIP_OVER_CONTINUATION,
+            MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
+        }:
             return False
         if edge_pos is None:
             return False
@@ -923,10 +1599,28 @@ class AlignmentLabeler:
         target_node = self.pdf_nodes[target_index]
         if item_is_author_biography_or_backmatter(source_node.item) or item_is_author_biography_or_backmatter(target_node.item):
             return False
+        if self.config.merge_label_policy in {
+            MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2B_PDF_FIRST,
+            MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST,
+        }:
+            source_channel = self.node_alignment_channel(source_index)
+            target_channel = self.node_alignment_channel(target_index)
+            if source_channel not in MERGE_V2_POSITIVE_CHANNELS or target_channel not in MERGE_V2_POSITIVE_CHANNELS:
+                return False
+            if source_channel != target_channel and "REFERENCE_ITEM" in {source_channel, target_channel}:
+                return False
+        else:
+            source_channel = ""
+            target_channel = ""
         if strict_pdf_merge_type(source_node.item) != strict_pdf_merge_type(target_node.item):
-            return False
+            if self.config.merge_label_policy != MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST:
+                return False
+            if source_channel != target_channel:
+                return False
         if strict_pdf_merge_type(source_node.item) not in MERGE_COMPATIBLE_PDF_TYPES:
-            return False
+            if self.config.merge_label_policy != MERGE_LABEL_POLICY_MERGE_V2_PDF_FIRST or source_channel != "LIST_ITEM":
+                return False
         if relation_layers_are_incompatible(source_node.item, target_node.item):
             return False
         source_layer = layout_layer_name(source_node.item)
@@ -936,6 +1630,13 @@ class AlignmentLabeler:
         if LIST_MARKER_RE.match(target_node.text) or is_run_in_heading_like(target_node):
             return False
         if len(source_node.clean) < self.config.min_clean_chars or len(target_node.clean) < self.config.min_clean_chars:
+            return False
+        if self.config.merge_label_policy == MERGE_LABEL_POLICY_MERGE_V2C_PRECISION_FIRST and not merge_v2c_precision_continuation_is_safe(
+            source_node,
+            target_node,
+            source_channel=source_channel,
+            target_channel=target_channel,
+        ):
             return False
         if ends_with_hyphen(source_node.text):
             return True
@@ -1417,11 +2118,19 @@ class AlignmentLabeler:
             "gnn_view": self.gnn_view_summary,
             "matches": [asdict(match) for match in self.matches],
             "tex_to_pdf_indices": self.tex_to_pdf_indices,
+            "merge_label_policy": self.config.merge_label_policy,
+            "label_policy_stats": dict(self.label_policy_stats),
+            "merge_subtype_stats": dict(self.merge_subtype_stats),
+            "suspect_merge_stats": dict(self.suspect_merge_stats),
+            "suspect_merge_examples": self.suspect_merge_examples[:200],
             "expected_orphan_exemptions": expected_orphan_exemptions,
             "document_root_scoped": document_root_scoped,
             "visual_hierarchy": visual_hierarchy_payload(self.visual_hierarchy),
             "tex_nodes": [tex_alignment_node_payload(node) for node in self.tex_nodes.values()],
         }
+        if self.config.audit_supervision_channels:
+            payload["channel_supervision_audit"] = self.channel_supervision_audit_payload()
+            payload["node_alignment_records"] = self.node_alignment_records
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def is_expected_visual_orphan(self, node: PdfAlignmentNode) -> bool:
@@ -2148,6 +2857,135 @@ def strict_pdf_merge_type(item: dict[str, Any]) -> str:
     return "text"
 
 
+def tex_node_type_name(tex_node: TexAlignmentNode | None) -> str:
+    if tex_node is None:
+        return "unknown"
+    return str(tex_node.node_type or "unknown")
+
+
+def tex_node_can_emit_merge(tex_node: TexAlignmentNode | None) -> bool:
+    return tex_node_type_name(tex_node) in MERGEABLE_TEX_NODE_TYPES
+
+
+def classify_merge_subtype(
+    left: PdfAlignmentNode,
+    right: PdfAlignmentNode,
+    tex_node: TexAlignmentNode | None,
+) -> str:
+    node_type = tex_node_type_name(tex_node)
+    if node_type == STANDARD_REFERENCE_NODE:
+        return "reference_continuation"
+    if node_type == STANDARD_LIST_ITEM_NODE or pdf_node_is_list_like(left) or pdf_node_is_list_like(right):
+        return "list_item_continuation"
+    if pdf_node_is_caption_like(left.item) or pdf_node_is_caption_like(right.item):
+        return "caption_like_continuation"
+    if pdf_node_looks_code_prompt_like(left) or pdf_node_looks_code_prompt_like(right):
+        return "code_prompt_continuation"
+    if node_type == STANDARD_PARAGRAPH_NODE:
+        return "body_paragraph_continuation"
+    return f"other_tex_{node_type}_continuation"
+
+
+def pdf_node_is_list_like(node: PdfAlignmentNode) -> bool:
+    raw_type = canonical_pdf_type(node.item)
+    if raw_type in {"list", "list_item", "item"}:
+        return True
+    return bool(LIST_MARKER_RE.match(str(node.text or "").strip()))
+
+
+def pdf_node_looks_code_prompt_like(node: PdfAlignmentNode) -> bool:
+    text = str(node.text or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if "http://" in lowered or "https://" in lowered or "www." in lowered:
+        return True
+    if re.search(r"\b(role|user|assistant|system|prompt|response|json|api|code)\b", lowered):
+        return True
+    punctuation_count = sum(1 for char in text if char in "{}[]<>_=\\/|`")
+    return punctuation_count >= 4 and punctuation_count / max(1, len(text)) > 0.08
+
+
+def text_preview(text: str, *, limit: int = 140) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "..."
+
+
+def source_v7_ids(item: dict[str, Any]) -> list[str]:
+    value = item.get("_v7_source_node_ids")
+    if isinstance(value, list):
+        return [str(item_id) for item_id in value if item_id is not None]
+    value = item.get("_v7_node_id") or item.get("node_id") or item.get("id")
+    return [str(value)] if value is not None else []
+
+
+def tex_relation_label_name(label: int) -> str:
+    if label == int(TexRelationLabel.MERGE):
+        return "MERGE"
+    if label == int(TexRelationLabel.PARENT_CHILD):
+        return "PARENT_CHILD"
+    return "NONE"
+
+
+def same_tex_alignment(source_tex: TexAlignmentNode | None, target_tex: TexAlignmentNode | None) -> bool:
+    return bool(source_tex is not None and target_tex is not None and source_tex.tex_id == target_tex.tex_id)
+
+
+def relation_audit_training_proposal(
+    *,
+    label: int,
+    family: str,
+    source_channel: str,
+    target_channel: str,
+    source_strength: str,
+    target_strength: str,
+    merge_precision_safe: bool = False,
+) -> tuple[str, bool, float]:
+    exempt_channels = {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"}
+    weak_channels = {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION"}
+    if source_channel in exempt_channels or target_channel in exempt_channels:
+        return "masked_unknown", False, 0.0
+    if label == int(TexRelationLabel.PARENT_CHILD):
+        return "strong", True, 1.0
+    if label == int(TexRelationLabel.MERGE):
+        if source_channel in weak_channels or target_channel in weak_channels:
+            return "weak", False, 0.0
+        if merge_precision_safe:
+            return "strong", True, 1.0
+        if family in {
+            "BODY_TEXT_CONTINUATION",
+            "BODY_TEXT_HYPHEN_CONTINUATION",
+            "LIST_ITEM_CONTINUATION",
+            "REFERENCE_CONTINUATION",
+        }:
+            return "weak", True, 0.2
+        return "weak", False, 0.0
+    if family.startswith("MASKED_UNKNOWN"):
+        return "masked_unknown", False, 0.0
+    if family.startswith("WEAK_SAME_TEX"):
+        return "weak", False, 0.0
+    if source_channel in weak_channels or target_channel in weak_channels:
+        return "weak", False, 0.0
+    if "unmatched" in {source_strength, target_strength}:
+        if label == int(TexRelationLabel.NONE):
+            return "soft_negative", False, 0.0
+        return "weak", True, 0.2
+    if "weak" in {source_strength, target_strength}:
+        return "weak", True, 0.2
+    if label == int(TexRelationLabel.NONE):
+        return "hard_negative", True, 1.0
+    return "strong", True, 1.0
+
+
+def should_keep_edge_supervision_example(record: dict[str, Any]) -> bool:
+    family = str(record.get("relation_family") or "")
+    if record.get("label") != "NONE":
+        return True
+    return family.startswith("WEAK_") or family.startswith("MASKED_")
+
+
 def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> bool:
     """Prevent same-TeX scope from collapsing across structural block boundaries.
 
@@ -2165,6 +3003,131 @@ def same_tex_node_can_merge(left: PdfAlignmentNode, right: PdfAlignmentNode) -> 
     if not same_layout_scope_can_merge(left.item, right.item):
         return False
     return left_type == right_type and left_type in MERGE_COMPATIBLE_PDF_TYPES
+
+
+def same_tex_node_can_merge_v2_pdf_first(
+    left: PdfAlignmentNode,
+    right: PdfAlignmentNode,
+    *,
+    source_channel: str,
+    target_channel: str,
+) -> bool:
+    """PDF-first MERGE v2: positives only for body/list/reference continuations."""
+
+    if source_channel not in MERGE_V2_POSITIVE_CHANNELS or target_channel not in MERGE_V2_POSITIVE_CHANNELS:
+        return False
+    if source_channel != target_channel and "REFERENCE_ITEM" in {source_channel, target_channel}:
+        return False
+    if item_is_author_biography_or_backmatter(left.item) or item_is_author_biography_or_backmatter(right.item):
+        return False
+    if LIST_MARKER_RE.match(right.text):
+        return False
+    if not same_layout_scope_can_merge(left.item, right.item):
+        return False
+    if source_channel == "BODY_TEXT":
+        return strict_pdf_merge_type(left.item) == strict_pdf_merge_type(right.item) == "text"
+    if source_channel == "REFERENCE_ITEM" and target_channel == "REFERENCE_ITEM":
+        return True
+    if source_channel == "LIST_ITEM" and target_channel == "LIST_ITEM":
+        return True
+    return False
+
+
+def merge_v2c_precision_continuation_is_safe(
+    left: PdfAlignmentNode,
+    right: PdfAlignmentNode,
+    *,
+    source_channel: str,
+    target_channel: str,
+) -> bool:
+    """Precision-first MERGE candidate used only by the v2c audit policy."""
+
+    if source_channel != target_channel:
+        return False
+    if source_channel not in MERGE_V2_POSITIVE_CHANNELS:
+        return False
+    if merge_v2c_has_noise_signal(left) or merge_v2c_has_noise_signal(right):
+        return False
+    if source_channel == "BODY_TEXT" and (
+        pdf_node_looks_code_prompt_like(left)
+        or pdf_node_looks_code_prompt_like(right)
+        or text_looks_formula_fragment_like(left.text)
+        or text_looks_formula_fragment_like(right.text)
+        or text_looks_front_matter_like(left.text)
+        or text_looks_front_matter_like(right.text)
+        or text_looks_list_or_template_like(left.text)
+        or text_looks_list_or_template_like(right.text)
+    ):
+        return False
+    if ends_with_hyphen(left.text):
+        return starts_with_lowercase_text(right.text) or starts_with_connector_text(right.text)
+    if ends_with_terminal_punctuation(left.text):
+        return False
+    return starts_with_lowercase_text(right.text) or starts_with_connector_text(right.text)
+
+
+def merge_v2c_has_noise_signal(node: PdfAlignmentNode) -> bool:
+    if item_is_author_biography_or_backmatter(node.item):
+        return True
+    if pdf_node_is_metadata_or_page_furniture(node.item):
+        return True
+    if pdf_node_is_formula_like(node.item) or pdf_node_is_caption_like(node.item) or pdf_node_is_float_proxy_like(node.item):
+        return True
+    if LIST_MARKER_RE.match(node.text):
+        return True
+    return False
+
+
+def starts_with_connector_text(text: str) -> bool:
+    value = str(text or "")
+    if re.match(r"^\s*[,;:\)\]\}]", value):
+        return True
+    return bool(
+        re.match(
+            r"^\s*(?:and|or|of|for|to|with|in|on|by|from|that|which|where|while|when|as|than|then|therefore)\b",
+            value,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def text_looks_formula_fragment_like(text: str) -> bool:
+    raw = str(text or "")
+    compact = " ".join(raw.split())
+    if not compact:
+        return False
+    math_tokens = re.findall(
+        r"\\[a-zA-Z]+|[_^{}]|∑|∫|√|≤|≥|≠|≈|∞|∈|∉|∂|α|β|γ|δ|ε|θ|λ|μ|σ|τ|ϵ|\b(?:operatorname|mathbb|mathrm|frac|sqrt|sum|prod|lim|implies)\b",
+        compact,
+    )
+    if len(math_tokens) >= 3:
+        return True
+    return len(math_tokens) >= 1 and len(compact) < 90
+
+
+def text_looks_front_matter_like(text: str) -> bool:
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return False
+    if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", compact):
+        return True
+    if len(compact) < 220 and re.search(
+        r"\b(?:university|institute|department|school|college|laboratory|lab|faculty|academy|centre|center|hospital)\b",
+        compact,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def text_looks_list_or_template_like(text: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*(?:[•·▪▫◦*]|[-–—]\s+|\(?[ivxlcdm]+\)|\(?\d+[.)]|\(?[a-zA-Z][.)]|(?:step|case)\s*\d+[.:])",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def is_run_in_heading_like(node: PdfAlignmentNode) -> bool:

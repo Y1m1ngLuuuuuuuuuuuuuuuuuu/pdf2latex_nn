@@ -225,6 +225,20 @@ class TreeDecoderConfig:
     merge_gutter_page_width_ratio: float = 0.05
     merge_continuation_threshold: float = 0.90
     merge_hyphen_threshold: float = 0.85
+    enable_layout_scope_continuation_merge: bool = False
+    layout_scope_continuation_max_gap: float = 1.01
+    layout_scope_continuation_score_floor: float = 1.0
+    enable_list_continuation_merge: bool = False
+    list_continuation_max_gap: float = 3.0
+    list_continuation_score_floor: float = 1.0
+    enable_family_aware_merge_policy: bool = False
+    family_body_list_merge_threshold: float = 0.05
+    family_reference_merge_threshold: float = 0.82
+    enable_family_aware_missing_candidate_merge: bool = False
+    family_missing_candidate_max_gap: float = 3.0
+    family_missing_candidate_score_floor: float = 1.0
+    forced_merge_pairs: tuple[tuple[int, int], ...] = ()
+    forced_merge_score_floor: float = 1.0
     document_class: str = "article"
     packages: tuple[str, ...] = (
         "graphicx",
@@ -326,6 +340,12 @@ class TreeDecoder:
                 "merge": float(self.config.merge_threshold),
                 "parent_child": float(self.config.parent_threshold),
             },
+            "merge_family_policy": {
+                "enabled": bool(self.config.enable_family_aware_merge_policy),
+                "body_list_threshold": float(self.config.family_body_list_merge_threshold),
+                "reference_threshold": float(self.config.family_reference_merge_threshold),
+                "missing_candidate_enabled": bool(self.config.enable_family_aware_missing_candidate_merge),
+            },
             "heading_skeleton_mode": heading_mode,
         }
         self._active_trace = self.last_trace
@@ -395,32 +415,100 @@ class TreeDecoder:
         union_find = UnionFind(len(node_records))
         merge_edges: list[DecodedEdge] = []
         reject_reasons: dict[str, int] = {}
+        forced_merge_pairs = {
+            (int(source), int(target))
+            for source, target in self.config.forced_merge_pairs
+        }
+        forced_merge_count = 0
+        family_policy_stats: dict[str, int] = {}
 
         def reject(reason: str) -> None:
             reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
 
+        def count_family_policy(reason: str) -> None:
+            family_policy_stats[reason] = family_policy_stats.get(reason, 0) + 1
+
         for edge_pos in range(edge_index.shape[1]):
             source = int(edge_index[0, edge_pos].item())
             target = int(edge_index[1, edge_pos].item())
+            forced_merge_pair = (source, target) in forced_merge_pairs
             if not valid_node_pair(source, target, len(node_records)) or source == target:
                 reject("invalid_or_self")
                 continue
-            if raw_skeleton is not None and merge_crosses_section_boundary(source, target, raw_skeleton):
+            if (
+                not forced_merge_pair
+                and raw_skeleton is not None
+                and merge_crosses_section_boundary(source, target, raw_skeleton)
+            ):
                 reject("section_boundary")
                 continue
-            if merge_crosses_intermediate_list_marker(source, target, node_records):
+            if not forced_merge_pair and merge_crosses_intermediate_list_marker(source, target, node_records):
                 reject("intermediate_list_marker")
                 continue
-            if not self.can_merge(node_records[source], node_records[target]):
+            family = self.merge_family(node_records[source], node_records[target])
+            if (
+                not forced_merge_pair
+                and self.config.enable_family_aware_merge_policy
+                and family in {"weak_masked", "layout_mismatch"}
+            ):
+                reject(f"family_masked_{family}")
+                count_family_policy(f"masked_{family}")
+                continue
+            can_merge_pair = self.can_merge(node_records[source], node_records[target])
+            deterministic_layout_scope_continuation = False
+            if not forced_merge_pair and not can_merge_pair:
+                deterministic_layout_scope_continuation = self.can_merge_layout_scope_continuation(
+                    node_records[source],
+                    node_records[target],
+                )
+            deterministic_list_continuation = False
+            if not forced_merge_pair:
+                deterministic_list_continuation = self.can_merge_list_continuation(
+                    node_records[source],
+                    node_records[target],
+                )
+            family_precision_gate = False
+            if (
+                not forced_merge_pair
+                and self.config.enable_family_aware_merge_policy
+                and can_merge_pair
+                and family == "body_list"
+            ):
+                family_precision_gate = self.can_merge_family_body_list_precision(
+                    node_records[source],
+                    node_records[target],
+                )
+            if (
+                not forced_merge_pair
+                and not can_merge_pair
+                and not deterministic_layout_scope_continuation
+                and not deterministic_list_continuation
+            ):
                 reject("hard_gate_can_merge")
                 continue
             merge_score = float(probs[edge_pos, MERGE].item())
+            if forced_merge_pair:
+                forced_merge_count += 1
+                merge_score = max(merge_score, float(self.config.forced_merge_score_floor))
+            elif deterministic_layout_scope_continuation:
+                merge_score = max(merge_score, float(self.config.layout_scope_continuation_score_floor))
+            elif deterministic_list_continuation:
+                merge_score = max(merge_score, float(self.config.list_continuation_score_floor))
             label = int(probs[edge_pos].argmax().item())
-            merge_threshold = self.merge_threshold_for(node_records[source], node_records[target])
-            if merge_score < merge_threshold:
+            merge_threshold = self.merge_threshold_for(
+                node_records[source],
+                node_records[target],
+                family=family,
+                family_precision_gate=family_precision_gate,
+            )
+            if self.config.enable_family_aware_merge_policy:
+                count_family_policy(f"candidate_{family}")
+                if family_precision_gate:
+                    count_family_policy("body_list_precision_gate")
+            if not forced_merge_pair and merge_score < merge_threshold:
                 reject("below_threshold")
                 continue
-            if self.config.require_merge_argmax and label != MERGE:
+            if not forced_merge_pair and self.config.require_merge_argmax and label != MERGE:
                 reject("not_argmax")
                 continue
             if union_find.find(source) != union_find.find(target):
@@ -428,6 +516,26 @@ class TreeDecoder:
                 merge_edges.append(DecodedEdge(source=source, target=target, label=MERGE, score=merge_score))
             else:
                 reject("already_same_component")
+
+        deterministic_missing_count = 0
+        if self.config.enable_family_aware_merge_policy and self.config.enable_family_aware_missing_candidate_merge:
+            existing_pairs = {
+                (int(edge_index[0, edge_pos].item()), int(edge_index[1, edge_pos].item()))
+                for edge_pos in range(edge_index.shape[1])
+            }
+            for source, target in self.family_aware_missing_candidate_pairs(node_records, existing_pairs, raw_skeleton):
+                if union_find.find(source) == union_find.find(target):
+                    continue
+                union_find.union(source, target)
+                deterministic_missing_count += 1
+                merge_edges.append(
+                    DecodedEdge(
+                        source=source,
+                        target=target,
+                        label=MERGE,
+                        score=float(self.config.family_missing_candidate_score_floor),
+                    )
+                )
 
         groups: dict[int, list[int]] = {}
         for index in range(len(node_records)):
@@ -463,6 +571,9 @@ class TreeDecoder:
             self._active_trace["merge_decoding"] = {
                 "accepted_merge_edges": [decoded_edge_to_dict(edge) for edge in merge_edges],
                 "accepted_merge_edge_count": len(merge_edges),
+                "forced_merge_edge_count": forced_merge_count,
+                "family_aware_missing_candidate_edge_count": deterministic_missing_count,
+                "family_policy_stats": family_policy_stats,
                 "reject_reasons": reject_reasons,
                 "contracted_node_count": len(nodes),
                 "merged_supernode_count": sum(1 for node in nodes.values() if len(node.merged_node_ids) > 1),
@@ -481,7 +592,122 @@ class TreeDecoder:
             gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
         )
 
-    def merge_threshold_for(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> float:
+    def can_merge_layout_scope_continuation(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> bool:
+        """Experimental narrow continuation merge across layout-band boundaries.
+
+        This is intentionally opt-in.  It only targets the observed
+        ``layout_scope_mismatch`` false-negative shape: forward adjacent
+        ``text -> text`` fragments where the left side is visibly open and the
+        right side starts like a lowercase continuation.  It must not relax
+        section, list-marker, math/float, reference, or front-matter barriers.
+        """
+
+        if not self.config.enable_layout_scope_continuation_merge:
+            return False
+        return can_contract_layout_scope_continuation_records(
+            node_u,
+            node_v,
+            max_gap=float(self.config.layout_scope_continuation_max_gap),
+            parallel_y_overlap_ratio=self.config.merge_parallel_y_overlap_ratio,
+            gutter_threshold=self.config.merge_gutter_threshold,
+            gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
+        )
+
+    def can_merge_list_continuation(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> bool:
+        """Experimental opt-in merge for list items split across PDF blocks."""
+
+        if not self.config.enable_list_continuation_merge:
+            return False
+        return can_contract_list_continuation_records(
+            node_u,
+            node_v,
+            max_gap=float(self.config.list_continuation_max_gap),
+            parallel_y_overlap_ratio=self.config.merge_parallel_y_overlap_ratio,
+            gutter_threshold=self.config.merge_gutter_threshold,
+            gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
+        )
+
+    def merge_family(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> str:
+        """Classify an inference-time MERGE candidate into a coarse family."""
+
+        if self.can_merge_reference_endpoint(node_u, node_v):
+            return "reference"
+        if record_has_merge_excluded_layout_role(node_u) or record_has_merge_excluded_layout_role(node_v):
+            return "weak_masked"
+        if layout_scope_mismatch_is_only_band_boundary(node_u, node_v):
+            return "layout_mismatch"
+        if self.can_merge_body_list_endpoint(node_u, node_v):
+            return "body_list"
+        return "other"
+
+    def can_merge_reference_endpoint(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> bool:
+        return canonical_render_type(node_u) == "reference" and canonical_render_type(node_v) == "reference"
+
+    def can_merge_body_list_endpoint(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> bool:
+        left_type = canonical_render_type(node_u)
+        right_type = canonical_render_type(node_v)
+        if self.can_merge_reference_endpoint(node_u, node_v):
+            return False
+        if left_type == "text" and right_type == "text":
+            return True
+        if record_is_list_item_like(node_u) and right_type == "text":
+            return True
+        return False
+
+    def can_merge_family_body_list_precision(self, node_u: dict[str, Any], node_v: dict[str, Any]) -> bool:
+        if can_contract_list_continuation_records(
+            node_u,
+            node_v,
+            max_gap=float(self.config.family_missing_candidate_max_gap),
+            parallel_y_overlap_ratio=self.config.merge_parallel_y_overlap_ratio,
+            gutter_threshold=self.config.merge_gutter_threshold,
+            gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
+        ):
+            return True
+        return can_contract_body_text_precision_continuation_records(
+            node_u,
+            node_v,
+            max_gap=float(self.config.family_missing_candidate_max_gap),
+            parallel_y_overlap_ratio=self.config.merge_parallel_y_overlap_ratio,
+            gutter_threshold=self.config.merge_gutter_threshold,
+            gutter_page_width_ratio=self.config.merge_gutter_page_width_ratio,
+        )
+
+    def family_aware_missing_candidate_pairs(
+        self,
+        node_records: list[dict[str, Any]],
+        existing_pairs: set[tuple[int, int]],
+        raw_skeleton: HeadingSkeleton | None,
+    ) -> list[tuple[int, int]]:
+        pairs: list[tuple[int, int]] = []
+        max_gap = float(self.config.family_missing_candidate_max_gap)
+        for source, left in enumerate(node_records):
+            left_index = node_physical_index(left)
+            if left_index is None:
+                continue
+            for target in range(source + 1, min(len(node_records), source + int(max_gap) + 3)):
+                if (source, target) in existing_pairs or (target, source) in existing_pairs:
+                    continue
+                right = node_records[target]
+                right_index = node_physical_index(right)
+                if right_index is None or not (0.0 < right_index - left_index <= max_gap):
+                    continue
+                if raw_skeleton is not None and merge_crosses_section_boundary(source, target, raw_skeleton):
+                    continue
+                if merge_crosses_intermediate_list_marker(source, target, node_records):
+                    continue
+                if self.can_merge_family_body_list_precision(left, right):
+                    pairs.append((source, target))
+        return pairs
+
+    def merge_threshold_for(
+        self,
+        node_u: dict[str, Any],
+        node_v: dict[str, Any],
+        *,
+        family: str | None = None,
+        family_precision_gate: bool = False,
+    ) -> float:
         """Return an adaptive merge threshold for obvious paragraph continuations.
 
         The global threshold is often raised to protect precision.  That should
@@ -492,6 +718,11 @@ class TreeDecoder:
         """
 
         threshold = float(self.config.merge_threshold)
+        if self.config.enable_family_aware_merge_policy:
+            if family == "reference":
+                return float(self.config.family_reference_merge_threshold)
+            if family == "body_list" and family_precision_gate:
+                return min(threshold, float(self.config.family_body_list_merge_threshold))
         if not records_are_adjacent_in_reading_order(node_u, node_v):
             return threshold
         if record_ends_with_hyphen(node_u) and record_starts_like_continuation(node_v):
@@ -3010,6 +3241,148 @@ def can_contract_merge_records(
     )
 
 
+def can_contract_layout_scope_continuation_records(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    max_gap: float = 1.01,
+    parallel_y_overlap_ratio: float = 0.10,
+    gutter_threshold: float = 30.0,
+    gutter_page_width_ratio: float = 0.05,
+) -> bool:
+    """Allow only a tiny deterministic ``text -> text`` continuation exception.
+
+    The normal merge gate rejects layout-band changes.  That is usually right,
+    but it can miss a paragraph continued at the top of the next page/band.
+    This helper is deliberately stricter than ``record_starts_like_continuation``:
+    the right fragment must start with a lowercase/punctuation continuation,
+    not an arbitrary capitalized sentence.
+    """
+
+    left_type = canonical_render_type(left)
+    right_type = canonical_render_type(right)
+    if left_type != "text" or right_type != "text":
+        return False
+    if record_starts_with_list_marker(right):
+        return False
+    if record_is_author_biography_or_backmatter(left) or record_is_author_biography_or_backmatter(right):
+        return False
+    if record_has_merge_excluded_layout_role(left) or record_has_merge_excluded_layout_role(right):
+        return False
+    if layout_layer_name(left) != "main_text_flow" or layout_layer_name(right) != "main_text_flow":
+        return False
+    if not layout_scope_mismatch_is_only_band_boundary(left, right):
+        return False
+    left_index = node_physical_index(left)
+    right_index = node_physical_index(right)
+    if left_index is None or right_index is None:
+        return False
+    if not (0.0 < right_index - left_index <= max_gap):
+        return False
+    if not (record_ends_with_hyphen(left) or record_is_open_sentence(left)):
+        return False
+    if not record_starts_with_lowercase_continuation(right):
+        return False
+    return not crosses_column_gutter_barrier(
+        left,
+        right,
+        parallel_y_overlap_ratio=parallel_y_overlap_ratio,
+        gutter_threshold=gutter_threshold,
+        gutter_page_width_ratio=gutter_page_width_ratio,
+    )
+
+
+def can_contract_list_continuation_records(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    max_gap: float = 3.0,
+    parallel_y_overlap_ratio: float = 0.10,
+    gutter_threshold: float = 30.0,
+    gutter_page_width_ratio: float = 0.05,
+) -> bool:
+    """Allow only a split list item to absorb its continuation paragraph.
+
+    This targets cases like ``• First test-time optimization framework`` followed
+    by ``operating zero-shot ...``.  It deliberately excludes formula, front
+    matter, headings, references, and a following new list marker.
+    """
+
+    left_type = canonical_render_type(left)
+    right_type = canonical_render_type(right)
+    if left_type not in {"text", "list"} or right_type != "text":
+        return False
+    if not record_is_list_item_like(left):
+        return False
+    if record_starts_with_list_marker(right) or record_is_list_item_like(right):
+        return False
+    if record_has_merge_excluded_layout_role(left) or record_has_merge_excluded_layout_role(right):
+        return False
+    if record_is_author_biography_or_backmatter(left) or record_is_author_biography_or_backmatter(right):
+        return False
+    if not same_layout_scope_can_contract_list_continuation(left, right):
+        return False
+    left_index = node_physical_index(left)
+    right_index = node_physical_index(right)
+    if left_index is None or right_index is None:
+        return False
+    if not (0.0 < right_index - left_index <= max_gap):
+        return False
+    if not (record_ends_with_hyphen(left) or record_is_open_sentence(left)):
+        return False
+    if not record_starts_with_lowercase_continuation(right):
+        return False
+    return not crosses_column_gutter_barrier(
+        left,
+        right,
+        parallel_y_overlap_ratio=parallel_y_overlap_ratio,
+        gutter_threshold=gutter_threshold,
+        gutter_page_width_ratio=gutter_page_width_ratio,
+    )
+
+
+def can_contract_body_text_precision_continuation_records(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    max_gap: float = 3.0,
+    parallel_y_overlap_ratio: float = 0.10,
+    gutter_threshold: float = 30.0,
+    gutter_page_width_ratio: float = 0.05,
+) -> bool:
+    """Narrow BODY_TEXT continuation gate used by family-aware MERGE audits."""
+
+    if canonical_render_type(left) != "text" or canonical_render_type(right) != "text":
+        return False
+    if record_is_list_item_like(left) or record_is_list_item_like(right):
+        return False
+    if record_starts_with_list_marker(right):
+        return False
+    if record_has_merge_excluded_layout_role(left) or record_has_merge_excluded_layout_role(right):
+        return False
+    if record_is_author_biography_or_backmatter(left) or record_is_author_biography_or_backmatter(right):
+        return False
+    if not same_layout_scope_can_contract_merge(left, right):
+        return False
+    left_index = node_physical_index(left)
+    right_index = node_physical_index(right)
+    if left_index is None or right_index is None:
+        return False
+    if not (0.0 < right_index - left_index <= max_gap):
+        return False
+    if not (record_ends_with_hyphen(left) or record_is_open_sentence(left)):
+        return False
+    if not record_starts_with_lowercase_continuation(right):
+        return False
+    return not crosses_column_gutter_barrier(
+        left,
+        right,
+        parallel_y_overlap_ratio=parallel_y_overlap_ratio,
+        gutter_threshold=gutter_threshold,
+        gutter_page_width_ratio=gutter_page_width_ratio,
+    )
+
+
 def records_are_adjacent_in_reading_order(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_index = node_physical_index(left)
     right_index = node_physical_index(right)
@@ -3036,6 +3409,18 @@ def record_starts_like_continuation(record: dict[str, Any]) -> bool:
     return bool(text and MERGE_CONTINUATION_START_RE.match(text))
 
 
+def record_starts_with_lowercase_continuation(record: dict[str, Any]) -> bool:
+    text = " ".join(node_record_text(record).split())
+    if not text:
+        return False
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    if stripped[0].islower() or stripped[0] in ",;:)]}":
+        return True
+    return bool(re.match(r"^(?:and|or|where|which|that|while|because|for|in|of|to|the)\b", stripped))
+
+
 def same_layout_scope_can_contract_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_layer = layout_layer_name(left)
     right_layer = layout_layer_name(right)
@@ -3050,6 +3435,75 @@ def same_layout_scope_can_contract_merge(left: dict[str, Any], right: dict[str, 
     if left_band is not None and right_band is not None and left_band != right_band:
         return False
     return True
+
+
+def same_layout_scope_can_contract_list_continuation(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_layer = layout_layer_name(left)
+    right_layer = layout_layer_name(right)
+    if left_layer == "noise_layer" or right_layer == "noise_layer":
+        return False
+    if left_layer != right_layer:
+        return False
+    if left_layer != "main_text_flow":
+        return False
+    left_band = layout_band_id(left)
+    right_band = layout_band_id(right)
+    if left_band is not None and right_band is not None and left_band != right_band:
+        return False
+    return True
+
+
+def layout_scope_mismatch_is_only_band_boundary(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Return true when the normal scope failure is only a band id transition."""
+
+    left_layer = layout_layer_name(left)
+    right_layer = layout_layer_name(right)
+    if left_layer != "main_text_flow" or right_layer != "main_text_flow":
+        return False
+    left_band = layout_band_id(left)
+    right_band = layout_band_id(right)
+    return left_band is not None and right_band is not None and left_band != right_band
+
+
+def record_has_merge_excluded_layout_role(record: dict[str, Any]) -> bool:
+    role = node_layout_role(record).replace("-", "_").replace(" ", "_")
+    raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or "").casefold()
+    raw = raw.replace("-", "_").replace(" ", "_")
+    haystack = f"{role} {raw}"
+    excluded_tokens = (
+        "heading",
+        "title",
+        "caption",
+        "figure",
+        "table",
+        "algorithm",
+        "formula",
+        "equation",
+        "math",
+        "reference",
+        "bibliography",
+        "author",
+        "affiliation",
+        "email",
+        "orcid",
+        "front_matter",
+        "page_header",
+        "page_footer",
+        "page_number",
+        "footnote",
+    )
+    return any(token in haystack for token in excluded_tokens)
+
+
+def record_is_list_item_like(record: dict[str, Any]) -> bool:
+    role = node_layout_role(record).replace("-", "_").replace(" ", "_")
+    raw = str(record.get("canonical_type") or record.get("type") or record.get("raw_type") or "").casefold()
+    raw = raw.replace("-", "_").replace(" ", "_")
+    if role in {"list", "list_item", "itemize", "enumerate"} or raw in {"list", "list_item", "itemize", "enumerate"}:
+        return True
+    if bool(record.get("_render_as_list_item")):
+        return True
+    return record_starts_with_list_marker(record)
 
 
 def layout_layer_name(record: dict[str, Any]) -> str:

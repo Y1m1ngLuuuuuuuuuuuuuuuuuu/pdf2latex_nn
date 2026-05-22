@@ -339,6 +339,19 @@ def sanitize_graph_data(
         )
     else:
         data.merge_candidate_mask = torch.ones((edge_count,), dtype=torch.bool)
+    if hasattr(data, "edge_train_mask") and data.edge_train_mask is not None:
+        data.edge_train_mask = data.edge_train_mask.to(dtype=torch.bool)
+        if data.edge_train_mask.ndim != 1 or int(data.edge_train_mask.shape[0]) != edge_count:
+            raise GraphFilterError(f"bad edge_train_mask shape: {tuple(data.edge_train_mask.shape)}")
+    if hasattr(data, "edge_loss_weight") and data.edge_loss_weight is not None:
+        data.edge_loss_weight = torch.nan_to_num(
+            data.edge_loss_weight.to(dtype=torch.float32),
+            nan=0.0,
+            posinf=1e4,
+            neginf=0.0,
+        )
+        if data.edge_loss_weight.ndim != 1 or int(data.edge_loss_weight.shape[0]) != edge_count:
+            raise GraphFilterError(f"bad edge_loss_weight shape: {tuple(data.edge_loss_weight.shape)}")
     if int(data.x.shape[0]) == 0:
         raise GraphFilterError("empty node graph")
     if cfg.drop_empty_edge_graphs and int(data.edge_index.shape[1]) == 0:

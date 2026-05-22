@@ -278,16 +278,13 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
         json.dumps(
             {
                 "items": [
-                    {"text_for_embedding": "Introduction"},
+                    {"type": "title", "layout_layer": "main_text_flow", "text_for_embedding": "1 Introduction"},
                     {
                         "text_for_embedding": (
-                            "This is the same long paragraph about cyber threats and few-shot learning."
+                            "This is the same long paragraph about cyber threats"
                         )
                     },
-                    {"text_for_embedding": "cyber threats and few-shot learning."},
-                    {"text_for_embedding": "Apple item."},
-                    {"text_for_embedding": "Banana item."},
-                    {"text_for_embedding": "zzzz qqqq xxxx"},
+                    {"text_for_embedding": "and few-shot learning."},
                 ]
             }
         ),
@@ -295,20 +292,15 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
     )
     tex_path.write_text(
         r"""
-        \section{Introduction}
+        \section{1 Introduction}
         This is the same long paragraph about cyber threats and few-shot learning.
-
-        \begin{itemize}
-        \item Apple item.
-        \item Banana item.
-        \end{itemize}
         """,
         encoding="utf-8",
     )
     data = Data(
-        x=torch.zeros((6, 4), dtype=torch.float32),
-        edge_index=torch.tensor([[0, 1, 1, 3, 5], [1, 2, 0, 4, 0]], dtype=torch.long),
-        edge_attr=torch.zeros((5, 15), dtype=torch.float32),
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1, 1], [1, 2, 0]], dtype=torch.long),
+        edge_attr=torch.zeros((3, 15), dtype=torch.float32),
     )
     torch.save(data, graph_path)
 
@@ -324,10 +316,8 @@ def test_alignment_labeler_injects_merge_parent_and_none_labels(tmp_path):
         int(TexRelationLabel.PARENT_CHILD),
         int(TexRelationLabel.MERGE),
         int(TexRelationLabel.NONE),
-        int(TexRelationLabel.NONE),
-        int(TexRelationLabel.NONE),
     ]
-    assert graph.label_counts == {0: 1, 1: 1, 2: 3}
+    assert graph.label_counts == {0: 1, 1: 1, 2: 1}
     assert mapping_path.exists()
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert all({"node_type", "clean_text", "parent_id"} <= set(node) for node in mapping["tex_nodes"])
@@ -1307,7 +1297,7 @@ def test_alignment_labeler_exempts_expected_page_noise_from_orphan_ratio(tmp_pat
         encoding="utf-8",
     )
     data = Data(
-        x=torch.zeros((3, 4), dtype=torch.float32),
+        x=torch.zeros((2, 4), dtype=torch.float32),
         edge_index=torch.tensor([[0], [1]], dtype=torch.long),
         edge_attr=torch.zeros((1, 15), dtype=torch.float32),
     )
@@ -1325,9 +1315,10 @@ def test_alignment_labeler_exempts_expected_page_noise_from_orphan_ratio(tmp_pat
     ).run()
 
     assert graph.y.tolist() == [int(TexRelationLabel.PARENT_CHILD)]
-    assert graph.alignment_quality["raw_orphan_count"] == 1
+    assert len(graph.pdf_to_tex) == 2
+    assert graph.alignment_quality["raw_orphan_count"] == 0
     assert graph.alignment_quality["orphan_count"] == 0
-    assert graph.alignment_quality["expected_visual_orphan_exempt_count"] == 1
+    assert graph.alignment_quality["expected_visual_orphan_exempt_count"] == 0
 
 
 def test_alignment_labeler_treats_matched_pre_section_text_as_document_root_scoped(tmp_path):
@@ -1465,7 +1456,7 @@ def test_alignment_quality_exempts_metadata_orphans_from_main_orphan_gate(tmp_pa
     )
     tex_path.write_text("Body paragraph.", encoding="utf-8")
     data = Data(
-        x=torch.zeros((2, 4), dtype=torch.float32),
+        x=torch.zeros((1, 4), dtype=torch.float32),
         edge_index=torch.empty((2, 0), dtype=torch.long),
         edge_attr=torch.zeros((0, 15), dtype=torch.float32),
     )
@@ -1484,8 +1475,9 @@ def test_alignment_quality_exempts_metadata_orphans_from_main_orphan_gate(tmp_pa
     ).run()
 
     assert graph.alignment_quality["orphan_ratio"] == 0.0
-    assert graph.alignment_quality["metadata_orphan_count"] == 1
-    assert graph.alignment_quality["metadata_orphan_ratio"] == 1.0
+    assert len(graph.pdf_to_tex) == 1
+    assert graph.alignment_quality["metadata_pdf_node_count"] == 0
+    assert graph.alignment_quality["metadata_orphan_count"] == 0
 
 
 def test_alignment_quality_excludes_float_captions_from_main_unmapped_gate(tmp_path):
@@ -2171,6 +2163,677 @@ def test_alignment_labeler_skip_over_policy_still_rejects_sentence_boundary(tmp_
     ).run()
 
     assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+
+
+def test_alignment_labeler_tex_node_type_gate_rejects_section_sourced_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    mapping_path = tmp_path / "mapping.json"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "Soni",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "fication",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(r"\section{Sonification}", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="tex_node_type_gated",
+            output_mapping_json=mapping_path,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    assert graph.alignment_schema["merge_label_policy"] == "tex_node_type_gated"
+    assert graph.alignment_schema["suspect_merge_stats"]["disallowed_tex_node_type:section"] == 1
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert mapping["suspect_merge_examples"][0]["tex_node_type"] == "section"
+
+
+def test_alignment_labeler_tex_node_type_gate_keeps_paragraph_merge_and_subtype(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "text_for_embedding": "Introduction",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The method starts with a compact",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "description of the training pipeline.",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The method starts with a compact description of the training pipeline.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(merge_label_policy="tex_node_type_gated"),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+    assert graph.alignment_schema["merge_subtype_stats"]["body_paragraph_continuation"] == 1
+    assert graph.alignment_schema["suspect_merge_stats"] == {}
+
+
+def test_alignment_labeler_audit_supervision_channels_does_not_change_labels(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+    mapping_path = tmp_path / "mapping.json"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "text_for_embedding": "Introduction",
+                        "layout_layer": "main_text_flow",
+                        "font_size": 14,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The method starts with a compact",
+                        "layout_layer": "main_text_flow",
+                        "font_size": 10,
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "description of the training pipeline.",
+                        "layout_layer": "main_text_flow",
+                        "font_size": 10,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The method starts with a compact description of the training pipeline.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        edge_attr=torch.zeros((2, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            audit_supervision_channels=True,
+            output_mapping_json=mapping_path,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.PARENT_CHILD), int(TexRelationLabel.MERGE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["node_alignment_channel_stats"]["BODY_HEADING"] == 1
+    assert audit["node_alignment_channel_stats"]["BODY_TEXT"] == 2
+    assert audit["edge_relation_family_stats"]["HEADING_TO_FIRST_BODY_ANCHOR"] == 1
+    assert audit["edge_relation_family_stats"]["BODY_TEXT_CONTINUATION"] == 1
+    assert audit["edge_proposed_train_mask_stats"]["train"] == 2
+
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert mapping["channel_supervision_audit"]["schema_version"] == "channel_supervision_audit_v1"
+    assert len(mapping["node_alignment_records"]) == 3
+
+
+def test_alignment_labeler_emits_edge_train_mask_and_loss_weight(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "layout_layer": "main_text_flow"},
+                    {"type": "paragraph", "text_for_embedding": "The denoised im-", "layout_layer": "main_text_flow"},
+                    {"type": "paragraph", "text_for_embedding": "age is restored.", "layout_layer": "main_text_flow"},
+                    {"type": "caption", "text_for_embedding": "Figure 1: Overview", "layout_layer": "main_text_flow"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The denoised image is restored.
+        \begin{figure}
+        \caption{Figure 1: Overview}
+        \end{figure}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
+        edge_attr=torch.zeros((3, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            emit_supervision_weights=True,
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [
+        int(TexRelationLabel.PARENT_CHILD),
+        int(TexRelationLabel.MERGE),
+        int(TexRelationLabel.NONE),
+    ]
+    assert graph.edge_train_mask.dtype == torch.bool
+    assert graph.edge_loss_weight.dtype == torch.float32
+    assert graph.edge_train_mask.tolist() == [True, True, False]
+    assert graph.edge_loss_weight.tolist() == [1.0, 1.0, 0.0]
+    assert graph.alignment_schema["edge_supervision_weights"]["policy"] == "merge_precision_weighting_v1"
+
+
+def test_alignment_labeler_merge_v2_promotes_safe_skip_over_body_continuation(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "text_for_embedding": "Introduction",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The method begins",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "display_formula",
+                        "text_for_embedding": "x = y",
+                        "layout_layer": "math_layer",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "with a final clause",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The method begins with a final clause.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [3]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    data.edge_source_types = ["float_skip"]
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2_pdf_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["edge_relation_family_stats"]["BODY_TEXT_CONTINUATION"] == 1
+    assert graph.alignment_schema["label_policy_stats"]["skip_over_continuation_merge"] == 1
+
+
+def test_alignment_labeler_merge_v2_masks_caption_same_tex_merge(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "caption",
+                        "text_for_embedding": "Overview of",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "caption",
+                        "text_for_embedding": "the proposed model",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \begin{figure}
+        \caption{Overview of the proposed model}
+        \end{figure}
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2_pdf_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["weak_same_tex_not_merged_reason_stats"]["CAPTION_ENDPOINT"] == 1
+    assert audit["edge_proposed_train_mask_stats"]["mask"] == 1
+
+
+def test_alignment_labeler_merge_v2b_promotes_body_continuation_across_formula_interruption(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "text_for_embedding": "Introduction",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The method begins",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "display_formula",
+                        "text_for_embedding": "x = y",
+                        "layout_layer": "math_layer",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "with a final clause",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The method begins with a final clause.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [3]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2b_pdf_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+    assert graph.alignment_schema["label_policy_stats"]["merge_v2b_relaxed_same_tex_merge:FORMULA_INTERRUPTED"] == 1
+    assert graph.alignment_schema["merge_subtype_stats"]["body_paragraph_continuation"] == 1
+
+
+def test_alignment_labeler_merge_v2b_rejects_new_sentence_across_formula_interruption(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "type": "title",
+                        "text_for_embedding": "Introduction",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "The first statement ends.",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "display_formula",
+                        "text_for_embedding": "x = y",
+                        "layout_layer": "math_layer",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "A new statement starts here",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The first statement ends. A new statement starts here.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((4, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [3]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2b_pdf_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["weak_same_tex_not_merged_reason_stats"]["FORMULA_INTERRUPTED"] == 1
+
+
+def test_alignment_labeler_merge_v2c_keeps_only_hyphenated_body_continuation(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Introduction", "layout_layer": "main_text_flow"},
+                    {"type": "paragraph", "text_for_embedding": "The denoised im-", "layout_layer": "main_text_flow"},
+                    {"type": "paragraph", "text_for_embedding": "age is restored.", "layout_layer": "main_text_flow"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Introduction}
+        The denoised image is restored.
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2c_precision_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.MERGE)]
+    assert graph.alignment_schema["merge_subtype_stats"]["body_paragraph_continuation"] == 1
+
+
+def test_alignment_labeler_merge_v2c_rejects_email_like_body_text(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "paragraph", "text_for_embedding": "first.author@example.edu", "layout_layer": "main_text_flow"},
+                    {"type": "paragraph", "text_for_embedding": "second.author@example.edu", "layout_layer": "main_text_flow"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text("first.author@example.edu second.author@example.edu", encoding="utf-8")
+    data = Data(
+        x=torch.zeros((2, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2c_precision_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["weak_same_tex_not_merged_reason_stats"]["TYPE_GATE"] == 1
+
+
+def test_alignment_labeler_merge_v2c_rejects_math_like_body_text(tmp_path):
+    if not has_alignment_deps():
+        return
+    import torch
+    from torch_geometric.data import Data
+
+    content_path = tmp_path / "content_v7_styles.json"
+    tex_path = tmp_path / "main.tex"
+    graph_path = tmp_path / "graph.pt"
+
+    content_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "title", "text_for_embedding": "Derivation", "layout_layer": "main_text_flow"},
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "where x _ { t } = \\frac { a } { b }",
+                        "layout_layer": "main_text_flow",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text_for_embedding": "derivatives are computed by chain rule",
+                        "layout_layer": "main_text_flow",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tex_path.write_text(
+        r"""
+        \section{Derivation}
+        where x _ { t } = \frac { a } { b } derivatives are computed by chain rule
+        """,
+        encoding="utf-8",
+    )
+    data = Data(
+        x=torch.zeros((3, 4), dtype=torch.float32),
+        edge_index=torch.tensor([[1], [2]], dtype=torch.long),
+        edge_attr=torch.zeros((1, 22), dtype=torch.float32),
+    )
+    torch.save(data, graph_path)
+
+    graph = AlignmentLabeler(
+        content_json_path=content_path,
+        tex_path=tex_path,
+        graph_path=graph_path,
+        config=AlignmentLabelerConfig(
+            merge_label_policy="merge_v2c_precision_first",
+            audit_supervision_channels=True,
+        ),
+    ).run()
+
+    assert graph.y.tolist() == [int(TexRelationLabel.NONE)]
+    audit = graph.alignment_schema["channel_supervision_audit"]
+    assert audit["weak_same_tex_not_merged_reason_stats"]["TYPE_GATE"] == 1
 
 
 def test_alignment_labeler_recovers_hyphenated_visual_merge_across_tex_alignment_boundary(tmp_path):

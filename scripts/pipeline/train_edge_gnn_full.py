@@ -144,6 +144,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=32,
         help="Minimum hard NONE edges kept per training batch when OHEM is enabled.",
     )
+    parser.add_argument(
+        "--use-edge-train-mask",
+        action="store_true",
+        help="If present, use graph.edge_train_mask to exclude noisy/unknown edges from training loss.",
+    )
+    parser.add_argument(
+        "--use-edge-loss-weight",
+        action="store_true",
+        help="If present, multiply training loss by graph.edge_loss_weight for weighted diagnostics.",
+    )
     parser.add_argument("--train-ratio", type=float, default=0.80)
     parser.add_argument("--val-ratio", type=float, default=0.10)
     parser.add_argument("--test-ratio", type=float, default=0.10)
@@ -215,7 +225,9 @@ def main() -> int:
         f"loss={args.loss} weights={args.class_weights} "
         f"positive_weight_multiplier={args.positive_weight_multiplier} "
         f"train_negative_dropout={args.train_negative_dropout} "
-        f"ohem_negative_ratio={args.ohem_negative_ratio}"
+        f"ohem_negative_ratio={args.ohem_negative_ratio} "
+        f"use_edge_train_mask={args.use_edge_train_mask} "
+        f"use_edge_loss_weight={args.use_edge_loss_weight}"
     )
 
     best_metric = -1.0
@@ -231,6 +243,8 @@ def main() -> int:
             torch=torch,
             ohem_negative_ratio=args.ohem_negative_ratio,
             ohem_min_negatives=args.ohem_min_negatives,
+            use_edge_train_mask=args.use_edge_train_mask,
+            use_edge_loss_weight=args.use_edge_loss_weight,
         )
         row: dict[str, Any] = {"epoch": epoch, "train_loss": train_loss}
         for split_name, loader in loaders.items():
@@ -448,6 +462,8 @@ def train_one_epoch(
     torch: Any,
     ohem_negative_ratio: float = 0.0,
     ohem_min_negatives: int = 32,
+    use_edge_train_mask: bool = False,
+    use_edge_loss_weight: bool = False,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -459,7 +475,18 @@ def train_one_epoch(
             batch = apply_train_negative_edge_dropout(batch, negative_dropout, torch=torch)
         optimizer.zero_grad(set_to_none=True)
         logits = model(batch)
-        if ohem_negative_ratio > 0.0:
+        if use_edge_train_mask or use_edge_loss_weight:
+            loss = weighted_edge_supervision_loss(
+                logits,
+                batch.y,
+                batch=batch,
+                class_weights=getattr(loss_fn, "weight", None),
+                gamma=getattr(loss_fn, "gamma", None) if isinstance(loss_fn, FocalLoss) else None,
+                use_edge_train_mask=use_edge_train_mask,
+                use_edge_loss_weight=use_edge_loss_weight,
+                torch=torch,
+            )
+        elif ohem_negative_ratio > 0.0:
             loss = ohem_cross_entropy_loss(
                 logits,
                 batch.y,
@@ -477,6 +504,53 @@ def train_one_epoch(
         total_loss += float(loss.detach().cpu().item())
         batches += 1
     return total_loss / max(1, batches)
+
+
+def weighted_edge_supervision_loss(
+    logits: Any,
+    target: Any,
+    *,
+    batch: Any,
+    class_weights: Any | None,
+    gamma: float | None,
+    use_edge_train_mask: bool,
+    use_edge_loss_weight: bool,
+    torch: Any,
+) -> Any:
+    """Per-edge loss with optional graph-provided train mask and loss weights."""
+
+    y = torch.where(target.long() >= 2, torch.full_like(target.long(), 2), target.long())
+    weights = class_weights
+    if weights is not None:
+        weights = weights.to(device=logits.device, dtype=logits.dtype)
+    per_edge_loss = torch.nn.functional.cross_entropy(logits, y, weight=weights, reduction="none")
+    if gamma is not None:
+        probabilities = torch.softmax(logits, dim=-1)
+        pt = probabilities.gather(1, y.view(-1, 1)).squeeze(1).clamp_min(1e-8)
+        per_edge_loss = ((1.0 - pt) ** float(gamma)) * per_edge_loss
+
+    selected_mask = torch.ones_like(y, dtype=torch.bool)
+    if use_edge_train_mask:
+        if not hasattr(batch, "edge_train_mask") or batch.edge_train_mask is None:
+            raise ValueError("--use-edge-train-mask was set but batch.edge_train_mask is missing")
+        selected_mask = batch.edge_train_mask.to(device=logits.device, dtype=torch.bool)
+        if selected_mask.ndim != 1 or int(selected_mask.shape[0]) != int(y.shape[0]):
+            raise ValueError(f"bad edge_train_mask shape: {tuple(selected_mask.shape)} expected {(int(y.shape[0]),)}")
+
+    edge_weights = torch.ones_like(per_edge_loss, dtype=logits.dtype)
+    if use_edge_loss_weight:
+        if not hasattr(batch, "edge_loss_weight") or batch.edge_loss_weight is None:
+            raise ValueError("--use-edge-loss-weight was set but batch.edge_loss_weight is missing")
+        edge_weights = batch.edge_loss_weight.to(device=logits.device, dtype=logits.dtype)
+        if edge_weights.ndim != 1 or int(edge_weights.shape[0]) != int(y.shape[0]):
+            raise ValueError(f"bad edge_loss_weight shape: {tuple(edge_weights.shape)} expected {(int(y.shape[0]),)}")
+        edge_weights = torch.clamp(edge_weights, min=0.0)
+
+    effective_weights = edge_weights * selected_mask.to(dtype=logits.dtype)
+    denominator = effective_weights.sum()
+    if float(denominator.detach().cpu().item()) <= 0.0:
+        return per_edge_loss.mean()
+    return (per_edge_loss * effective_weights).sum() / denominator
 
 
 def ohem_cross_entropy_loss(
@@ -556,6 +630,10 @@ def apply_train_negative_edge_dropout(batch: Any, dropout: float, *, torch: Any)
         filtered.message_edge_mask = filtered.message_edge_mask[keep_mask]
     if hasattr(filtered, "merge_candidate_mask") and filtered.merge_candidate_mask is not None:
         filtered.merge_candidate_mask = filtered.merge_candidate_mask[keep_mask]
+    if hasattr(filtered, "edge_train_mask") and filtered.edge_train_mask is not None:
+        filtered.edge_train_mask = filtered.edge_train_mask[keep_mask]
+    if hasattr(filtered, "edge_loss_weight") and filtered.edge_loss_weight is not None:
+        filtered.edge_loss_weight = filtered.edge_loss_weight[keep_mask]
     if hasattr(filtered, "edge_label") and filtered.edge_label is not None:
         filtered.edge_label = filtered.y
     return filtered

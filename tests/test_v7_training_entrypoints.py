@@ -38,6 +38,8 @@ def test_train_negative_edge_dropout_keeps_positives_and_drops_none():
         y=torch.tensor([0, 1, 2, 2], dtype=torch.long),
         message_edge_mask=torch.tensor([True, True, False, True], dtype=torch.bool),
         merge_candidate_mask=torch.tensor([True, False, False, True], dtype=torch.bool),
+        edge_train_mask=torch.tensor([True, True, False, True], dtype=torch.bool),
+        edge_loss_weight=torch.tensor([1.0, 0.5, 0.0, 0.2], dtype=torch.float32),
     )
 
     filtered = train_edge_gnn_full.apply_train_negative_edge_dropout(batch, 0.999, torch=torch)
@@ -46,6 +48,46 @@ def test_train_negative_edge_dropout_keeps_positives_and_drops_none():
     assert filtered.y.tolist() == [0, 1]
     assert filtered.message_edge_mask.tolist() == [True, True]
     assert filtered.merge_candidate_mask.tolist() == [True, False]
+    assert filtered.edge_train_mask.tolist() == [True, True]
+    assert filtered.edge_loss_weight.tolist() == [1.0, 0.5]
+
+
+def test_weighted_edge_supervision_loss_uses_mask_and_weights():
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ModuleNotFoundError:
+        return
+
+    logits = torch.tensor(
+        [
+            [2.0, 0.0, -2.0],
+            [0.0, 2.0, -2.0],
+            [-2.0, 0.0, 3.0],
+        ],
+        dtype=torch.float32,
+    )
+    target = torch.tensor([0, 1, 2], dtype=torch.long)
+    batch = Data(
+        y=target,
+        edge_train_mask=torch.tensor([True, True, False], dtype=torch.bool),
+        edge_loss_weight=torch.tensor([1.0, 0.25, 1.0], dtype=torch.float32),
+    )
+    per_edge = torch.nn.functional.cross_entropy(logits, target, reduction="none")
+    expected = (per_edge[0] * 1.0 + per_edge[1] * 0.25) / 1.25
+
+    actual = train_edge_gnn_full.weighted_edge_supervision_loss(
+        logits,
+        target,
+        batch=batch,
+        class_weights=None,
+        gamma=None,
+        use_edge_train_mask=True,
+        use_edge_loss_weight=True,
+        torch=torch,
+    )
+
+    assert torch.allclose(actual, expected)
 
 
 def test_ohem_loss_keeps_positive_and_hardest_none_edges():

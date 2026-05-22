@@ -60,6 +60,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-merge-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--require-parent-argmax", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
+        "--enable-layout-scope-continuation-merge",
+        action="store_true",
+        help="Experimental: allow a narrow deterministic text continuation merge across layout-band boundaries.",
+    )
+    parser.add_argument(
+        "--enable-list-continuation-merge",
+        action="store_true",
+        help="Experimental: allow a narrow deterministic split-list-item continuation merge.",
+    )
+    parser.add_argument(
+        "--enable-family-aware-merge-policy",
+        action="store_true",
+        help="Experimental: use family-specific MERGE thresholds/gates without changing the trained model.",
+    )
+    parser.add_argument("--family-body-list-merge-threshold", type=float, default=0.05)
+    parser.add_argument("--family-reference-merge-threshold", type=float, default=0.82)
+    parser.add_argument(
+        "--enable-family-aware-missing-candidate-merge",
+        action="store_true",
+        help="Experimental: add only very narrow deterministic BODY/LIST continuation merges for missing candidate edges.",
+    )
+    parser.add_argument(
         "--heading-skeleton-mode",
         choices=["stack"],
         default="stack",
@@ -99,6 +121,12 @@ def main() -> int:
             parent_threshold=args.parent_threshold,
             require_merge_argmax=args.require_merge_argmax,
             require_parent_argmax=args.require_parent_argmax,
+            enable_layout_scope_continuation_merge=args.enable_layout_scope_continuation_merge,
+            enable_list_continuation_merge=args.enable_list_continuation_merge,
+            enable_family_aware_merge_policy=args.enable_family_aware_merge_policy,
+            family_body_list_merge_threshold=args.family_body_list_merge_threshold,
+            family_reference_merge_threshold=args.family_reference_merge_threshold,
+            enable_family_aware_missing_candidate_merge=args.enable_family_aware_missing_candidate_merge,
             heading_skeleton_mode=args.heading_skeleton_mode,
         )
     )
