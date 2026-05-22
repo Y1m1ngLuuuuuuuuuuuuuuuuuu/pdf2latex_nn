@@ -4,6 +4,12 @@
 
 This is the current operational runbook for v7 data production, relabeling, training, ablation, and monitoring.
 
+For the meaning of every repository/data directory, use:
+
+```text
+docs/PROJECT_FILE_LAYOUT.md
+```
+
 ## New Data Production
 
 ### 2026-05-22 Fresh TeX-Source Rebuild
@@ -21,6 +27,15 @@ candidate_manifest: data/00_manifests/arxiv_2025_idscan_candidates_360000.jsonl
 Important: this run does **not** download arXiv-hosted original PDFs. It
 downloads arXiv e-print TeX sources, compiles them locally, and keeps the TeX
 source plus our compiled PDF.
+
+Storage:
+
+```text
+data/03_tex_sources/{doc_id}/       accepted TeX source tree
+data/01_raw_pdfs/{doc_id}.pdf       locally compiled PDF for MinerU
+data/09_eval_reports/{run_name}/    progress, accepted/rejected logs, compile logs
+logs/{run_name}.log                 long-running process log
+```
 
 Monitor:
 

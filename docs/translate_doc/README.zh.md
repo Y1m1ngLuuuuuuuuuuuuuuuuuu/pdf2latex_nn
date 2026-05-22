@@ -121,6 +121,7 @@ data/09_eval_reports/current_eval_rollup_hard20_floatcaption_rerun_20260518_1326
 ## 当前文档
 
 ```text
+docs/PROJECT_FILE_LAYOUT.md           本地/AutoDL 目录和产物地图
 docs/PROJECT_ARCHITECTURE_FULL.md     完整架构、逻辑、指标和代码地图
 docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md 面向论文写作的完整项目描述
 docs/PROJECT_SOURCE_OF_TRUTH.md       本地 / GitHub / AutoDL 边界
@@ -159,6 +160,13 @@ AutoDL 项目根目录：
 
 ```text
 /root/autodl-tmp/pdf2latex_nn/data
+```
+
+当前目录契约：
+
+```text
+docs/PROJECT_FILE_LAYOUT.md
+docs/translate_doc/PROJECT_FILE_LAYOUT.zh.md
 ```
 
 不要提交数据集、checkpoint、生成 PDF、密钥或 AutoDL 凭据。

@@ -32,10 +32,17 @@ GitHub:
 https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
 ```
 
-Current pushed commit after the recovery/source sync:
+Do not treat this document as a static commit pin.  Check the current source
+state with:
+
+```bash
+git log --oneline -5
+```
+
+The canonical local/AutoDL directory map is:
 
 ```text
-7ec359c Add family-aware merge audit and decoder policy
+docs/PROJECT_FILE_LAYOUT.md
 ```
 
 The 2026-05-22 remote recovery, active rebuild run, and current MERGE-label
@@ -104,6 +111,23 @@ cd /root/autodl-tmp/pdf2latex_nn
 cat data/09_eval_reports/arxiv2025_compilable_tex8000_idscan_20260522/progress.json
 tail -f logs/arxiv2025_compilable_tex8000_idscan_20260522.log
 ```
+
+Storage contract for this run:
+
+```text
+TeX source trees:
+  data/03_tex_sources/{doc_id}/
+
+locally compiled PDFs used by MinerU:
+  data/01_raw_pdfs/{doc_id}.pdf
+
+run progress and accepted/rejected logs:
+  data/09_eval_reports/arxiv2025_compilable_tex8000_idscan_20260522/
+```
+
+Do not put accepted sources or input PDFs under `data/09_eval_reports/` or
+`local_outputs/`; those directories are for reports, copied inspections, and
+temporary experiment outputs.
 
 The full v7 JSON is the complete fact layer. It must not delete or rewrite
 metadata, figures, tables, footnotes, headers, captions, or references just

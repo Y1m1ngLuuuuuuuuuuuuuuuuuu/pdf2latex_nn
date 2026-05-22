@@ -1,6 +1,6 @@
 # PDF2LaTeX NN
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-22
 
 PDF2LaTeX NN is a structure-aware PDF-to-LaTeX pipeline for born-digital research papers. It does not treat PDF conversion as plain OCR. The current system extracts visual facts from PDF, derives graph relation labels from matching TeX source, trains a GNN to predict document relations, and reconstructs compilable LaTeX through a decoupled IR renderer.
 
@@ -123,6 +123,7 @@ data/09_eval_reports/current_eval_rollup_hard20_floatcaption_rerun_20260518_1326
 ## Current Docs
 
 ```text
+docs/PROJECT_FILE_LAYOUT.md          local/AutoDL directory and artifact map
 docs/PROJECT_ARCHITECTURE_FULL.md     complete architecture, logic, metrics, and code map
 docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md paper-facing full project description
 docs/PROJECT_SOURCE_OF_TRUTH.md      local / GitHub / AutoDL boundary
@@ -155,6 +156,12 @@ Large artifacts stay on AutoDL under:
 
 ```text
 /root/autodl-tmp/pdf2latex_nn/data
+```
+
+The canonical folder contract is now:
+
+```text
+docs/PROJECT_FILE_LAYOUT.md
 ```
 
 Do not commit datasets, checkpoints, generated PDFs, secrets, or AutoDL credentials.
