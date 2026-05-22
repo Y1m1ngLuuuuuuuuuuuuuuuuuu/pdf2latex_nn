@@ -1,10 +1,51 @@
 # V7 Training And Monitoring
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-22
 
 This is the current operational runbook for v7 data production, relabeling, training, ablation, and monitoring.
 
 ## New Data Production
+
+### 2026-05-22 Fresh TeX-Source Rebuild
+
+After the remote runtime reset, the current rebuild target is a fresh
+compile-success TeX-source pool:
+
+```text
+run_name: arxiv2025_compilable_tex8000_idscan_20260522
+target_successes: 8000
+candidate source: deterministic 2025 arXiv id scan
+candidate_manifest: data/00_manifests/arxiv_2025_idscan_candidates_360000.jsonl
+```
+
+Important: this run does **not** download arXiv-hosted original PDFs. It
+downloads arXiv e-print TeX sources, compiles them locally, and keeps the TeX
+source plus our compiled PDF.
+
+Monitor:
+
+```bash
+cd /root/autodl-tmp/pdf2latex_nn
+
+cat data/09_eval_reports/arxiv2025_compilable_tex8000_idscan_20260522/progress.json
+
+tail -f logs/arxiv2025_compilable_tex8000_idscan_20260522.log
+
+ps -eo pid,etime,pcpu,pmem,cmd \
+  | grep -E 'arxiv2025_compilable|step0_build_compilable' \
+  | grep -v grep
+
+wc -l data/09_eval_reports/arxiv2025_compilable_tex8000_idscan_20260522/accepted.jsonl
+
+find data/03_tex_sources -mindepth 1 -maxdepth 1 -type d | wc -l
+find data/01_raw_pdfs -type f -name '*.pdf' | wc -l
+```
+
+Do not start MinerU/v7 processing directly from this source rebuild until a
+small acceptance sanity check has confirmed that the compiled PDFs and source
+directories are paired correctly.
+
+### V7 Dataset Builder
 
 Use the staged builder for remaining unprocessed PDF/TeX samples:
 

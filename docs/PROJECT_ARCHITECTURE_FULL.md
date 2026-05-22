@@ -1,6 +1,6 @@
 # PDF2LaTeX-NN Full Architecture And Design Notes
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-22
 
 This is the full project architecture record. It collects the design decisions,
 data flow, judgment rules, model interfaces, evaluation metrics, and code map
@@ -133,6 +133,25 @@ GNN: local continuation and attachment evidence
 Renderer: faithful LaTeX surface from full v7 facts
 ```
 
+Current 2026-05-22 interpretation:
+
+```text
+Heading / section scope:
+  deterministic heading stack is the primary production authority.
+  GNN PARENT_CHILD is a hint/shadow signal unless a separate soft-override
+  ablation proves value.
+
+MERGE:
+  the main learned-relation surface to improve.
+  Accepted MERGE edges can already enter RenderTreeIR and affect generated
+  LaTeX; the hard question is label/channel precision, not renderer exposure.
+
+Rules-only:
+  must remain an explicit baseline. If rules-only is close on easy documents,
+  use GNN-sensitive hardsets and edge-level evidence rather than overstating
+  E2E gains.
+```
+
 ## 2. System Diagram
 
 ```mermaid
@@ -178,6 +197,20 @@ src/perception/
 | `layout_probes.py` | Layout-role probes such as header/footer/footnote/TOC/front matter. |
 | `title_features.py` | Numbering and heading token probes. |
 | `gnn_view_adapter.py` | Converts full v7 fact layer into graph-visible GNN view. |
+
+### 3.1.1 Current Merge-Audit Tools
+
+```text
+tools/audit/channel_aware_merge_label_audit.py
+tools/audit/audit_missing_below_threshold_merge.py
+tools/audit/family_specific_merge_calibration.py
+tools/audit/probe_merge_visibility.py
+```
+
+These tools inspect whether MERGE labels and predictions are usable by
+family/channel. They are diagnostic tools; they should not mutate graph tensors,
+labels, or decoder behavior unless an explicit experimental flag is passed
+elsewhere.
 
 The frontend adapter boundary is specified in
 `docs/MINERU_ADAPTER_CONTRACT.md`. As long as a future MinerU version or another

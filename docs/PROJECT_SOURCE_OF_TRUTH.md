@@ -1,6 +1,6 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-22
 
 This repository is the source-control home for the v7 PDF-to-LaTeX system. AutoDL is the runtime home for datasets, MinerU outputs, graph tensors, checkpoints, generated PDFs, and long-running jobs.
 
@@ -30,6 +30,19 @@ GitHub:
 
 ```text
 https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
+```
+
+Current pushed commit after the recovery/source sync:
+
+```text
+7ec359c Add family-aware merge audit and decoder policy
+```
+
+The 2026-05-22 remote recovery, active rebuild run, and current MERGE-label
+decisions are recorded in:
+
+```text
+docs/RECOVERY_AND_CURRENT_RUNBOOK_2026_05_22.md
 ```
 
 ## Production Pipeline
@@ -68,6 +81,29 @@ compiled PDF + matching TeX
 ```
 
 Old v3/v4/v5 JSON variants are historical experiments. Do not feed them into training or evaluation.
+
+Current data rebuild note, 2026-05-22:
+
+```text
+Active run:
+  arxiv2025_compilable_tex8000_idscan_20260522
+
+Purpose:
+  rebuild a fresh 2025 arXiv TeX-source pool after the remote runtime reset.
+
+Policy:
+  download arXiv e-print TeX source, compile locally, keep TeX source and the
+  locally compiled PDF. Do not download arXiv-hosted original PDFs for this
+  dataset.
+```
+
+Monitor:
+
+```bash
+cd /root/autodl-tmp/pdf2latex_nn
+cat data/09_eval_reports/arxiv2025_compilable_tex8000_idscan_20260522/progress.json
+tail -f logs/arxiv2025_compilable_tex8000_idscan_20260522.log
+```
 
 The full v7 JSON is the complete fact layer. It must not delete or rewrite
 metadata, figures, tables, footnotes, headers, captions, or references just
@@ -258,6 +294,32 @@ for MERGE, using raw projected edge-pair features for the MERGE logit.  The
 hard MERGE gate is part of the current main path, not a separate post-hoc
 cleanup.
 
+Current MERGE investigation direction:
+
+```text
+PARENT_CHILD:
+  stack heading skeleton is the main section-scope authority.
+  GNN parent edges are hints unless a specific ablation proves an override path.
+
+MERGE:
+  focus of the current GNN contribution investigation.
+  Do not lower tau_merge globally.
+  Use channel/family-aware audit and small branches first:
+    BODY_TEXT/LIST  -> lower threshold only under precision gates
+    REFERENCE       -> separate high threshold or reference continuation
+    WEAK/MASKED     -> mask or low weight
+    LAYOUT_MISMATCH -> hard negative
+```
+
+Relevant audit tools:
+
+```text
+tools/audit/channel_aware_merge_label_audit.py
+tools/audit/audit_missing_below_threshold_merge.py
+tools/audit/family_specific_merge_calibration.py
+tools/audit/probe_merge_visibility.py
+```
+
 ## Evaluation Contract
 
 Evaluation is layered.  Do not use raw source-AST section attachment as the sole
@@ -321,6 +383,7 @@ docs/ground_truth_labeling_v0.md
 docs/ablation_plan_v2.md
 docs/ablation_results_current.md
 docs/v7_training_and_monitoring.md
+docs/RECOVERY_AND_CURRENT_RUNBOOK_2026_05_22.md
 docs/interface_audit_2026_05_14.md
 docs/LOCAL_CONFIGURATION.md
 ```

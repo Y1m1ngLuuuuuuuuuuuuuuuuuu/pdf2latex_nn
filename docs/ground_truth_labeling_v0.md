@@ -1,6 +1,6 @@
 # Ground Truth Labeling v0
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-22
 
 This document describes the current automatic label generator. It creates training labels from matching TeX source and v7 PDF graph candidates.
 
@@ -95,6 +95,68 @@ TeX parent maps to first parent bbox and child maps to first child bbox -> PAREN
 anything else -> NONE
 ```
 
+The historical rule above is still the compatibility baseline, but current
+analysis treats it as insufficiently expressive for MERGE training. The active
+direction is channel-aware relation supervision: TeX alignment is evidence, not
+the whole label definition.
+
+Additional audit-only fields now used for MERGE inspection:
+
+```text
+relation_family:
+  BODY_TEXT_CONTINUATION
+  LIST_CONTINUATION
+  FORMULA_LEAD_IN
+  FORMULA_CONTEXT
+  FLOAT_SKIP_CONTINUATION
+  WEAK_SAME_TEX
+  LAYOUT_SCOPE_MISMATCH
+  FLOAT_PROXY_ENDPOINT
+  CAPTION_ENDPOINT
+  REFERENCE_ENDPOINT
+  HARD_NEGATIVE
+  MASKED_UNKNOWN
+
+label_strength:
+  strong
+  weak
+  masked
+  hard_negative
+  exempt
+
+proposed_loss_weight:
+  strong = 1.0
+  weak = 0.2
+  masked/exempt = 0.0
+  hard_negative = 1.0
+```
+
+Current MERGE policy direction:
+
+```text
+BODY_TEXT / LIST:
+  strong MERGE only when same TeX node, source span is close, layout scope is
+  compatible, and visual continuation passes.
+
+REFERENCE:
+  separate channel; do not share the low BODY_TEXT threshold.
+
+FORMULA / FLOAT / CAPTION:
+  weak or masked unless the relation is explicitly caption/float/reference
+  specific.
+
+LAYOUT_SCOPE_MISMATCH:
+  hard negative.
+
+missing candidate:
+  only add extremely narrow forward body/list continuation candidates.
+```
+
+PARENT_CHILD is not being redefined in this pass. Production E2E section scope
+is still governed primarily by the deterministic heading stack; parent labels
+remain useful for edge-level learning and future controlled override
+experiments.
+
 Important guards:
 
 ```text
@@ -126,6 +188,15 @@ invalid graph tensor schema
 ```
 
 Reports are written through the batch scripts as JSON/JSONL error logs and alignment mappings.
+
+Current MERGE audit entrypoints:
+
+```text
+tools/audit/channel_aware_merge_label_audit.py
+tools/audit/audit_missing_below_threshold_merge.py
+tools/audit/family_specific_merge_calibration.py
+tools/audit/probe_merge_visibility.py
+```
 
 ## Current Entrypoints
 
