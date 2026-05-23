@@ -842,6 +842,7 @@ def materialize_v8_items(ordered_blocks: list[V8Block], decisions: list[MergeDec
             "source_middle_indices": [member.middle_index for member in chain],
             "source_page_indices": [member.page_idx for member in chain],
             "source_line_ids": [line.line_id for member in chain for line in member.lines],
+            "source_lines": [line.to_json() for member in chain for line in member.lines],
             "reading_order": len(items),
             "column_id": first.column_id,
             "merge_chain_length": len(chain),

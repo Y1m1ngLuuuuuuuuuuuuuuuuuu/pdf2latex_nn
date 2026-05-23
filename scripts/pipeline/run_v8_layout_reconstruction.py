@@ -27,6 +27,7 @@ from src.adapters.mineru_v8_document_ir import convert_v8_payload_to_document_ir
 from src.evaluation.compile_eval import compile_latex  # noqa: E402
 from src.generation.ir_renderer import IRLatexRenderConfig  # noqa: E402
 from src.generation.render_surface import render_original_like_document  # noqa: E402
+from src.generation.v8_style_detector import detect_v8_style  # noqa: E402
 from src.ir.serialization import read_json, write_json  # noqa: E402
 from src.perception.mineru_v8_reflow import build_v8_from_middle, dump_json  # noqa: E402
 from src.reasoning.front_matter_extractor import extract_front_matter  # noqa: E402
@@ -100,11 +101,17 @@ def main() -> int:
     tree = build_v8_render_tree(document, document_ir_path=str(document_path), front_matter=front_matter)
     render_tree_path = args.output_dir / "render_tree_ir.json"
     write_json(render_tree_path, tree)
+    style, style_diagnostics = detect_v8_style(document, tree=tree)
+    style_path = args.output_dir / "style_profile.json"
+    style_diag_path = args.output_dir / "v8_style_detector_diag.json"
+    write_json(style_path, style)
+    write_json(style_diag_path, style_diagnostics)
 
     shutil.copy2(args.pdf, args.output_dir / "original.pdf")
     tex = render_original_like_document(
         document,
         tree,
+        style=style,
         config=IRLatexRenderConfig(
             title=None,
             include_maketitle=False,
@@ -143,6 +150,8 @@ def main() -> int:
         "v8_content_json": str(v8_path),
         "document_ir": str(document_path),
         "render_tree_ir": str(render_tree_path),
+        "style_profile": str(style_path),
+        "style_detector_diag": str(style_diag_path),
         "generated_tex": str(tex_path),
         "generated_pdf": str(args.output_dir / "generated.pdf"),
         "compile": compile_report,

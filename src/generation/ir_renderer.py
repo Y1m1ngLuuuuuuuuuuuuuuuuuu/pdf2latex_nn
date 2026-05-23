@@ -451,7 +451,11 @@ class OriginalLikeIRLatexRenderer:
             lines.append(rf"\setlength{{\columnsep}}{{{_pt(min(column_gap_pt, 48.0))}}}")
         body_font_size = _float_or_none(options.get("body_font_size"))
         if body_font_size:
-            lines.append(rf"\AtBeginDocument{{\fontsize{{{body_font_size:.2f}pt}}{{{(body_font_size * 1.2):.2f}pt}}\selectfont}}")
+            body_line_height = _float_or_none(options.get("body_line_height"))
+            if body_line_height is None or body_line_height < body_font_size:
+                body_line_height = body_font_size * 1.2
+            body_line_height = min(max(body_line_height, body_font_size * 1.05), body_font_size * 1.8)
+            lines.append(rf"\AtBeginDocument{{\fontsize{{{body_font_size:.2f}pt}}{{{body_line_height:.2f}pt}}\selectfont}}")
         paragraph_indent = _float_or_none(options.get("paragraph_indent"))
         if paragraph_indent is not None:
             lines.append(rf"\setlength{{\parindent}}{{{_pt(paragraph_indent)}}}")
@@ -477,8 +481,11 @@ class OriginalLikeIRLatexRenderer:
                 settings.append(f"topsep={_pt(min(topsep, 18.0))}")
             if settings:
                 lines.append(rf"\setlist{{{','.join(settings)}}}")
-        lines.extend(_heading_style_commands_from_render_tree(tree))
-        lines.extend(_heading_spacing_commands(style.role_styles))
+        heading_commands = _heading_style_commands_from_render_tree(tree)
+        if heading_commands:
+            lines.extend(heading_commands)
+        else:
+            lines.extend(_heading_spacing_commands(style.role_styles))
         return lines
 
     def _render_tree_node(
