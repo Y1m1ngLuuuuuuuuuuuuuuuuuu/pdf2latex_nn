@@ -151,7 +151,7 @@ class OriginalLikeIRLatexRenderer:
         render_nodes = {node.render_id: node for node in tree.nodes}
         root = render_nodes[tree.root_id]
 
-        lines = self._render_preamble(style, citations)
+        lines = self._render_preamble(style, citations, tree)
         title = self.config.title or self._infer_title(document)
         extracted_front_matter = self._front_matter_for_original_like(document, tree)
         use_maketitle = self._use_maketitle()
@@ -331,7 +331,12 @@ class OriginalLikeIRLatexRenderer:
             metadata={**tree.metadata, "float_fallback_count": len(additions)},
         )
 
-    def _render_preamble(self, style: StyleProfile, citations: CitationResolution | None = None) -> list[str]:
+    def _render_preamble(
+        self,
+        style: StyleProfile,
+        citations: CitationResolution | None = None,
+        tree: RenderTreeIR | None = None,
+    ) -> list[str]:
         options = f"[{','.join(style.documentclass_options)}]" if style.documentclass_options else ""
         lines = [rf"\documentclass{options}{{{style.documentclass}}}"]
         packages = [*style.packages, *REQUIRED_RENDER_PACKAGES]
@@ -352,7 +357,7 @@ class OriginalLikeIRLatexRenderer:
             lines.append(r"\setcitestyle{round}")
         for macro in style.macros:
             lines.append(macro)
-        lines.extend(self._render_original_like_layout_commands(style))
+        lines.extend(self._render_original_like_layout_commands(style, tree=tree))
         lines.append("")
         return lines
 
@@ -429,7 +434,7 @@ class OriginalLikeIRLatexRenderer:
     def _consume_front_matter_span(self, span: FrontMatterSpan) -> None:
         self._consumed_front_matter_source_ids.update(span.source_node_ids)
 
-    def _render_original_like_layout_commands(self, style: StyleProfile) -> list[str]:
+    def _render_original_like_layout_commands(self, style: StyleProfile, *, tree: RenderTreeIR | None = None) -> list[str]:
         options = style.renderer_options or {}
         lines: list[str] = []
         if self.config.enable_fontspec:
@@ -472,8 +477,8 @@ class OriginalLikeIRLatexRenderer:
                 settings.append(f"topsep={_pt(min(topsep, 18.0))}")
             if settings:
                 lines.append(rf"\setlist{{{','.join(settings)}}}")
-        heading_spacing = _heading_spacing_commands(style.role_styles)
-        lines.extend(heading_spacing)
+        lines.extend(_heading_style_commands_from_render_tree(tree))
+        lines.extend(_heading_spacing_commands(style.role_styles))
         return lines
 
     def _render_tree_node(
@@ -1047,9 +1052,12 @@ class OriginalLikeIRLatexRenderer:
         marker_pending = strip_leading_list_marker
         node_baseline = _node_baseline_font_size(node, self._active_style)
         body_font_class = _body_font_class(self._active_style)
+        canonical_compact = _compact_span_coverage_text(node.text)
         for span in node.spans:
             text = _clean_render_text(span.text or "")
             if not text:
+                continue
+            if _is_orphan_ocr_noise_span(text, canonical_compact):
                 continue
             if marker_pending:
                 stripped = strip_list_marker(text)
@@ -1102,6 +1110,8 @@ class OriginalLikeIRLatexRenderer:
         """
 
         if not node.spans:
+            return False
+        if not any(_span_has_visible_inline_style(span, node, self._active_style) for span in node.spans):
             return False
         canonical = _compact_span_coverage_text(text or node.text)
         if len(canonical) < 60:
@@ -3504,6 +3514,80 @@ def _heading_spacing_commands(role_styles: dict[str, dict[str, object]]) -> list
     return commands
 
 
+def _heading_style_commands_from_render_tree(tree: RenderTreeIR | None) -> list[str]:
+    if tree is None:
+        return []
+    registry = tree.metadata.get("heading_style_registry")
+    if not isinstance(registry, dict):
+        return []
+    styles = registry.get("styles")
+    if not isinstance(styles, list):
+        return []
+
+    chosen_by_level: dict[int, dict[str, object]] = {}
+    for style in styles:
+        if not isinstance(style, dict):
+            continue
+        level = _int_or_none(style.get("resolved_level"))
+        if level not in {1, 2, 3}:
+            continue
+        current = chosen_by_level.get(level)
+        if current is None or _heading_style_priority(style) > _heading_style_priority(current):
+            chosen_by_level[level] = style
+
+    role_to_command = {1: "section", 2: "subsection", 3: "subsubsection"}
+    commands: list[str] = []
+    for level in sorted(chosen_by_level):
+        command = role_to_command.get(level)
+        if not command:
+            continue
+        style = chosen_by_level[level]
+        format_parts = _heading_format_parts_from_style(style, level)
+        if not format_parts:
+            continue
+        commands.append(rf"\titleformat{{\{command}}}[block]{{{''.join(format_parts)}}}{{}}{{0pt}}{{}}")
+        before, after = _heading_spacing_from_style(style, level)
+        commands.append(rf"\titlespacing*{{\{command}}}{{0pt}}{{{before:.2f}pt}}{{{after:.2f}pt}}")
+    return commands
+
+
+def _heading_style_priority(style: dict[str, object]) -> tuple[float, int, float]:
+    prominence = _float_or_none(style.get("visual_prominence")) or 0.0
+    count = _int_or_none(style.get("candidate_count")) or 0
+    rank = _float_or_none(style.get("median_font_rank")) or 99.0
+    return (prominence, count, -rank)
+
+
+def _heading_format_parts_from_style(style: dict[str, object], level: int) -> list[str]:
+    parts: list[str] = []
+    alignment = str(style.get("dominant_alignment") or "").casefold()
+    if alignment == "center":
+        parts.append(r"\centering")
+    else:
+        parts.append(r"\raggedright")
+    parts.append(r"\bfseries")
+    size = _float_or_none(style.get("median_font_size")) or {1: 12.0, 2: 11.0, 3: 10.5}.get(level, 10.5)
+    size = min(max(size, 8.0), 18.0)
+    parts.append(rf"\fontsize{{{size:.2f}pt}}{{{(size * 1.18):.2f}pt}}\selectfont")
+    return parts
+
+
+def _heading_spacing_from_style(style: dict[str, object], level: int) -> tuple[float, float]:
+    size = _float_or_none(style.get("median_font_size")) or {1: 12.0, 2: 11.0, 3: 10.5}.get(level, 10.5)
+    if level == 1:
+        return max(size * 0.85, 7.0), max(size * 0.45, 4.0)
+    if level == 2:
+        return max(size * 0.65, 5.0), max(size * 0.30, 3.0)
+    return max(size * 0.55, 4.0), max(size * 0.25, 2.5)
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _header_footer_profile_enabled(style: StyleProfile) -> bool:
     options = style.renderer_options or {}
     header_footer = options.get("header_footer")
@@ -3569,6 +3653,54 @@ def _node_baseline_font_size(node: DocumentNode, style: StyleProfile | None) -> 
     if style is not None:
         return _float_or_none((style.renderer_options or {}).get("body_font_size"))
     return None
+
+
+def _span_has_visible_inline_style(span: StyleSpan, node: DocumentNode, style: StyleProfile | None) -> bool:
+    """Return true when a span carries semantic inline styling worth rendering.
+
+    v8 uses middle.json text as the canonical reading-order text and attaches
+    v7/PyMuPDF spans as a typography sidecar.  Rendering every regular span can
+    reintroduce PyMuPDF line-break hyphenation into otherwise cleaned middle
+    text.  Keep spans only when they express visible inline information such as
+    bold/italic/math/code, script-like placement, or a meaningful font class
+    change.
+    """
+
+    if span.is_bold or span.is_italic or span.is_inline_math or span.is_inline_code:
+        return True
+    baseline = _node_baseline_font_size(node, style)
+    if baseline and span.font_size is not None:
+        size = _float_or_none(span.font_size)
+        if size and size <= baseline * 0.85:
+            return True
+    body_font_class = _body_font_class(style)
+    info = resolve_pdf_font(span.font_name)
+    if info is not None and info.font_class not in {"math", body_font_class}:
+        return True
+    return False
+
+
+def _is_orphan_ocr_noise_span(text: str, canonical_compact: str) -> bool:
+    """Detect short style-span OCR debris that is absent from node text.
+
+    MinerU middle/content_list text can be clean while a PyMuPDF style sidecar
+    still contains tiny fragments such as ``p yp`` or ``g g p y p`` from nearby
+    math/OCR glyphs.  If such a fragment is not present in the canonical node
+    text, rendering spans would prepend hallucinated letters before the real
+    paragraph.  Keep the filter narrow so real bold run-in labels remain.
+    """
+
+    span_compact = _compact_span_coverage_text(text)
+    if not span_compact or not canonical_compact:
+        return False
+    if span_compact in canonical_compact:
+        return False
+    alpha_tokens = re.findall(r"[A-Za-z]+", text)
+    if not alpha_tokens:
+        return False
+    if len(span_compact) > 12:
+        return False
+    return all(len(token) <= 2 for token in alpha_tokens)
 
 
 def _body_font_class(style: StyleProfile | None) -> str | None:

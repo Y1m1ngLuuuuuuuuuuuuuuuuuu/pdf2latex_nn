@@ -324,7 +324,12 @@ class FrontMatterLineBuilder:
             y_position_norm=y_position_norm,
             line_order=line_order,
             source=source,
-            evidence={},
+            evidence={
+                "metadata_role": str(node.metadata.get("layout_role") or "").casefold(),
+                "metadata_layer": str(node.metadata.get("layout_layer") or "").casefold(),
+                "canonical_type": str(node.metadata.get("canonical_type") or node.raw_type or "").casefold(),
+                "node_type": node.node_type.value,
+            },
         )
 
 
@@ -439,6 +444,24 @@ def _role_scores(
         "BODY": 0.0,
         "OTHER": 0.0,
     }
+    metadata_role = str(line.evidence.get("metadata_role") or "").casefold()
+    metadata_layer = str(line.evidence.get("metadata_layer") or "").casefold()
+    if metadata_role in {"document_title", "paper_title", "front_matter_title"}:
+        scores["TITLE"] += 6.0
+    if metadata_role in {"author", "authors", "author_block"}:
+        scores["AUTHOR"] += 5.0
+    if metadata_role in {"affiliation", "institution"}:
+        scores["AFFILIATION"] += 5.0
+    if metadata_role in {"email", "correspondence"}:
+        scores["EMAIL"] += 5.0
+    if metadata_role in {"front_matter", "keywords"}:
+        scores["FRONT_NOTE"] += 3.0
+    if metadata_role == "abstract_title":
+        scores["ABSTRACT_TITLE"] += 6.0
+    if metadata_role == "abstract_body":
+        scores["ABSTRACT_BODY"] += 5.0
+    if metadata_layer == "metadata_layer" and metadata_role not in {"abstract_body"}:
+        scores["BODY"] -= 2.0
     if title_like:
         scores["TITLE"] += 3.0 + min(1.5, max(0.0, line.font_size_vs_body - 1.0) * 2.0)
     if seen_title and author_like and line.font_size_vs_body < 1.25:
