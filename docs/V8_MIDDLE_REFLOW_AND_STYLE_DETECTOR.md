@@ -107,6 +107,9 @@ The detector writes normal `StyleProfile.renderer_options`, including:
 
 Renderer-side use is intentionally narrow:
 
+- page geometry now follows the source PDF by default; a Letter original renders
+  as Letter and an A4 original renders as A4 instead of forcing all outputs to
+  A4;
 - `body_font_size` and `body_line_height` control `\AtBeginDocument{\fontsize...}`.
 - `paragraph_spacing` controls `\parskip`.
 - `paragraph_indent` controls `\parindent`.

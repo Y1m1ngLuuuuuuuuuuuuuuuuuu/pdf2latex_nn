@@ -13,6 +13,7 @@ from src.generation.style_profile import StyleProfileExtractor
 from src.ir import (
     BBox,
     BlockType,
+    CoordinateSpace,
     DocumentIR,
     DocumentNode,
     PageIR,
@@ -197,9 +198,22 @@ def test_style_profile_extractor_estimates_global_profile():
     assert profile.role_styles["heading"]["relative_font_size"] == 1.6
     assert profile.role_styles["body"]["font_class"] == "serif"
     assert profile.renderer_options["bibliography"]["strip_source_labels"] is True
-    assert profile.renderer_options["geometry_options"]["paperwidth"].endswith("pt")
+    assert profile.renderer_options["geometry_options"]["paperwidth"].endswith(("pt", "bp"))
     assert profile.renderer_options["font_clusters"][0]["font_size"] == 16.0
     assert profile.renderer_options["role_font_clusters"]["bibliography"][0]["font_size"] == 9.0
+
+
+def test_style_profile_source_paper_preserves_pdf_point_page_size():
+    document = replace(
+        build_document(),
+        pages=[PageIR(page_idx=0, width=612, height=792, node_ids=["h1", "l0", "r0"], coordinate_space=CoordinateSpace.PDF_POINTS)],
+        coordinate_space=CoordinateSpace.PDF_POINTS,
+    )
+    profile = StyleProfileExtractor().extract(document)
+
+    geometry = profile.renderer_options["geometry_options"]
+    assert geometry["paperwidth"] == "612.00bp"
+    assert geometry["paperheight"] == "792.00bp"
 
 
 def test_style_profile_extractor_records_columns_and_spacing():

@@ -18,6 +18,14 @@ from src.generation.font_resolver import build_latex_font_setup, canonicalize_pd
 from src.ir import BlockType, BBox, DocumentIR, DocumentNode, RendererMode, StyleProfile
 
 
+LETTER_WIDTH_PT = 612.0
+LETTER_HEIGHT_PT = 792.0
+A4_WIDTH_PT = 595.28
+A4_HEIGHT_PT = 841.89
+SOURCE_PAPER_MODES = {"source", "original", "pdf", "auto"}
+LETTER_PAPER_MODES = {"letter", "usletter", "us-letter"}
+
+
 @dataclass(frozen=True)
 class StyleProfileExtractorConfig:
     profile_id: str = "original_like"
@@ -30,9 +38,9 @@ class StyleProfileExtractorConfig:
     header_footer_repeat_min_pages: int = 2
     header_footer_repeat_min_page_ratio: float = 0.35
     page_number_min_page_ratio: float = 0.50
-    output_paper: str = "a4"
-    output_paper_width_pt: float = 595.28
-    output_paper_height_pt: float = 841.89
+    output_paper: str = "source"
+    output_paper_width_pt: float = A4_WIDTH_PT
+    output_paper_height_pt: float = A4_HEIGHT_PT
     body_font_bucket_pt: float = 0.25
 
 
@@ -576,22 +584,14 @@ class StyleProfileExtractor:
         if not page_width or not page_height or not isinstance(margins, dict):
             return {}
         horizontal_margins = body_margins if _valid_horizontal_margins(body_margins) else margins
-        if self.config.output_paper.casefold() == "a4":
-            return {
-                "paperwidth": _pt(self.config.output_paper_width_pt),
-                "paperheight": _pt(self.config.output_paper_height_pt),
-                "left": _scaled_margin_pt(horizontal_margins.get("left"), page_width, self.config.output_paper_width_pt),
-                "right": _scaled_margin_pt(horizontal_margins.get("right"), page_width, self.config.output_paper_width_pt),
-                "top": _scaled_margin_pt(margins.get("top"), page_height, self.config.output_paper_height_pt),
-                "bottom": _scaled_margin_pt(margins.get("bottom"), page_height, self.config.output_paper_height_pt),
-            }
+        target_width, target_height = self._target_page_size_pt(page_layout)
         return {
-            "paperwidth": _pt_from_normalized(page_width),
-            "paperheight": _pt_from_normalized(page_height),
-            "left": _pt_from_normalized(_float_or_none(horizontal_margins.get("left"))),
-            "right": _pt_from_normalized(_float_or_none(horizontal_margins.get("right"))),
-            "top": _pt_from_normalized(_float_or_none(margins.get("top"))),
-            "bottom": _pt_from_normalized(_float_or_none(margins.get("bottom"))),
+            "paperwidth": _bp(target_width),
+            "paperheight": _bp(target_height),
+            "left": _scaled_margin_bp(horizontal_margins.get("left"), page_width, target_width),
+            "right": _scaled_margin_bp(horizontal_margins.get("right"), page_width, target_width),
+            "top": _scaled_margin_bp(margins.get("top"), page_height, target_height),
+            "bottom": _scaled_margin_bp(margins.get("bottom"), page_height, target_height),
         }
 
     def _scaled_horizontal_length(self, value: object, page_layout: dict[str, object]) -> float | None:
@@ -599,18 +599,35 @@ class StyleProfileExtractor:
         page_width = _float_or_none(page_layout.get("page_width"))
         if source is None or not page_width:
             return None
-        if self.config.output_paper.casefold() == "a4":
-            return source / page_width * self.config.output_paper_width_pt
-        return source * 0.792
+        target_width, _target_height = self._target_page_size_pt(page_layout)
+        return source / page_width * target_width
 
     def _scaled_vertical_length(self, value: object, page_layout: dict[str, object]) -> float | None:
         source = _float_or_none(value)
         page_height = _float_or_none(page_layout.get("page_height"))
         if source is None or not page_height:
             return None
-        if self.config.output_paper.casefold() == "a4":
-            return source / page_height * self.config.output_paper_height_pt
-        return source * 0.792
+        _target_width, target_height = self._target_page_size_pt(page_layout)
+        return source / page_height * target_height
+
+    def _target_page_size_pt(self, page_layout: dict[str, object]) -> tuple[float, float]:
+        mode = str(self.config.output_paper or "source").casefold()
+        if mode == "a4":
+            return self.config.output_paper_width_pt, self.config.output_paper_height_pt
+        if mode in LETTER_PAPER_MODES:
+            return LETTER_WIDTH_PT, LETTER_HEIGHT_PT
+        page_width = _float_or_none(page_layout.get("page_width"))
+        page_height = _float_or_none(page_layout.get("page_height"))
+        if mode in SOURCE_PAPER_MODES and page_width and page_height:
+            coordinate_space = str(page_layout.get("coordinate_space") or "").casefold()
+            if coordinate_space == "pdf_points" or _looks_like_pdf_points(page_width, page_height):
+                return page_width, page_height
+            ratio = page_width / page_height if page_height else 0.0
+            if 0.65 <= ratio <= 0.85:
+                return ratio * LETTER_HEIGHT_PT, LETTER_HEIGHT_PT
+        # If the source size is normalized or unavailable, use the dominant
+        # scientific-paper fallback instead of silently forcing A4.
+        return LETTER_WIDTH_PT, LETTER_HEIGHT_PT
 
     def _normalize_paragraph_spacing(
         self,
@@ -1154,29 +1171,27 @@ def _float_or_none(value: object) -> float | None:
     return None
 
 
-def _pt_from_normalized(value: float | None) -> str:
-    # DocumentIR commonly uses a 0-1000 normalized page.  Map it to a
-    # letter-height point scale so relative margins survive in LaTeX.
+def _bp(value: float | None) -> str:
     if value is None:
-        return "0pt"
-    return f"{max(float(value), 0.0) * 0.792:.2f}pt"
+        return "0bp"
+    return f"{max(float(value), 0.0):.2f}bp"
 
 
-def _pt(value: float | None) -> str:
-    if value is None:
-        return "0pt"
-    return f"{max(float(value), 0.0):.2f}pt"
+def _looks_like_pdf_points(width: float, height: float) -> bool:
+    """Return true for common PDF point page sizes rather than 1000-normalized pages."""
+
+    return 250.0 <= width <= 900.0 and 250.0 <= height <= 1200.0
 
 
-def _scaled_margin_pt(value: object, source_extent: float, target_extent_pt: float) -> str:
+def _scaled_margin_bp(value: object, source_extent: float, target_extent_pt: float) -> str:
     margin = _float_or_none(value)
     if margin is None or source_extent <= 0:
-        return "0pt"
+        return "0bp"
     scaled = max(margin, 0.0) / source_extent * target_extent_pt
     # Avoid pathological full-page margins from noisy extraction, while keeping
     # the original paper's relative whitespace.
     scaled = min(max(scaled, 18.0), target_extent_pt * 0.28)
-    return _pt(scaled)
+    return _bp(scaled)
 
 
 def _valid_horizontal_margins(margins: dict[str, object]) -> bool:
