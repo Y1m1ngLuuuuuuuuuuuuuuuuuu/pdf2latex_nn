@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Run the current full evaluation suite.
 
-This orchestrates the paper-facing current model evaluation:
+This orchestrates the paper-facing current evaluation:
 
 1. current ablation matrix
 2. ablation summary
-3. current E2E generator evaluation
+3. current layout-aware no-GNN E2E generator evaluation
 4. Nougat paired comparison
 5. rollup report generation
 
@@ -98,8 +98,6 @@ def main() -> int:
                     "scripts/pipeline/run_current_e2e_comparison.py",
                     "--manifest",
                     args.manifest,
-                    "--checkpoint",
-                    args.checkpoint,
                     "--output-dir",
                     args.e2e_output_dir,
                     "--limit",

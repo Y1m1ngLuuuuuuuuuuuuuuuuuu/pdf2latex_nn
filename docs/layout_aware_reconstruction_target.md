@@ -1,6 +1,6 @@
 # Layout-Aware Reconstruction Target
 
-**Last updated**: 2026-05-17
+**Last updated**: 2026-05-23
 
 This document fixes the project target and evaluation philosophy.  It is the
 contract that prevents the system from being optimized toward an impossible
@@ -52,6 +52,20 @@ Not uniquely observable from PDF:
 The system should reconstruct a stable, readable, editable LaTeX document that
 preserves visual layout and block-level semantic organization.  It should not
 pretend that PDF evidence uniquely determines the author's original TeX AST.
+
+## 1.1 Current Default Reconstruction Policy
+
+As of 2026-05-23, the default reconstruction path is layout-aware and
+rules-first:
+
+```text
+full v7 facts -> DocumentIR/LayoutIR -> heading stack + layout decoder
+-> RenderTreeIR -> LaTeX renderer
+```
+
+The GNN relation model is retained as an explicit experimental branch, not as
+the default reconstruction dependency.  This preserves the project target while
+keeping relation-learning evidence available for ablations.
 
 ## 3. IR Separation
 

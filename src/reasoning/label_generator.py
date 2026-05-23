@@ -282,7 +282,10 @@ SKIP_TEX_NODE_NAMES = {
 }
 HEADING_TYPES = {"title", "section", "subsection", "subsubsection", "heading"}
 SECTION_TYPE_LEVELS = {"section": 1, "subsection": 2, "subsubsection": 3}
-LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25E6\u25CB\u25AA\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+")
+LIST_MARKER_RE = re.compile(
+    r"^\s*(?:[\u0088\u2022\u2023\u2043\u2219\u25E6\u25CB\u25AA\u25CF\u25E7\uF0A7\uF0B7\-\*]|\d+[\.\)]|[a-zA-Z][\.\)])\s*"
+)
+EMAIL_LIKE_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 ORDERED_LIST_MARKER_RE = re.compile(r"^\s*(\d+)[\.\)]\s+")
 ALPHA_OR_ROMAN_HEADING_RE = re.compile(r"^\s*([A-Za-z]+)[\.\)]\s+(.*)$")
 SENTENCE_END_RE = re.compile(r"[。.!?！？]\s*$")
@@ -291,6 +294,10 @@ HYPHEN_END_RE = re.compile(r"[-\u2010\u2011\u2012\u2013\u2014]\s*$")
 UPPERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[A-Z]")
 LOWERCASE_START_RE = re.compile(r"^\s*(?:[\"'“‘(\[]\s*)*[a-z]")
 VISIBLE_LIST_INTRO_RE = re.compile(r"[:：]\s*(?:[])}\"'”’»]+)?\s*$")
+FORMULA_LEAD_IN_TEXT_RE = re.compile(
+    r"^\s*(?:where|with|given|let|for|such that|s\.t\.|subject to|and|or|while|if)\b",
+    re.IGNORECASE,
+)
 ALGORITHM_IO_LABEL_RE = re.compile(
     r"^\s*(?:input|output|require|ensure|parameters?|returns?)\s*[:：]\s*$",
     re.IGNORECASE,
@@ -1219,8 +1226,12 @@ class AlignmentLabeler:
             return "PAGE_FURNITURE"
         if pdf_node_is_metadata_or_page_furniture(item) and not metadata_layer_heading_override(item):
             return "FRONT_MATTER"
-        if pdf_node_is_formula_like(item):
+        if EMAIL_LIKE_RE.search(str(node.text or "")):
+            return "FRONT_MATTER"
+        if pdf_node_is_formula_like(item) or text_looks_formula_fragment_like(node.text):
             return "DISPLAY_MATH"
+        if pdf_node_looks_code_prompt_like(node):
+            return "CODE_PROMPT"
         if pdf_node_is_caption_like(item):
             return "CAPTION"
         if pdf_node_is_float_proxy_like(item):
@@ -1231,7 +1242,7 @@ class AlignmentLabeler:
             return "BODY_HEADING"
         if raw_type in HEADING_TYPES:
             return "BODY_HEADING"
-        if raw_type in {"list", "list_item", "item"} or LIST_MARKER_RE.match(node.text):
+        if raw_type in {"list", "list_item", "item"} or pdf_node_is_list_like(node):
             return "LIST_ITEM"
         tex_type = tex_node_type_name(tex_node)
         if tex_type == STANDARD_SECTION_NODE:
@@ -1249,7 +1260,7 @@ class AlignmentLabeler:
     def node_alignment_strength(self, channel: str, *, match: AlignmentMatch | None) -> str:
         if channel in {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"}:
             return "exempt"
-        if channel in {"DISPLAY_MATH", "FLOAT_PROXY"}:
+        if channel in {"DISPLAY_MATH", "FLOAT_PROXY", "CODE_PROMPT"}:
             return "weak" if match is not None and match.tex_id else "unmatched"
         if match is None or not match.tex_id:
             return "unmatched"
@@ -1335,6 +1346,25 @@ class AlignmentLabeler:
             "src_tex_node_type": tex_node_type_name(source_tex),
             "dst_tex_node_type": tex_node_type_name(target_tex),
             "same_tex_node": bool(source_match and target_match and source_match.tex_id and source_match.tex_id == target_match.tex_id),
+            **merge_v2_sidecar_record(
+                label=label,
+                raw_family=family,
+                source_channel=str(source_record["alignment_channel"]),
+                target_channel=str(target_record["alignment_channel"]),
+                source_text=self.pdf_nodes[source_index].text,
+                target_text=self.pdf_nodes[target_index].text,
+                source_item=self.pdf_nodes[source_index].item,
+                target_item=self.pdf_nodes[target_index].item,
+                same_tex_node=bool(
+                    source_match and target_match and source_match.tex_id and source_match.tex_id == target_match.tex_id
+                ),
+                same_tex_reason=(
+                    self.same_tex_not_merged_reason(source_index, target_index, edge_pos=edge_pos)
+                    if bool(source_match and target_match and source_match.tex_id and source_match.tex_id == target_match.tex_id)
+                    and label != int(TexRelationLabel.MERGE)
+                    else None
+                ),
+            ),
             "merge_precision_safe": bool(merge_precision_safe),
             "src_text_preview": text_preview(self.pdf_nodes[source_index].text),
             "dst_text_preview": text_preview(self.pdf_nodes[target_index].text),
@@ -1399,10 +1429,11 @@ class AlignmentLabeler:
                 edge_pos=edge_pos,
             )
             return family
-        if source_channel in {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION"} or target_channel in {
+        if source_channel in {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION", "CODE_PROMPT"} or target_channel in {
             "DISPLAY_MATH",
             "FLOAT_PROXY",
             "CAPTION",
+            "CODE_PROMPT",
         }:
             return "MASKED_UNKNOWN_WEAK_VISUAL"
         if source_channel == "BODY_TEXT" and target_channel == "BODY_TEXT":
@@ -1427,6 +1458,8 @@ class AlignmentLabeler:
             return "FLOAT_ENDPOINT"
         if endpoint_channels & {"CAPTION"}:
             return "CAPTION_ENDPOINT"
+        if endpoint_channels & {"CODE_PROMPT"}:
+            return "CODE_PROMPT_ENDPOINT"
         if endpoint_channels & {"BODY_HEADING"}:
             return "SECTION_BOUNDARY"
 
@@ -2944,7 +2977,7 @@ def relation_audit_training_proposal(
     merge_precision_safe: bool = False,
 ) -> tuple[str, bool, float]:
     exempt_channels = {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"}
-    weak_channels = {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION"}
+    weak_channels = {"DISPLAY_MATH", "FLOAT_PROXY", "CAPTION", "CODE_PROMPT"}
     if source_channel in exempt_channels or target_channel in exempt_channels:
         return "masked_unknown", False, 0.0
     if label == int(TexRelationLabel.PARENT_CHILD):
@@ -2977,6 +3010,143 @@ def relation_audit_training_proposal(
     if label == int(TexRelationLabel.NONE):
         return "hard_negative", True, 1.0
     return "strong", True, 1.0
+
+
+def merge_v2_sidecar_record(
+    *,
+    label: int,
+    raw_family: str,
+    source_channel: str,
+    target_channel: str,
+    source_text: str,
+    target_text: str,
+    source_item: dict[str, Any],
+    target_item: dict[str, Any],
+    same_tex_node: bool,
+    same_tex_reason: str | None,
+) -> dict[str, Any]:
+    family = merge_v2_sidecar_family(
+        label=label,
+        raw_family=raw_family,
+        source_channel=source_channel,
+        target_channel=target_channel,
+        source_text=source_text,
+        target_text=target_text,
+        source_item=source_item,
+        target_item=target_item,
+        same_tex_node=same_tex_node,
+        same_tex_reason=same_tex_reason,
+    )
+    strength, train_mask, weight = merge_v2_sidecar_training_proposal(label=label, family=family)
+    return {
+        "merge_relation_family": family,
+        "merge_label_strength": strength,
+        "proposed_merge_train_mask": bool(train_mask),
+        "proposed_merge_loss_weight": float(weight),
+    }
+
+
+def merge_v2_sidecar_family(
+    *,
+    label: int,
+    raw_family: str,
+    source_channel: str,
+    target_channel: str,
+    source_text: str,
+    target_text: str,
+    source_item: dict[str, Any],
+    target_item: dict[str, Any],
+    same_tex_node: bool,
+    same_tex_reason: str | None,
+) -> str:
+    channels = {source_channel, target_channel}
+    old_label_is_merge = label == int(TexRelationLabel.MERGE)
+    if "CODE_PROMPT" in channels:
+        return "CODE_OR_PROMPT_LIKE"
+    if "DISPLAY_MATH" in channels:
+        return "FORMULA_LEAD_IN" if merge_v2_formula_lead_in(source_text, target_text) else "FORMULA_CONTEXT"
+    if "FLOAT_PROXY" in channels:
+        return "FLOAT_PROXY_ENDPOINT" if old_label_is_merge or same_tex_node else "FLOAT_PROXY_CONTEXT"
+    if "CAPTION" in channels:
+        return "CAPTION_TABLE_ISH" if merge_v2_caption_table_ish(source_text, target_text, source_item, target_item) else "CAPTION_ENDPOINT"
+    if "REFERENCE_ITEM" in channels:
+        return "REFERENCE_CONTINUATION" if old_label_is_merge and same_tex_node else "REFERENCE_ENDPOINT"
+    if merge_v2_caption_table_ish(source_text, target_text, source_item, target_item):
+        return "CAPTION_TABLE_ISH"
+    if merge_v2_layout_scope_mismatch(raw_family, same_tex_reason, source_item, target_item):
+        return "LAYOUT_SCOPE_MISMATCH"
+    if old_label_is_merge:
+        if source_channel == "BODY_TEXT" and target_channel == "BODY_TEXT":
+            return "BODY_TEXT_CONTINUATION"
+        if source_channel == "LIST_ITEM" and target_channel == "LIST_ITEM":
+            return "LIST_CONTINUATION"
+        return "WEAK_SAME_TEX" if same_tex_node else "MASKED_UNKNOWN"
+    if same_tex_node:
+        return "WEAK_SAME_TEX"
+    if source_channel == "BODY_TEXT" and target_channel == "BODY_TEXT":
+        return "HARD_NEGATIVE"
+    if source_channel == "LIST_ITEM" and target_channel == "LIST_ITEM":
+        return "HARD_NEGATIVE"
+    return "MASKED_UNKNOWN" if channels & {"FRONT_MATTER", "PAGE_FURNITURE", "NOISE_OR_NO_RENDER"} else "HARD_NEGATIVE"
+
+
+def merge_v2_sidecar_training_proposal(*, label: int, family: str) -> tuple[str, bool, float]:
+    if label == int(TexRelationLabel.PARENT_CHILD):
+        return "masked", False, 0.0
+    if family in {"BODY_TEXT_CONTINUATION", "LIST_CONTINUATION"} and label == int(TexRelationLabel.MERGE):
+        return "strong", True, 1.0
+    if family == "LAYOUT_SCOPE_MISMATCH" or family == "HARD_NEGATIVE":
+        return "hard_negative", True, 1.0
+    if family in {"FLOAT_PROXY_ENDPOINT", "FLOAT_PROXY_CONTEXT"}:
+        return "exempt", False, 0.0
+    if family in {
+        "REFERENCE_CONTINUATION",
+        "FORMULA_LEAD_IN",
+        "FORMULA_CONTEXT",
+        "CODE_OR_PROMPT_LIKE",
+        "CAPTION_TABLE_ISH",
+        "CAPTION_ENDPOINT",
+        "REFERENCE_ENDPOINT",
+        "WEAK_SAME_TEX",
+        "MASKED_UNKNOWN",
+    }:
+        return "masked", False, 0.0
+    return "masked", False, 0.0
+
+
+def merge_v2_formula_lead_in(source_text: str, target_text: str) -> bool:
+    combined = " ".join(part for part in (str(source_text or ""), str(target_text or "")) if part).strip()
+    return bool(FORMULA_LEAD_IN_TEXT_RE.match(combined))
+
+
+def merge_v2_caption_table_ish(
+    source_text: str,
+    target_text: str,
+    source_item: dict[str, Any],
+    target_item: dict[str, Any],
+) -> bool:
+    type_values = {
+        str(source_item.get("type") or source_item.get("canonical_type") or "").lower(),
+        str(target_item.get("type") or target_item.get("canonical_type") or "").lower(),
+    }
+    if type_values & {"table", "table_body", "table_cell", "table_caption", "figure_caption"}:
+        return True
+    text = " ".join(part for part in (str(source_text or ""), str(target_text or "")) if part)
+    return bool(re.match(r"^\s*(?:table|tab\.|figure|fig\.|algorithm)\s+[A-Za-z0-9IVXLCDM]+", text, re.IGNORECASE))
+
+
+def merge_v2_layout_scope_mismatch(
+    raw_family: str,
+    same_tex_reason: str | None,
+    source_item: dict[str, Any],
+    target_item: dict[str, Any],
+) -> bool:
+    if raw_family in {"LAYOUT_SCOPE_MISMATCH"} or same_tex_reason in {"GEOMETRY_GATE", "LAYOUT_SCOPE_MISMATCH"}:
+        return True
+    try:
+        return not same_layout_scope_can_merge(source_item, target_item)
+    except Exception:
+        return False
 
 
 def should_keep_edge_supervision_example(record: dict[str, Any]) -> bool:
@@ -3097,7 +3267,7 @@ def text_looks_formula_fragment_like(text: str) -> bool:
     if not compact:
         return False
     math_tokens = re.findall(
-        r"\\[a-zA-Z]+|[_^{}]|∑|∫|√|≤|≥|≠|≈|∞|∈|∉|∂|α|β|γ|δ|ε|θ|λ|μ|σ|τ|ϵ|\b(?:operatorname|mathbb|mathrm|frac|sqrt|sum|prod|lim|implies)\b",
+        r"\\[a-zA-Z]+|[_^{}]|∑|∫|√|≤|≥|≠|≈|∞|∈|∉|∂|∧|∨|¬|⇒|⇔|→|←|α|β|γ|δ|ε|θ|λ|μ|σ|τ|ϵ|\b(?:operatorname|mathbb|mathrm|frac|sqrt|sum|prod|lim|implies)\b",
         compact,
     )
     if len(math_tokens) >= 3:

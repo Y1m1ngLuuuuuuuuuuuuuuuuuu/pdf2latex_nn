@@ -29,6 +29,8 @@ style spans disappear or get misclassified as noise.
 | --- | --- |
 | `scripts/pipeline/step5_generate_tex.py` | Single-document canonical inference/generation entry. Defaults to `--renderer ir` and `--heading-skeleton-mode stack`. |
 | `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper only. It now forwards `--renderer ir` and `--heading-skeleton-mode stack` to `step5_generate_tex.py`. |
+| `scripts/pipeline/run_layout_aware_reconstruction.py` | Current default no-GNN layout-aware E2E reconstruction entrypoint. It keeps the full-v7 IR renderer but ignores legacy checkpoint arguments. |
+| `scripts/pipeline/run_current_e2e_comparison.py` | Compatibility wrapper for `run_layout_aware_reconstruction.py`; current paper-facing E2E no longer loads learned GNN logits by default. |
 | `scripts/pipeline/batch_visual_qa_inference.py` | Batch E2E visual QA path. Defaults to the IR renderer and stack heading skeleton. |
 | `scripts/pipeline/run_e2e_inference.py` | Full E2E front-end + inference + compile path. Defaults to the IR renderer and stack heading skeleton. |
 | `scripts/pipeline/run_m05_e2e_comparison.py` | Locked-model comparison wrapper. Defaults to the IR renderer and stack heading skeleton. |

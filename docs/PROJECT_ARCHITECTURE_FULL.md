@@ -1,6 +1,6 @@
 # PDF2LaTeX-NN Full Architecture And Design Notes
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-23
 
 This is the full project architecture record. It collects the design decisions,
 data flow, judgment rules, model interfaces, evaluation metrics, and code map
@@ -10,12 +10,13 @@ notes, and implementation files.
 For a paper-facing narrative version of the same architecture, see
 `docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md`.
 
-The repository has two goals:
+The repository has two maintained tracks:
 
-1. Build a trainable relation model that learns document structure from PDF
-   visual facts and TeX-derived supervision.
-2. Use the predicted relations plus the full visual fact layer to reconstruct
-   compilable, structurally faithful LaTeX.
+1. The default reconstruction track: use MinerU/v7 visual facts, deterministic
+   layout reasoning, heading stack decoding, and the full-v7 IR renderer to
+   reconstruct compilable, structurally faithful LaTeX.
+2. The optional relation-learning track: keep GNN relation experiments for
+   diagnostics, ablations, and possible local continuation hints.
 
 The project is not a plain OCR system and not a pure end-to-end language model.
 MinerU provides strong PDF perception. This project adds structure reasoning,
@@ -23,16 +24,12 @@ relation learning, deterministic safety constraints, and a LaTeX generator.
 
 ## 0. Executive Summary
 
-The current maintained system is v7-only.
+The current maintained reconstruction system is v7-only and layout-first.
 
 ```text
 compiled PDF + matching TeX source
   -> MinerU extraction
   -> v7 full visual fact layer
-  -> GNNViewAdapter graph-visible view
-  -> graph.pt feature tensor
-  -> TeX AST alignment labels
-  -> GATv2 / Y-Network relation model
   -> constrained decoder / heading skeleton / float grouping
   -> full v7 IR generator
   -> generated .tex and .pdf
@@ -48,7 +45,25 @@ GNN view     = filtered/proxied view for relation learning
 Do not delete, rewrite, or mark useful visual facts as noise just because they
 are not useful for GNN message passing. Title, authors, figures, tables,
 captions, references, footnotes, page furniture, and style spans remain in v7.
-The GNN receives a separate view built by `GNNViewAdapter`.
+When running GNN experiments, the model receives a separate view built by
+`GNNViewAdapter`; that view is not the renderer source.
+
+Current production default, 2026-05-23:
+
+```text
+scripts/pipeline/run_layout_aware_reconstruction.py
+scripts/pipeline/run_current_e2e_comparison.py
+```
+
+These paths use rules-only layout-aware reconstruction by default.  Historical
+GNN E2E paths remain available only when explicitly invoked:
+
+```text
+scripts/pipeline/batch_visual_qa_inference.py
+scripts/pipeline/run_e2e_inference.py
+scripts/pipeline/step5_generate_tex.py
+scripts/pipeline/run_m05_e2e_comparison.py
+```
 
 Current model/data families:
 
@@ -100,7 +115,7 @@ Therefore v7 adds cleanup, style enrichment, layout roles, duplicate/noise
 marking, and reading-flow metadata. Still, logical merging is not performed
 too early. Cross-page paragraph merging belongs to the decoder/generator.
 
-### 1.3 Why We Use A GNN
+### 1.3 Why GNN Is Now Optional
 
 The model predicts local graph relations:
 
@@ -110,9 +125,20 @@ PARENT_CHILD structural attachment / hierarchy
 NONE         no structural relation
 ```
 
-The GNN is not asked to rebuild the whole document alone. It learns ambiguous
-relations that are hard to encode with rules. Deterministic constraints then
-protect against physically impossible structures.
+The GNN is not asked to rebuild the whole document alone.  After the
+relation-source and middle-fragment audits, its E2E contribution in the current
+pipeline is treated as optional rather than production-critical:
+
+- PARENT_CHILD is dominated by the deterministic heading stack and section
+  scope logic.
+- MERGE can enter RenderTreeIR, but safe useful MERGE labels are sparse and
+  noisy under the current v7 logical-owner representation.
+- Middle-fragment MERGE learns MinerU line continuation well, but projecting
+  those edges back to full-v7 owners did not improve paragraph metrics.
+
+Therefore the default reconstruction path no longer loads a GNN checkpoint.
+The GNN branch remains useful for ablation evidence, hard-case diagnostics, and
+future local-relation research.
 
 ### 1.4 Why We Still Use Rules
 

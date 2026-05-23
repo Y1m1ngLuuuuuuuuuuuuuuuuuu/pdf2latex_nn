@@ -1,6 +1,6 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-23
 
 This repository is the source-control home for the v7 PDF-to-LaTeX system. AutoDL is the runtime home for datasets, MinerU outputs, graph tensors, checkpoints, generated PDFs, and long-running jobs.
 
@@ -71,21 +71,33 @@ All future model, decoder, renderer, and evaluation changes must respect this
 target definition.  The detailed rationale and metric contract are documented in
 `docs/layout_aware_reconstruction_target.md`.
 
-The production pipeline is v7-only:
+The production reconstruction pipeline is v7-only and **layout-first**.  As of
+2026-05-23, the default E2E reconstruction path does not load learned GNN
+relation logits:
 
 ```text
 compiled PDF + matching TeX
   -> MinerU content_v2
   -> content_v7 + style spans
-  -> GNNViewAdapter
-  -> graph.pt
-  -> TeX AST alignment labels
-  -> GATv2/Y-Network training / inference
-  -> edge_logits.pt + predicted_relations.json
-  -> TreeDecoder
+  -> DocumentIR / LayoutIR
+  -> deterministic heading stack + layout-aware decoder rules
   -> RenderTreeIR
   -> OriginalLikeIRLatexRenderer
 ```
+
+GNN artifacts are still maintained as an explicit experimental relation branch:
+
+```text
+content_v7 + style spans
+  -> GNNViewAdapter
+  -> graph.pt
+  -> TeX-derived relation labels
+  -> GNN training / diagnostics / ablations
+```
+
+Use GNN results only when a command or experiment explicitly requests them.
+The paper-facing default compares the layout-aware reconstruction system, while
+GNN relation studies are reported as auxiliary ablations.
 
 Old v3/v4/v5 JSON variants are historical experiments. Do not feed them into training or evaluation.
 

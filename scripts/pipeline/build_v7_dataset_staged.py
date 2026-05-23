@@ -76,6 +76,7 @@ class StagedConfig:
     process_backlog: int
     preflight_tex: bool
     skip_mineru_stage: bool
+    mineru_only: bool
     process_existing_mineru_only: bool
     exclude_manifests: tuple[Path, ...]
     max_preflight_fail_ratio: float
@@ -221,6 +222,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exclude-manifest", action="append", type=Path, default=[])
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--skip-mineru-stage", action="store_true")
+    parser.add_argument(
+        "--mineru-only",
+        action="store_true",
+        help=(
+            "Stop after the MinerU batch stage and write a MinerU availability "
+            "manifest to --manifest-output. This does not build v7/style JSON, "
+            "graphs, labels, or training manifests."
+        ),
+    )
     parser.add_argument("--process-all-candidates", action="store_true")
     parser.add_argument("--no-reuse-existing", action="store_true")
     parser.add_argument("--force-json", action="store_true")
@@ -267,6 +277,14 @@ def main() -> int:
     preflighted = run_preflight_stage(candidates, config)
     if not config.skip_mineru_stage:
         run_mineru_stage(preflighted, config)
+    if config.mineru_only:
+        missing = write_mineru_only_manifest(config.mini.manifest_output, preflighted, config)
+        print(
+            f"[staged] mineru-only wrote manifest={config.mini.manifest_output} "
+            f"documents={len(preflighted)} missing_mineru_outputs={missing}",
+            flush=True,
+        )
+        return 0 if missing == 0 else 2
     processed = run_processing_stage(preflighted, config)
     if len(processed) < config.mini.target:
         print(f"[staged] failed target={config.mini.target} success={len(processed)}", flush=True)
@@ -348,6 +366,7 @@ def config_from_args(args: argparse.Namespace) -> StagedConfig:
         process_backlog=max(1, int(args.process_backlog)),
         preflight_tex=not bool(args.skip_preflight),
         skip_mineru_stage=bool(args.skip_mineru_stage),
+        mineru_only=bool(args.mineru_only),
         process_existing_mineru_only=not bool(args.process_all_candidates),
         exclude_manifests=tuple(path.resolve() for path in args.exclude_manifest),
         max_preflight_fail_ratio=float(args.max_preflight_fail_ratio),
@@ -381,6 +400,7 @@ def print_dry_run(config: StagedConfig, candidates: list[CandidateSample]) -> No
                 "mineru_missing": len(candidates) - mineru_existing,
                 "process_workers": config.process_workers,
                 "preflight_workers": config.preflight_workers,
+                "mineru_only": config.mineru_only,
                 "mineru_batch_size": config.mineru_batch_size,
                 "mineru_batch_max_pages": config.mineru_batch_max_pages,
                 "tex_source_dir": str(config.mini.tex_source_dir),
@@ -530,6 +550,46 @@ def run_mineru_stage(candidates: list[CandidateSample], config: StagedConfig) ->
             for candidate in missing_after:
                 append_processing_error(config.mini.error_log, candidate, "MinerUMissingOutput", "MinerU did not produce content output")
             print(f"[staged] mineru missing_after batch={batch_index} count={len(missing_after)}", flush=True)
+
+
+def write_mineru_only_manifest(path: Path, candidates: list[CandidateSample], config: StagedConfig) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    items: list[dict[str, Any]] = []
+    missing = 0
+    for candidate in candidates:
+        paths = sample_paths(candidate, config.mini)
+        source_dir = config.mini.mineru_source_dir or config.mini.mineru_output_dir
+        content_source = find_mineru_content_source(candidate.document_id, source_dir)
+        styles_path = paths["styles"] if paths["styles"].exists() else None
+        has_output = content_source is not None or styles_path is not None
+        if not has_output:
+            missing += 1
+        items.append(
+            {
+                "doc_id": candidate.document_id,
+                "pdf_path": str(candidate.pdf_path),
+                "tex_dir": str(candidate.tex_dir),
+                "main_tex_path": str(candidate.main_tex_path),
+                "compile_manifest": candidate.compile_manifest,
+                "compile_status": candidate.compile_status,
+                "mineru_output_available": has_output,
+                "mineru_content_source": str(content_source) if content_source is not None else None,
+                "v7_styles_path": str(styles_path) if styles_path is not None else None,
+            }
+        )
+    payload = {
+        "schema_version": "staged_mineru_only_manifest_v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "run_name": config.run_name,
+        "target": config.mini.target,
+        "candidate_count": len(candidates),
+        "mineru_output_dir": str(config.mini.mineru_output_dir),
+        "mineru_source_dir": str(config.mini.mineru_source_dir) if config.mini.mineru_source_dir else None,
+        "missing_mineru_outputs": missing,
+        "items": items,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return missing
 
 
 def run_single_mineru_fallback(candidates: list[CandidateSample], config: StagedConfig, log_root: Path) -> None:
