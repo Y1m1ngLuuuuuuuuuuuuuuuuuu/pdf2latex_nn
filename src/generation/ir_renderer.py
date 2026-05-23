@@ -1210,9 +1210,10 @@ class OriginalLikeIRLatexRenderer:
                 asset_output_dir=self.config.table_asset_output_dir,
                 asset_latex_prefix=self.config.table_asset_latex_prefix,
                 as_nonfloat=self._mixed_column_stack > 0,
+                wide_float=True,
                 label=label,
             )
-        return render_table_placeholder({"type": "table", "text": text}, text, as_nonfloat=self._mixed_column_stack > 0)
+        return render_table_placeholder({"type": "table", "text": text}, text, as_nonfloat=self._mixed_column_stack > 0, wide_float=True)
 
     def _match_source_table_layout(self, primary: DocumentNode, text: str) -> SourceTableLayout | None:
         layout = self._active_source_float_layout
@@ -1296,6 +1297,7 @@ class OriginalLikeIRLatexRenderer:
                     asset_latex_prefix=self.config.figure_asset_latex_prefix,
                     rendered_caption=render_text_with_citations(caption),
                     as_nonfloat=self._mixed_column_stack > 0,
+                    wide_float=True,
                     label=self._cross_ref_label_for_document_node(label_source, "figure"),
                 )
         else:
@@ -1310,6 +1312,7 @@ class OriginalLikeIRLatexRenderer:
             asset_latex_prefix=self.config.figure_asset_latex_prefix,
             rendered_caption=render_text_with_citations(caption),
             as_nonfloat=self._mixed_column_stack > 0,
+            wide_float=True,
             label=self._cross_ref_label_for_document_node(primary, "figure") if primary is not None else None,
         )
 

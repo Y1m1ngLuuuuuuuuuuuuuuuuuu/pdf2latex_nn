@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +257,7 @@ def ensure_pdf_region_crop(
     output_stem = f"{safe_asset_stem(kind)}_{region_id}" if kind else region_id
     output_path = output_dir / f"{output_stem}.png"
     if not output_path.exists():
+        cropped = False
         try:
             import fitz  # type: ignore
 
@@ -276,9 +278,97 @@ def ensure_pdf_region_crop(
                 )
                 pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=clip, alpha=False)
                 pix.save(output_path)
+                cropped = True
         except Exception:
+            cropped = _crop_pdf_region_with_pdftocairo(
+                pdf_path,
+                output_path,
+                record=record,
+                bbox=bbox,
+                page_idx=page_idx,
+                padding=padding,
+            )
+        if not cropped:
             return None
     return latex_asset_path(output_path, asset_output_dir=output_dir, asset_latex_prefix=asset_latex_prefix)
+
+
+def _crop_pdf_region_with_pdftocairo(
+    pdf_path: Path,
+    output_path: Path,
+    *,
+    record: dict[str, Any],
+    bbox: tuple[float, float, float, float],
+    page_idx: int,
+    padding: float,
+    dpi: int = 200,
+) -> bool:
+    """Crop a PDF region using Poppler when PyMuPDF is unavailable."""
+
+    executable = shutil.which("pdftocairo")
+    if not executable:
+        return False
+    pdf_width, pdf_height = _pdf_page_size_points(pdf_path, page_idx=page_idx)
+    record_width = float(record.get("page_width") or pdf_width or 1000.0)
+    record_height = float(record.get("page_height") or pdf_height or 1000.0)
+    if pdf_width <= 0 or pdf_height <= 0 or record_width <= 0 or record_height <= 0:
+        return False
+    x0, y0, x1, y1 = bbox
+    scale_x = pdf_width / record_width
+    scale_y = pdf_height / record_height
+    x0_pt = max(0.0, (x0 - padding) * scale_x)
+    y0_pt = max(0.0, (y0 - padding) * scale_y)
+    x1_pt = min(pdf_width, (x1 + padding) * scale_x)
+    y1_pt = min(pdf_height, (y1 + padding) * scale_y)
+    if x1_pt <= x0_pt or y1_pt <= y0_pt:
+        return False
+    px_scale = dpi / 72.0
+    crop_x = max(0, int(round(x0_pt * px_scale)))
+    crop_y = max(0, int(round(y0_pt * px_scale)))
+    crop_w = max(1, int(round((x1_pt - x0_pt) * px_scale)))
+    crop_h = max(1, int(round((y1_pt - y0_pt) * px_scale)))
+    output_stem = output_path.with_suffix("")
+    command = [
+        executable,
+        "-png",
+        "-singlefile",
+        "-q",
+        "-f",
+        str(page_idx + 1),
+        "-l",
+        str(page_idx + 1),
+        "-r",
+        str(dpi),
+        "-x",
+        str(crop_x),
+        "-y",
+        str(crop_y),
+        "-W",
+        str(crop_w),
+        "-H",
+        str(crop_h),
+        str(pdf_path),
+        str(output_stem),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+    return output_path.exists()
+
+
+def _pdf_page_size_points(pdf_path: Path, *, page_idx: int) -> tuple[float, float]:
+    executable = shutil.which("pdfinfo")
+    if executable:
+        command = [executable, "-f", str(page_idx + 1), "-l", str(page_idx + 1), str(pdf_path)]
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+            match = re.search(r"Page\s+\d+\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts", completed.stdout)
+            if match:
+                return float(match.group(1)), float(match.group(2))
+        except Exception:
+            pass
+    return 0.0, 0.0
 
 
 FIGURE_ASSET_KEYS = (

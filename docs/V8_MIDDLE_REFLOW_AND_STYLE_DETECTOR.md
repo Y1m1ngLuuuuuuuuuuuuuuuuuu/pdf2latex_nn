@@ -112,6 +112,26 @@ Renderer-side use is intentionally narrow:
 - `paragraph_indent` controls `\parindent`.
 - heading style commands still come from `RenderTreeIR.metadata.heading_style_registry`.
 
+## Wide Float Rendering
+
+V8 keeps float grouping in the existing renderer/table-assets layer instead of
+creating a separate v8-only float grouper:
+
+- table fragments are still grouped by `src/generation/table_assets.py`;
+- wide tables use source TeX `table*` hints when `--source-tex` is available,
+  otherwise bbox width is the fallback;
+- wide figures use visual bbox/group width because source figure layout hints
+  are not extracted yet;
+- a wide float inside a mixed-column body first exits `multicols`, renders as
+  `figure*` / `table*`, then re-enters the two-column flow;
+- ordinary column-width floats keep the existing `figure[H]` / `table[H]`
+  behavior.
+
+Starred floats intentionally use `[!t]` rather than `[H]`: LaTeX does not pin
+double-column floats reliably with the `float` package's `H` placement. For
+local environments without PyMuPDF, PDF crops fall back to Poppler
+`pdftocairo`/`pdfinfo` so figures and tables do not degrade to TODO comments.
+
 ## 00050 Smoke Command
 
 The current local 00050 smoke uses:

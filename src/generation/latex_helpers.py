@@ -398,6 +398,7 @@ def render_table_placeholder(
     asset_output_dir: str | Path | None = None,
     asset_latex_prefix: str = "assets",
     as_nonfloat: bool = False,
+    wide_float: bool = False,
     label: str | None = None,
 ) -> str:
     if int(record.get("table_group_size") or 1) > 1 and record.get("table_group_primary") is False:
@@ -422,16 +423,17 @@ def render_table_placeholder(
     else:
         wide = is_wide_visual_record(record, bbox_keys=("table_group_bbox", "bbox"))
     todo = f"% [TODO_TABLE_RECONSTRUCT: BBOX={bbox}, ID={table_id}]"
+    use_starred_float = bool(wide_float and wide and not as_nonfloat)
     include_width = r"\linewidth" if as_nonfloat else (r"\textwidth" if wide else r"\linewidth")
     graphic_line = rf"\includegraphics[width={include_width}]{{{graphic}}}" if graphic else todo
-    # ``table*`` is allowed to float away from the source position in
-    # two-column layouts, and ``[H]`` does not reliably pin double-column
-    # floats.  Keep every reconstructed table in a normal float with [H]; wide
-    # tables still use ``\textwidth`` so the crop can span the available page
-    # width when it is emitted outside a multicol band.
-    environment = "table"
-    placement = "H"
+    # Starred double-column floats do not support the float package's ``[H]``
+    # placement reliably.  Use them only after the mixed-column renderer has
+    # broken out of ``multicols``; otherwise keep the non-float caption form.
+    environment = "table*" if use_starred_float else "table"
+    placement = "!t" if use_starred_float else "H"
     lines = [r"\begin{center}"] if as_nonfloat else [rf"\begin{{{environment}}}[{placement}]", r"\centering"]
+    if use_starred_float:
+        lines.append("% [FLOAT_WIDTH_SCOPE: page, environment=table*]")
     if source_layout:
         lines.append(
             "% [SOURCE_TABLE_LAYOUT: "
@@ -462,6 +464,7 @@ def render_figure_block(
     asset_latex_prefix: str = "assets",
     rendered_caption: str | None = None,
     as_nonfloat: bool = False,
+    wide_float: bool = False,
     label: str | None = None,
 ) -> str:
     caption = rendered_caption
@@ -475,11 +478,10 @@ def render_figure_block(
         asset_output_dir=asset_output_dir,
         asset_latex_prefix=asset_latex_prefix,
     )
-    graphic_line = (
-        rf"\includegraphics[width={'1.000' if as_nonfloat else figure_include_width(record)}\linewidth]{{{asset_path}}}"
-        if asset_path
-        else figure_placeholder(record)
-    )
+    include_width = "1.000" if as_nonfloat else figure_include_width(record)
+    wide = is_wide_visual_record(record, bbox_keys=("figure_group_bbox", "image_group_bbox", "bbox")) or _number_or_none(include_width) >= 0.95
+    use_starred_float = bool(wide_float and wide and not as_nonfloat)
+    graphic_line = rf"\includegraphics[width={include_width}\linewidth]{{{asset_path}}}" if asset_path else figure_placeholder(record)
     if as_nonfloat:
         lines = [
             r"\begin{center}",
@@ -490,15 +492,19 @@ def render_figure_block(
             lines.append(rf"\label{{{label}}}")
         lines.append(r"\end{center}")
         return "\n".join(lines)
+    environment = "figure*" if use_starred_float else "figure"
+    placement = "!t" if use_starred_float else "H"
     lines = [
-        r"\begin{figure}[H]",
+        rf"\begin{{{environment}}}[{placement}]",
         r"\centering",
         graphic_line,
         rf"\caption{{{caption}}}",
     ]
+    if use_starred_float:
+        lines.insert(2, "% [FLOAT_WIDTH_SCOPE: page, environment=figure*]")
     if label:
         lines.append(rf"\label{{{label}}}")
-    lines.append(r"\end{figure}")
+    lines.append(rf"\end{{{environment}}}")
     return "\n".join(lines)
 
 
@@ -511,6 +517,7 @@ def render_figure_minipage_group(
     asset_latex_prefix: str = "assets",
     rendered_caption: str | None = None,
     as_nonfloat: bool = False,
+    wide_float: bool = False,
     label: str | None = None,
 ) -> str:
     members = [_figure_member_record(record) for record in records]
@@ -524,6 +531,7 @@ def render_figure_minipage_group(
             asset_latex_prefix=asset_latex_prefix,
             rendered_caption=rendered_caption,
             as_nonfloat=as_nonfloat,
+            wide_float=wide_float,
             label=label,
         )
     members = sorted(members, key=_figure_member_sort_key)
@@ -533,8 +541,17 @@ def render_figure_minipage_group(
         caption_text = clean_float_caption_text(caption_text, "figure") or "Figure"
         caption = render_text_with_inline_latex(caption_text or "Figure")
     group_width = 0.96 if as_nonfloat else _figure_group_width_fraction(records, members)
+    group_is_wide = group_width >= 0.90 or any(
+        is_wide_visual_record(record, bbox_keys=("figure_group_bbox", "image_group_bbox", "bbox"))
+        for record in records
+    )
+    use_starred_float = bool(wide_float and group_is_wide and not as_nonfloat)
     widths = _figure_minipage_widths(members)
-    lines = [r"\begin{center}"] if as_nonfloat else [r"\begin{figure}[H]", r"\centering"]
+    environment = "figure*" if use_starred_float else "figure"
+    placement = "!t" if use_starred_float else "H"
+    lines = [r"\begin{center}"] if as_nonfloat else [rf"\begin{{{environment}}}[{placement}]", r"\centering"]
+    if use_starred_float:
+        lines.append("% [FLOAT_WIDTH_SCOPE: page, environment=figure*]")
     chunks: list[str] = []
     for member, width in zip(members, widths):
         asset_path = ensure_figure_asset(
@@ -574,12 +591,12 @@ def render_figure_minipage_group(
         lines.append(rf"\captionof{{figure}}{{{caption}}}" if as_nonfloat else rf"\caption{{{caption}}}")
     if label:
         lines.append(rf"\label{{{label}}}")
-    lines.append(r"\end{center}" if as_nonfloat else r"\end{figure}")
+    lines.append(r"\end{center}" if as_nonfloat else rf"\end{{{environment}}}")
     return "\n".join(lines)
 
 
 def figure_include_width(record: dict[str, Any]) -> str:
-    bbox = first_record_bbox(record, ("bbox", "figure_group_bbox", "image_group_bbox"))
+    bbox = first_record_bbox(record, ("figure_group_bbox", "image_group_bbox", "bbox"))
     if bbox is None:
         return "0.95"
     ratio = _visual_width_fraction_from_bbox(bbox, [record])
