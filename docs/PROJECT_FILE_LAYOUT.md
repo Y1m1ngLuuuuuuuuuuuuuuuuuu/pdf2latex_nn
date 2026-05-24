@@ -39,6 +39,9 @@ artifacts should not be recursively copied from local to AutoDL.
 | `configs/` | Ablation, prompt, external-eval, and API-baseline configuration. | Yes | No secrets. |
 | `tests/` | Unit and regression tests. | Yes | Prefer synthetic tests for logic changes. |
 | `docs/` | Current contracts, architecture, runbooks, and historical result summaries. | Yes | This file is the directory source of truth. |
+| `environment.yml` | Conda wrapper for the base Python environment. | Yes | Uses `requirements.txt` from project root. |
+| `requirements.txt` | Base v8/GNN dependency list. | Yes | Laptop/default install target. |
+| `requirements_server.txt` | Server/AutoDL extras. | Yes | Heavier optional OCR/API/data packages. |
 | `third_party/` | Third-party code/data placeholders. | Partial | Large third-party datasets stay on AutoDL and should not be committed. |
 | `_legacy_reference/` | Archived pre-current code/reference snapshots. | Yes, small only | Do not use as production path. |
 

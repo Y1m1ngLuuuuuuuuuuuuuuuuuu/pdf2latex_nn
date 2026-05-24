@@ -1,61 +1,45 @@
-# Core deep learning frameworks
-torch==2.8.0
-torchvision==0.19.0
-torch-geometric==2.6.1
+# PDF2LaTeX-NN base environment
+#
+# This file targets the current v8/layout-first path plus the optional
+# local GNN relation branch.  It intentionally does not install MinerU,
+# PaddleOCR, or API-provider SDKs; those live in requirements_server.txt or
+# optional provider-specific installs.
 
-# YOLOv8 for object detection
-ultralytics==8.4.39
+# Core data / PDF / image processing
+numpy>=1.26,<2.0
+pandas>=2.2,<3.0
+Pillow>=10.0,<12.0
+PyMuPDF>=1.24,<1.27
+PyPDF2>=3.0,<4.0
+pdf2image>=1.17,<2.0
+opencv-python>=4.10,<5.0
+scipy>=1.13,<2.0
+networkx>=3.3,<4.0
 
-# AWS S3 access for ArXiv data
-boto3==1.37.38
-awscli
-
-# PDF processing
-pdf2image==1.17.0
-PyPDF2==3.0.1
-
-# OCR and text recognition
-paddleocr==3.4.1
-paddlepaddle==2.6.0
-
-# Formula recognition
-pix2tex==0.1.4
-
-# NLP and text embeddings
-transformers==4.46.3
-sentencepiece==0.2.0
-tokenizers==0.20.3
-
-# Data processing
-numpy==1.24.3
-pandas==2.0.3
-Pillow==10.0.0
-opencv-python==4.8.0.74
-scipy==1.10.1
-networkx==3.5
-
-# HTTP requests
-requests==2.31.0
-
-# Configuration and utilities
-PyYAML==6.0.1
-tqdm==4.66.1
-python-dotenv==1.0.0
-
-# Visualization
-matplotlib==3.7.2
-seaborn==0.12.2
-
-# Testing
-pytest==7.4.0
-pytest-cov==4.1.0
-
-# LaTeX parsing
+# Text, config, and utilities
+requests>=2.31,<3.0
+PyYAML>=6.0,<7.0
+tqdm>=4.66,<5.0
+python-dotenv>=1.0,<2.0
+rapidfuzz>=3.13,<4.0
 pylatexenc==2.10
 TexSoup==0.3.3
-rapidfuzz==3.13.0
 
-# Code quality
-black==23.7.0
-flake8==6.1.0
-isort==5.12.0
+# GNN / embedding branch
+torch>=2.4,<3.0
+torch-geometric>=2.6,<3.0
+lightning>=2.4,<3.0
+transformers>=4.46,<5.0
+sentencepiece>=0.2,<0.3
+tokenizers>=0.20,<0.22
+
+# Visualization and QA
+matplotlib>=3.8,<4.0
+seaborn>=0.13,<0.14
+
+# Tests and formatting
+pytest>=8.0,<9.0
+pytest-cov>=5.0,<7.0
+black>=24.0,<26.0
+flake8>=7.0,<8.0
+isort>=5.13,<6.0

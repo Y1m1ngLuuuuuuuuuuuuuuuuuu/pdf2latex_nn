@@ -430,6 +430,10 @@ docs/PROJECT_ARCHITECTURE_FULL.md
 docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md
 docs/PROJECT_SOURCE_OF_TRUTH.md
 docs/PROJECT_OVERVIEW.md
+docs/PROJECT_FILE_LAYOUT.md
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
+docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md
+docs/ENVIRONMENT_SETUP.md
 docs/frontend_backend_contract_v1.md
 docs/feature_schema_v0.md
 docs/ground_truth_labeling_v0.md

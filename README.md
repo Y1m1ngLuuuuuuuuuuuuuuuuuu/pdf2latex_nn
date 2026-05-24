@@ -169,6 +169,7 @@ docs/PROJECT_SOURCE_OF_TRUTH.md      local / GitHub / AutoDL boundary
 docs/PROJECT_OVERVIEW.md             architecture and implementation summary
 docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md current v8 path and parameters
 docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md future author/affiliation/email parser plan
+docs/ENVIRONMENT_SETUP.md             conda/venv setup and dependency profiles
 docs/frontend_backend_contract_v1.md decoupled IR contracts
 docs/feature_schema_v0.md            graph tensor feature contract
 docs/ground_truth_labeling_v0.md     TeX-to-PDF truth-label generation

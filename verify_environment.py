@@ -1,134 +1,195 @@
 #!/usr/bin/env python3
-"""
-环境验证脚本
-检查所有依赖是否正确安装
+"""Project environment smoke checker.
+
+The current default reconstruction path is v8/layout-first.  MinerU/PaddleOCR
+and API-provider SDKs are optional extras, so this checker distinguishes the
+base environment from heavier server/API profiles.
 """
 
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
 import sys
+from importlib import import_module
+from typing import Iterable
 
-def check_environment():
-    """检查环境配置"""
-    print("=" * 50)
-    print("环境验证检查")
-    print("=" * 50)
 
-    errors = []
-    warnings = []
+CORE_MODULES = [
+    ("numpy", "NumPy"),
+    ("pandas", "Pandas"),
+    ("PIL", "Pillow"),
+    ("fitz", "PyMuPDF"),
+    ("PyPDF2", "PyPDF2"),
+    ("pdf2image", "pdf2image"),
+    ("cv2", "OpenCV"),
+    ("scipy", "SciPy"),
+    ("networkx", "NetworkX"),
+    ("yaml", "PyYAML"),
+    ("requests", "Requests"),
+    ("tqdm", "tqdm"),
+    ("rapidfuzz", "RapidFuzz"),
+    ("TexSoup", "TexSoup"),
+    ("pylatexenc", "pylatexenc"),
+]
 
-    # 1. Python 版本
-    print(f"\n[1] Python 版本: {sys.version}")
-    if sys.version_info < (3, 10):
-        errors.append("Python 版本需要 >= 3.10")
+GNN_MODULES = [
+    ("torch", "PyTorch"),
+    ("torch_geometric", "PyTorch Geometric"),
+    ("transformers", "Transformers"),
+    ("lightning", "Lightning"),
+]
 
-    # 2. PyTorch
+SERVER_OPTIONAL_MODULES = [
+    ("boto3", "Boto3"),
+    ("ultralytics", "Ultralytics"),
+    ("paddleocr", "PaddleOCR"),
+    ("paddle", "PaddlePaddle"),
+]
+
+API_OPTIONAL_MODULES = [
+    ("openai", "OpenAI SDK"),
+]
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--profile",
+        choices=["base", "server", "api", "all"],
+        default="base",
+        help=(
+            "base checks v8 + GNN dependencies. server also checks MinerU/OCR-adjacent "
+            "extras. api checks API-baseline SDKs. all checks every optional group."
+        ),
+    )
+    return parser
+
+
+def module_version(module_name: str) -> str:
+    module = import_module(module_name)
+    return str(getattr(module, "__version__", "installed"))
+
+
+def check_modules(modules: Iterable[tuple[str, str]], *, required: bool, title: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    print(f"\n[{title}]")
+    for module_name, label in modules:
+        try:
+            version = module_version(module_name)
+            print(f"  {label}: {version}")
+        except Exception as exc:
+            message = f"{label} missing: {exc}"
+            if required:
+                errors.append(message)
+                print(f"  {label}: MISSING")
+            else:
+                warnings.append(message)
+                print(f"  {label}: optional missing")
+    return errors, warnings
+
+
+def check_torch_details() -> list[str]:
+    warnings: list[str] = []
     try:
         import torch
-        print(f"[2] PyTorch: {torch.__version__}")
-        print(f"    CUDA 可用: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"    CUDA 版本: {torch.version.cuda}")
-            print(f"    GPU 数量: {torch.cuda.device_count()}")
-            for i in range(torch.cuda.device_count()):
-                print(f"    GPU {i}: {torch.cuda.get_device_name(i)}")
-        else:
-            warnings.append("CUDA 不可用（无卡模式正常）")
-    except ImportError as e:
-        errors.append(f"PyTorch 未安装: {e}")
-
-    # 3. TorchVision
-    try:
-        import torchvision
-        print(f"[3] TorchVision: {torchvision.__version__}")
-    except ImportError as e:
-        errors.append(f"TorchVision 未安装: {e}")
-
-    # 4. PyTorch Geometric
-    try:
-        import torch_geometric
-        print(f"[4] PyTorch Geometric: {torch_geometric.__version__}")
-    except ImportError as e:
-        errors.append(f"PyTorch Geometric 未安装: {e}")
-
-    # 5. Ultralytics (YOLOv8)
-    try:
-        import ultralytics
-        print(f"[5] Ultralytics: {ultralytics.__version__}")
-    except ImportError as e:
-        errors.append(f"Ultralytics 未安装: {e}")
-
-    # 6. PaddleOCR
-    try:
-        import paddleocr
-        print(f"[6] PaddleOCR: 已安装")
-    except ImportError as e:
-        errors.append(f"PaddleOCR 未安装: {e}")
-
-    # 7. Transformers
-    try:
-        import transformers
-        print(f"[7] Transformers: {transformers.__version__}")
-    except ImportError as e:
-        errors.append(f"Transformers 未安装: {e}")
-
-    # 8. 其他关键库
-    libs = [
-        ('numpy', 'NumPy'),
-        ('pandas', 'Pandas'),
-        ('PIL', 'Pillow'),
-        ('cv2', 'OpenCV'),
-        ('scipy', 'SciPy'),
-        ('boto3', 'Boto3'),
-        ('pdf2image', 'pdf2image'),
-        ('PyPDF2', 'PyPDF2'),
-    ]
-
-    print(f"\n[8] 其他依赖:")
-    for module, name in libs:
-        try:
-            mod = __import__(module)
-            version = getattr(mod, '__version__', '已安装')
-            print(f"    {name}: {version}")
-        except ImportError:
-            warnings.append(f"{name} 未安装")
-
-    # 9. 系统工具检查
-    print(f"\n[9] 系统工具:")
-    import subprocess
-    tools = ['pdftoppm', 'pdfinfo']
-    for tool in tools:
-        try:
-            result = subprocess.run(['which', tool], capture_output=True, text=True)
-            if result.returncode == 0:
-                print(f"    {tool}: {result.stdout.strip()}")
-            else:
-                warnings.append(f"{tool} 未找到（需要 poppler-utils）")
-        except Exception as e:
-            warnings.append(f"检查 {tool} 失败: {e}")
-
-    # 总结
-    print("\n" + "=" * 50)
-    print("验证结果")
-    print("=" * 50)
-
-    if errors:
-        print("\n❌ 错误:")
-        for err in errors:
-            print(f"  - {err}")
-
-    if warnings:
-        print("\n⚠️  警告:")
-        for warn in warnings:
-            print(f"  - {warn}")
-
-    if not errors and not warnings:
-        print("\n✅ 所有检查通过！环境配置正确。")
-        return 0
-    elif not errors:
-        print("\n✅ 核心依赖已安装，有一些可选警告。")
-        return 0
+    except Exception:
+        return warnings
+    print(f"  CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"  CUDA version: {torch.version.cuda}")
+        print(f"  GPU count: {torch.cuda.device_count()}")
+        for idx in range(torch.cuda.device_count()):
+            print(f"  GPU {idx}: {torch.cuda.get_device_name(idx)}")
     else:
-        print("\n❌ 环境配置有错误，请修复后重试。")
+        warnings.append("CUDA is unavailable; this is normal for laptop CPU/MPS work, slower for GNN training.")
+        if hasattr(torch.backends, "mps"):
+            print(f"  MPS available: {torch.backends.mps.is_available()}")
+    return warnings
+
+
+def check_system_tools() -> list[str]:
+    warnings: list[str] = []
+    print("\n[System tools]")
+    for tool in ["pdfinfo", "pdftoppm", "pdflatex", "xelatex", "latexmk"]:
+        path = shutil.which(tool)
+        if path:
+            print(f"  {tool}: {path}")
+        else:
+            warnings.append(f"{tool} not found")
+            print(f"  {tool}: optional missing")
+    return warnings
+
+
+def check_python_version() -> list[str]:
+    warnings: list[str] = []
+    print(f"[Python] {sys.version}")
+    if sys.version_info < (3, 10):
+        raise RuntimeError("Python >= 3.10 is required")
+    if sys.version_info >= (3, 13):
+        warnings.append(
+            "Python >= 3.13 may not have stable wheels for torch/paddle on every platform; "
+            "Python 3.11 is recommended."
+        )
+    return warnings
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
+    print("=" * 64)
+    print("PDF2LaTeX-NN environment check")
+    print("=" * 64)
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        warnings.extend(check_python_version())
+    except RuntimeError as exc:
+        errors.append(str(exc))
+
+    group_errors, group_warnings = check_modules(CORE_MODULES, required=True, title="Core v8 / rendering modules")
+    errors.extend(group_errors)
+    warnings.extend(group_warnings)
+
+    group_errors, group_warnings = check_modules(GNN_MODULES, required=True, title="GNN / embedding branch modules")
+    errors.extend(group_errors)
+    warnings.extend(group_warnings)
+    warnings.extend(check_torch_details())
+
+    if args.profile in {"server", "all"}:
+        group_errors, group_warnings = check_modules(
+            SERVER_OPTIONAL_MODULES,
+            required=False,
+            title="Server / MinerU-adjacent optional modules",
+        )
+        warnings.extend(group_warnings)
+
+    if args.profile in {"api", "all"}:
+        _, group_warnings = check_modules(API_OPTIONAL_MODULES, required=False, title="API baseline optional modules")
+        warnings.extend(group_warnings)
+
+    warnings.extend(check_system_tools())
+
+    print("\n" + "=" * 64)
+    print("Result")
+    print("=" * 64)
+    if errors:
+        print("\nErrors:")
+        for item in errors:
+            print(f"  - {item}")
+    if warnings:
+        print("\nWarnings:")
+        for item in warnings:
+            print(f"  - {item}")
+    if errors:
+        print("\nEnvironment has missing required dependencies.")
         return 1
+    print("\nRequired dependencies are available.")
+    return 0
+
 
 if __name__ == "__main__":
-    sys.exit(check_environment())
+    raise SystemExit(main())

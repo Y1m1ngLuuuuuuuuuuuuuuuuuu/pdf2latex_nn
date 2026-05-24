@@ -145,6 +145,7 @@ docs/ablation_plan_v2.md              当前 ablation 协议
 docs/ablation_results_current.md      最新锁定 ablation 结果
 docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md 当前 v8 路径和参数
 docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md 后续精确 author/affiliation/email 解析计划
+docs/ENVIRONMENT_SETUP.md             conda/venv 环境安装和依赖 profile
 docs/v7_training_and_monitoring.md    可选 GNN 关系学习 runbook
 docs/interface_audit_2026_05_14.md    当前接口审计和旧路径检查
 docs/LOCAL_CONFIGURATION.md           私有本地配置说明

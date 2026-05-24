@@ -31,6 +31,9 @@ AutoDL: /root/autodl-tmp/pdf2latex_nn
 | `configs/` | ablation、prompt、外部评测配置 | 是 |
 | `tests/` | 单测和回归测试 | 是 |
 | `docs/` | 架构、接口、runbook、结果说明 | 是 |
+| `environment.yml` | conda 基础环境入口 | 是 |
+| `requirements.txt` | v8/GNN 基础依赖列表 | 是 |
+| `requirements_server.txt` | AutoDL/server 额外依赖 | 是 |
 
 ## 3. `data/` 目录契约
 
@@ -154,4 +157,3 @@ data/_tmp_*
 重复渲染 PDF
 没有 manifest 引用的旧 cache/stage 目录
 ```
-

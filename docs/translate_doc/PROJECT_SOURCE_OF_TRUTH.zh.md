@@ -136,6 +136,7 @@ docs/layout_aware_reconstruction_target.md
 docs/ground_truth_labeling_v0.md
 docs/v7_training_and_monitoring.md
 docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md
+docs/ENVIRONMENT_SETUP.md
 docs/MINERU_ADAPTER_CONTRACT.md
 docs/TABLE_ENGINE_CONTRACT.md
 docs/STYLE_TEMPLATE_CONTRACT.md
