@@ -952,13 +952,15 @@ class OriginalLikeIRLatexRenderer:
     ) -> str | None:
         if node.role == RenderRole.LIST:
             return None
-        if node.role == RenderRole.LIST_ITEM:
-            return "enumerate" if node.attributes.get("ordered") else "itemize"
         source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
+        text = node.text or node.latex or " ".join(source.text for source in source_nodes)
+        if node.role == RenderRole.LIST_ITEM:
+            if node.attributes.get("ordered"):
+                return "enumerate"
+            return _list_environment_for_text(text) or "itemize"
         if source_nodes and all(source.node_type == BlockType.LIST for source in source_nodes):
             text = " ".join(source.text for source in source_nodes)
             return _list_environment_for_text(text) or "itemize"
-        text = node.text or node.latex or " ".join(source.text for source in source_nodes)
         if _render_node_is_heading_candidate(node, source_nodes, text):
             return None
         return _list_environment_for_text(text)

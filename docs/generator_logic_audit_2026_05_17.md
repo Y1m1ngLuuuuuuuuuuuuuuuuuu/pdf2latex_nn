@@ -1,32 +1,41 @@
 # Generator Logic Audit 2026-05-17
 
+**Last updated**: 2026-05-24
+
 This note freezes the current generator architecture after the v7/GNN-view
 decoupling fixes.  It is meant to answer one question: which module owns which
 part of reconstruction, and which path is allowed to produce final E2E PDFs?
 
+2026-05-24 status update: the original full-v7/GNN bridge contract still
+applies to the optional relation-learning branch, but the default reconstruction
+path is now v8 / layout-first and does not load GNN predictions.
+
 ## Current Principle
 
-The production generator is full-v7 first.
+The production generator is full-document-IR first.
 
 ```text
-content_list_v7_styles.json  (complete facts: text, bbox, styles, floats, notes)
+MinerU middle/content-list facts or content_list_v7_styles.json
   -> DocumentIR              (stable full-document IR)
-  + GNN predicted edges      (only structural relation hints on GNN-view ids)
-  -> relation bridge         (gnn_idx -> exact v7 node id sequence)
+  -> deterministic decoder   (front matter, heading stack, layout/style rules)
   -> RenderTreeIR            (decoder tree expressed in full-v7 source ids)
   -> OriginalLikeIRLatexRenderer
   -> compilable LaTeX / PDF
 ```
 
-The GNN view is not a render source.  It exists only to let the model predict
-local relations.  The final renderer must always return to complete v7
-records, otherwise title, authors, header/footer, footnotes, floats and full
-style spans disappear or get misclassified as noise.
+When a GNN experiment is explicitly enabled, GNN predicted edges still pass
+through the graph-to-v7 relation bridge before rendering.  The GNN view is
+never a render source.
+
+The final renderer must always consume complete document facts, otherwise
+title, authors, header/footer, footnotes, floats and full style spans disappear
+or get misclassified as noise.
 
 ## Production Entrypoints
 
 | Entrypoint | Current role |
 | --- | --- |
+| `scripts/pipeline/run_v8_layout_reconstruction.py` | Current default v8 reconstruction entrypoint. Consumes `middle.json`, optional `content_list.json`, optional style sidecar, and renders without GNN. |
 | `scripts/pipeline/step5_generate_tex.py` | Single-document canonical inference/generation entry. Defaults to `--renderer ir` and `--heading-skeleton-mode stack`. |
 | `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper only. It now forwards `--renderer ir` and `--heading-skeleton-mode stack` to `step5_generate_tex.py`. |
 | `scripts/pipeline/run_layout_aware_reconstruction.py` | Current default no-GNN layout-aware E2E reconstruction entrypoint. It keeps the full-v7 IR renderer but ignores legacy checkpoint arguments. |
@@ -39,6 +48,35 @@ style spans disappear or get misclassified as noise.
 by the IR renderer. `src.generation.latex_renderer` is a deprecated standalone
 tree-rendering surface retained for historical unit tests. Current production
 scripts no longer accept `--renderer tree`; they expose only `--renderer ir`.
+
+## V8 Default Path Addendum
+
+The v8 path adds these generator-side facts before rendering:
+
+```text
+middle.json line/block geometry
+content_list asset/caption sidecar
+optional styled v7 sidecar for font/style enrichment
+FrontMatterIR
+heading style registry
+v8 StyleProfile
+```
+
+It keeps the same renderer contract:
+
+```text
+DocumentIR + RenderTreeIR + StyleProfile -> OriginalLikeIRLatexRenderer
+```
+
+The current 00050 smoke verifies:
+
+```text
+source PDF page size is preserved;
+wide tables/figures render as table*/figure* outside multicols;
+heading levels keep document-local centered/left-aligned styles;
+numbered list items render as enumerate, not itemize;
+front matter is consumed and not re-rendered as body paragraphs.
+```
 
 ## Graph-to-v7 Bridge Contract
 

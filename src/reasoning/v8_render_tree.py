@@ -21,6 +21,7 @@ HEADING_NUMBER_RE = re.compile(r"^\s*(?P<num>\d+(?:\.\d+){0,3})\.?\s+(?P<title>.
 REFERENCE_HEADING_RE = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
 ABSTRACT_HEADING_RE = re.compile(r"^\s*(abstract|摘要)\s*$", re.IGNORECASE)
 BULLET_RE = re.compile(r"^\s*(?:[•●▪*-]|\d+[.)])\s+")
+ORDERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+")
 TOP_LEVEL_UNNUMBERED_HEADINGS = {
     "introduction",
     "related work",
@@ -125,7 +126,9 @@ def build_v8_render_tree(
             "page_idx": source.page_idx,
             "reading_index": source.reading_index,
         }
-        if heading_evidence:
+        if role == RenderRole.LIST_ITEM and heading_evidence:
+            attributes.update(heading_evidence)
+        elif heading_evidence:
             attributes["heading_level_evidence"] = heading_evidence
         if role == RenderRole.REFERENCES:
             attributes["reference_heading_source_node_id"] = source.node_id
@@ -301,7 +304,11 @@ def role_for_source_node(
     if node.node_type == BlockType.CODE:
         return RenderRole.CODE, 0, {}
     if node.node_type == BlockType.LIST or BULLET_RE.match(text):
-        return RenderRole.LIST_ITEM, 0, {}
+        ordered = _node_is_ordered_list_item(node, text)
+        return RenderRole.LIST_ITEM, 0, {
+            "ordered": ordered,
+            "list_marker_source": "ordered_prefix" if ordered else "bullet_prefix_or_list_type",
+        }
     if node.node_type == BlockType.REFERENCE:
         return RenderRole.REFERENCE_ITEM, 0, {}
     if node.node_type == BlockType.FOOTNOTE:
@@ -309,6 +316,15 @@ def role_for_source_node(
     if node.node_type == BlockType.TOC:
         return RenderRole.TOC_PLACEHOLDER, 0, {}
     return RenderRole.PARAGRAPH, 0, {}
+
+
+def _node_is_ordered_list_item(node: DocumentNode, text: str) -> bool:
+    list_type = str(node.list_type or node.metadata.get("list_type") or "").casefold()
+    if list_type in {"ordered", "enumerate", "numbered", "number", "alpha", "roman"}:
+        return True
+    if list_type in {"unordered", "itemize", "bullet", "bulleted"}:
+        return False
+    return bool(ORDERED_LIST_RE.match(text))
 
 
 def heading_level_from_node(node: DocumentNode, *, document: DocumentIR | None = None) -> tuple[int, dict[str, Any]]:

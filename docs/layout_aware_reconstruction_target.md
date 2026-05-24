@@ -1,6 +1,6 @@
 # Layout-Aware Reconstruction Target
 
-**Last updated**: 2026-05-23
+**Last updated**: 2026-05-24
 
 This document fixes the project target and evaluation philosophy.  It is the
 contract that prevents the system from being optimized toward an impossible
@@ -55,12 +55,16 @@ pretend that PDF evidence uniquely determines the author's original TeX AST.
 
 ## 1.1 Current Default Reconstruction Policy
 
-As of 2026-05-23, the default reconstruction path is layout-aware and
+As of 2026-05-24, the default reconstruction path is v8, layout-aware, and
 rules-first:
 
 ```text
-full v7 facts -> DocumentIR/LayoutIR -> heading stack + layout decoder
--> RenderTreeIR -> LaTeX renderer
+MinerU middle/content-list facts
+-> v8 middle reflow
+-> DocumentIR/LayoutIR
+-> FrontMatterIR + heading style registry + stack skeleton
+-> RenderTreeIR
+-> LaTeX renderer
 ```
 
 The GNN relation model is retained as an explicit experimental branch, not as
@@ -120,8 +124,8 @@ while being written elsewhere in TeX source.
 
 ## 4. GNN Responsibility
 
-The GNN remains the learned relation core of the project.  It keeps the current
-three-class task:
+The GNN remains a maintained relation-learning branch, but it is not the
+default reconstruction authority.  It keeps the current three-class task:
 
 ```text
 MERGE
@@ -131,7 +135,7 @@ NONE
 
 `PARENT_CHILD` is still a learned structural attachment relation derived from
 TeX labels over the graph-visible view.  It is not renamed to a local-only label
-and it is not split into many sparse heads.
+and it is not split into many sparse heads in the current branch.
 
 The decoder may add deterministic constraints around the GNN output:
 
@@ -143,20 +147,21 @@ physical impossibility vetoes
 renderer layout policies
 ```
 
-These constraints are safeguards, not a replacement for the learned relation
-model.  They prevent physically impossible structures and make the generated
-LaTeX stable, but the supervised GNN task remains the same three-class relation
-prediction problem.
+These constraints are the production defaults for heading scope and rendering.
+They prevent physically impossible structures and make the generated LaTeX
+stable.  The supervised GNN task remains the same three-class relation
+prediction problem only when the optional GNN branch is being trained or
+audited.
 
-This means the project keeps the previous GNN design:
+This means the optional GNN branch keeps the previous design:
 
 ```text
 candidate graph -> GNN relation probabilities -> constrained decoder -> IR renderer
 ```
 
-The evaluation may report body-only and float-separated variants because raw
-source AST attachment is not always a fair PDF-first metric.  That evaluation
-normalization does not change what the GNN is trained to predict.
+The default paper-facing reconstruction should not overclaim GNN E2E influence.
+The GNN should be reported as auxiliary ablation evidence unless a later
+GNN-sensitive validation set shows clear downstream improvements.
 
 ## 5. Run-In Headings
 

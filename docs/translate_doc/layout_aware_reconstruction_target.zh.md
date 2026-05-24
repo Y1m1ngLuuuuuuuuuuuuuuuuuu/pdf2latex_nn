@@ -1,6 +1,6 @@
 # 版式感知 LaTeX 重建目标
 
-**最后更新**：2026-05-17
+**最后更新**：2026-05-24
 
 本文档用于固定项目目标和评测哲学，避免系统继续被一个不可能的目标牵着走：从渲染后的 PDF 反推出作者原始 TeX 源码树。
 
@@ -95,7 +95,9 @@ semantic anchor:
 
 ## 4. GNN 的责任边界
 
-GNN 仍然是项目中的学习式关系预测核心。它保持当前三分类任务：
+GNN 仍然是被维护的学习式关系预测分支，但它不是当前默认
+reconstruction authority。当前默认 v8 / layout-first 生成链路不加载
+GNN checkpoint。GNN 分支保持当前三分类任务：
 
 ```text
 MERGE
@@ -115,15 +117,15 @@ physical impossibility vetoes
 renderer layout policies
 ```
 
-这些约束是安全网，不是对学习式关系模型的替代。它们用于阻止物理上不可能的结构，并让生成的 LaTeX 更稳定；但是监督训练任务仍然是原来的三分类关系预测。
+这些约束是当前生产默认的 heading scope 与渲染安全机制。它们用于阻止物理上不可能的结构，并让生成的 LaTeX 更稳定。只有在显式训练或审计可选 GNN 分支时，监督任务才是原来的三分类关系预测。
 
-也就是说，项目保留之前的 GNN 设计：
+也就是说，可选 GNN 分支保留之前的设计：
 
 ```text
 candidate graph -> GNN relation probabilities -> constrained decoder -> IR renderer
 ```
 
-评测中可以单独汇报 body-only、float-separated 等变体，因为 raw source AST attachment 对 PDF-first 系统不总是公平。但这种评测归一化不改变 GNN 的训练目标。
+默认面向论文的 reconstruction 不应过度声称 GNN 的 E2E 影响。除非后续 GNN-sensitive 验证集证明下游生成有清晰提升，GNN 结果应作为辅助 ablation / diagnostic 证据汇报。
 
 ## 5. Run-In Heading
 
@@ -298,8 +300,8 @@ style and column reconstruction
 2. 不让 section_attachment 单独决定系统好坏。
 3. run-in headings 不进入 block-level heading 指标。
 4. float visual position 和 semantic anchor 分开。
-5. heading skeleton / state stack 作为 decoder prior 和安全约束，而不是替代学习式关系模型。
-6. GNN 保持三分类关系预测器（`MERGE / PARENT_CHILD / NONE`）；除非作为独立实验，否则不收缩成 local-only，也不拆成大量稀疏多头。
+5. heading skeleton / state stack 是当前默认 decoder prior 和安全约束。
+6. GNN 保持三分类关系预测器（`MERGE / PARENT_CHILD / NONE`），但属于显式可选关系学习分支；默认 v8 reconstruction 不依赖它。
 7. 视觉、文本、标题、正文挂载、float、references 分开汇报。
 ```
 

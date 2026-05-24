@@ -1,5 +1,7 @@
 # V8 Middle Reflow And Style Detector
 
+**Last updated**: 2026-05-24
+
 This document records the current v8 reconstruction path and its parameters.
 V8 is a new input normalization path; it does not mutate v7 JSON, does not build
 a GNN view, and does not change graph schema.
@@ -115,6 +117,40 @@ Renderer-side use is intentionally narrow:
 - `paragraph_indent` controls `\parindent`.
 - heading style commands still come from `RenderTreeIR.metadata.heading_style_registry`.
 
+## Front Matter Phase 0
+
+V8 uses `src/reasoning/front_matter_extractor.py` before body rendering:
+
+```text
+DocumentIR
+  -> FrontMatterLineBuilder
+  -> RuleBasedFrontMatterSequenceTagger
+  -> FrontMatterIR
+```
+
+The extractor preserves and separates:
+
+```text
+document title
+author block
+affiliation-like lines
+email / correspondence lines
+front notes
+abstract title
+abstract body
+```
+
+This is not exact author-affiliation-email linking.  Its current job is:
+
+```text
+1. keep visible front matter from being lost;
+2. keep title/author/affiliation/email out of the body heading tree;
+3. render a stable original-like title/author/abstract surface.
+```
+
+Future precise parsing should be a separate FrontMatter Phase 1/2 entity and
+linking model, not a GNN graph change.
+
 ## Wide Float Rendering
 
 V8 keeps float grouping in the existing renderer/table-assets layer instead of
@@ -162,3 +198,5 @@ python3 scripts/pipeline/run_v8_layout_reconstruction.py \
   folders so they do not pollute the main path.
 - Future MinerU upgrades should implement the same middle/content-list/style
   adapter contract rather than changing renderer internals.
+- Current 00050 verification includes source-page-size output, starred wide
+  floats, heading style registry rendering, and ordered `enumerate` recovery.

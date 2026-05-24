@@ -1,8 +1,15 @@
-# V7 Training And Monitoring
+# V7 / GNN Training And Monitoring
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-24
 
-This is the current operational runbook for v7 data production, relabeling, training, ablation, and monitoring.
+This is the operational runbook for the optional v7/GNN relation-learning
+branch: data production, relabeling, training, ablation, and monitoring.  It is
+not the default v8 reconstruction path.  The default reconstruction path is
+documented in:
+
+```text
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
+```
 
 For the meaning of every repository/data directory, use:
 
@@ -10,7 +17,7 @@ For the meaning of every repository/data directory, use:
 docs/PROJECT_FILE_LAYOUT.md
 ```
 
-## New Data Production
+## New Data Production For Relation Experiments
 
 ### 2026-05-22 Fresh TeX-Source Rebuild
 
@@ -62,7 +69,7 @@ directories are paired correctly.
 
 ### V7 Dataset Builder
 
-Use the staged builder for remaining unprocessed PDF/TeX samples:
+Use the staged builder when producing graph/label data for GNN experiments:
 
 ```bash
 python -u scripts/pipeline/build_v7_dataset_staged.py \
@@ -147,7 +154,7 @@ label distribution not all NONE
 node_dim / edge_dim match the intended experiment
 ```
 
-## Training
+## Optional GNN Training
 
 Train on a clean labeled manifest:
 

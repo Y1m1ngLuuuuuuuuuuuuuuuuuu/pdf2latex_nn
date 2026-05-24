@@ -1,11 +1,20 @@
 # Project Description For Paper Planning
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-24
 
 This document is a paper-facing description of the current system.  It is more
 verbose than the source-of-truth runbook because it records the task definition,
 architecture, interfaces, modeling choices, generator design, evaluation
 protocol, and current experimental tracks in one place.
+
+**Current status note, 2026-05-24.**  This document was originally written for
+the v7/GNN relation-model phase.  The maintained default reconstruction path is
+now v8 / layout-first: MinerU `middle.json` and `content_list.json` are reflowed
+into a `DocumentIR`, then rendered through front-matter extraction, document
+local heading-style registry, stack skeleton, style detector, and
+`OriginalLikeIRLatexRenderer`.  The GNN relation model remains a preserved
+experimental branch for MERGE/PARENT_CHILD/NONE ablation and diagnostics, but it
+is not the default E2E generation dependency.
 
 ## 1. Problem Definition
 
@@ -42,19 +51,20 @@ The system instead reconstructs a compilable LaTeX document that preserves:
 ## 2. Main Thesis
 
 MinerU is used as the perception engine.  The contribution of this project is
-the structure reasoning and reconstruction layer on top of MinerU:
+the layout reasoning and reconstruction layer on top of MinerU:
 
 ```text
 MinerU gives visual facts.
 PyMuPDF enriches style spans.
-The TeX-side labeler creates relation supervision.
-The GNN predicts uncertain document relations.
-The decoder applies physical and structural constraints.
+The v8 reflow layer repairs middle/content-list reading order and logical blocks.
+The decoder applies heading/style/front-matter/float constraints.
 The generator reconstructs compilable, layout-aware LaTeX.
+The optional GNN branch studies uncertain MERGE/PARENT_CHILD relations.
 ```
 
 The project is therefore neither plain OCR nor a pure language model.  It is a
-hybrid symbolic-neural document reconstruction system.
+layout-aware symbolic reconstruction system with an optional neural relation
+learning branch.
 
 ## 3. End-To-End Pipeline
 
@@ -305,11 +315,11 @@ Main responsibilities:
 6. produce RenderTreeIR
 ```
 
-Current heading direction:
+Current heading direction for the optional relation-model branch:
 
 ```text
-GNN remains the relation model.
-Heading stack is a decoder prior and safety constraint.
+GNN remains an optional relation model.
+Heading stack is the default decoder prior and safety constraint.
 The generator should not depend on raw GNN parent edges to recover every section scope.
 ```
 
@@ -702,4 +712,3 @@ Possible paper outline:
    - where GNN helps
    - remaining issues: heading style, floats, OCR noise, tables
 ```
-

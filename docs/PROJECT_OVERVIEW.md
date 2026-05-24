@@ -1,8 +1,8 @@
 # PDF2LaTeX-NN Project Overview
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-24
 
-This document summarizes the current v7 architecture. It is the high-level
+This document summarizes the current v8/default architecture. It is the high-level
 project explanation; lower-level contracts live in the schema, labeling, and
 frontend/backend docs. For the complete architecture, data-flow, judgment
 rules, code map, and metrics taxonomy, see `docs/PROJECT_ARCHITECTURE_FULL.md`.
@@ -27,8 +27,8 @@ editable LaTeX document that preserves page layout and block-level semantic
 organization.
 
 ```text
-PDF visual facts + matching TeX source
-  -> learned relation model
+PDF visual facts
+  -> v8 middle-derived reflow
   -> structured IR
   -> compilable LaTeX
 ```
@@ -45,29 +45,51 @@ The detailed target and evaluation contract lives in
 
 ```text
 PDF Frontend
-  MinerU + PyMuPDF + v7 reading/layout cleanup
+  MinerU middle/content-list outputs + optional PyMuPDF/style sidecars
 
-GNN View Adapter
-  full v7 fact layer -> graph-visible node view + reversible v7 mapping
-  metadata/noise/annotation exclusion + float proxies
+V8 Reflow
+  raw middle.json line/block evidence -> corrected logical item list
 
-Graph Builder
-  SciBERT + geometry + style + layout-flow features
+DocumentIR
+  complete document fact layer consumed by decoder and renderer
 
-TeX Truth Generator
-  LaTeX flattener + TexSoup parser + sliding-window alignment
-
-GNN
-  EdgeRelationGAT / Y-Network predicts MERGE / PARENT_CHILD / NONE
-
-Decoder
-  merge contraction + structure constraints + tree/IR assembly
+Front Matter / Style / Heading
+  deterministic front matter preservation
+  document-local heading style registry
+  stack skeleton section hierarchy
 
 Generator
   OriginalLikeIRLatexRenderer + style/citation/float adapters
+
+Optional Relation-Learning Branch
+  GNNViewAdapter + graph builder + TeX-derived labels + GNN ablations
 ```
 
-## 3. V7 Frontend Principles
+The default reconstruction path does not load a GNN checkpoint.  The GNN branch
+is preserved for relation-learning experiments, diagnostics, and ablation
+evidence.
+
+## 3. V8 Frontend Principles
+
+The v8 frontend exists because MinerU's `content_list.json` can merge text
+before page-local reading order is corrected.  V8 therefore starts from
+`middle.json`, reconstructs line/block fragments in their original geometry,
+repairs reading order, and only then emits a v7-compatible logical item list.
+
+```text
+middle.json
+  + content_list.json asset/caption sidecar
+  + optional content_list_v7_styles.json style sidecar
+  -> content_list_v8.json
+  -> DocumentIR
+  -> RenderTreeIR
+  -> OriginalLikeIRLatexRenderer
+```
+
+V8 does not mutate old v7 JSON, does not enter the GNN graph, and does not
+change graph schema.
+
+## 4. V7 / GNN Branch Principles
 
 The v7 frontend describes visual facts; it does not bake in final structure decisions.
 
@@ -103,7 +125,7 @@ float -> text message passing -> masked
 skip-over-float candidate edges -> added for paragraph continuation
 ```
 
-## 4. GNN Task
+## 5. GNN Task
 
 The graph model is intentionally small in label space:
 
@@ -121,12 +143,10 @@ over-smoothed by neighboring floats, tables, and unrelated text.
 The float-proxy adapter path is being rebuilt separately and should be compared
 against the locked baseline rather than replacing it blindly.
 
-The GNN remains the learned relation core.  Heading evidence, section-scope
-guards, float grouping, and renderer rules are decoder constraints around the
-GNN output; they do not change the supervised task into a local-only objective.
-The production relation model still predicts `MERGE / PARENT_CHILD / NONE` over
-candidate graph edges, and the constrained decoder consumes those probabilities
-under physical and layout safety gates.
+The GNN is no longer the default E2E reconstruction dependency.  Its current
+role is to support optional relation-learning studies.  In those studies it
+still predicts `MERGE / PARENT_CHILD / NONE` over candidate graph edges, but
+production section scope is driven by the heading stack and layout rules.
 
 The deep edge heads receive directional node terms:
 
@@ -136,9 +156,9 @@ concat([Hu, Hv, Hu-Hv, Hu*Hv, Euv])
 
 This keeps parent-child direction learnable and avoids symmetric false positives.
 
-## 5. Why TeX Labels Exist
+## 6. Why TeX Labels Exist
 
-For training, the matching TeX source is the source of truth. The labeler:
+For optional GNN training, the matching TeX source is the source of truth. The labeler:
 
 ```text
 flattens TeX
@@ -148,9 +168,10 @@ generates edge labels over graph candidate edges
 enforces quality gates
 ```
 
-This is a training-data generator, not an inference dependency. At inference time the model sees only PDF-derived graph features.
+This is a training-data generator, not an inference dependency for the default
+v8 path.
 
-## 6. Generator Direction
+## 7. Generator Direction
 
 The current canonical generator is the IR renderer:
 
@@ -177,6 +198,17 @@ display equation rendering fallback
 ```
 
 The generator is still an expandable surface. Journal-template rendering and learned style reproduction should plug in behind the same IR contract.
+
+Current implemented v8 generator-side features include:
+
+```text
+source PDF page size selection
+body font / line-height / paragraph spacing detection
+heading style registry with centered vs left-aligned levels
+FrontMatter Phase 0 title/author/affiliation/email/abstract preservation
+wide figure* / table* rendering outside multicols
+ordered enumerate vs itemize recovery
+```
 
 ## 7. Current Data Strategy
 

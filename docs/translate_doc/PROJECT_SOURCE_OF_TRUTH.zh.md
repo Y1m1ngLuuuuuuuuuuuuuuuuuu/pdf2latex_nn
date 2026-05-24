@@ -1,18 +1,23 @@
 # 项目事实源
 
-**最后更新**：2026-05-18
+**最后更新**：2026-05-24
 
-本仓库是 v7 PDF-to-LaTeX 系统的源码控制位置。AutoDL 是数据集、MinerU 输出、图张量、checkpoint、生成 PDF 和长时间运行任务的运行时位置。
+本文件固定本地、GitHub、AutoDL 之间的边界，以及当前默认运行链路。
 
-## 源码流
+## 1. 源码同步原则
 
 ```text
-local source edits -> GitHub -> AutoDL git pull / targeted sync
+local source edits -> GitHub -> AutoDL git pull / targeted source sync
 ```
 
-避免从本地向 AutoDL 做大范围递归覆盖。如果必须定向同步，只同步源码文件。运行时产物应留在远程。
+不要把本地目录大范围递归覆盖到 AutoDL。运行时产物、数据集、checkpoint、
+generated PDF 和长任务日志应保留在 AutoDL，不应通过源码同步覆盖。
 
-## 根目录
+GitHub：
+
+```text
+https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
+```
 
 本地：
 
@@ -26,170 +31,65 @@ AutoDL：
 /root/autodl-tmp/pdf2latex_nn
 ```
 
-GitHub：
+## 2. 当前默认生产链路
+
+当前默认 reconstruction path 是 v8 / layout-first：
 
 ```text
-https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
-```
-
-## 生产流水线
-
-生产流水线只使用 v7：
-
-```text
-compiled PDF + matching TeX
-  -> MinerU content_v2
-  -> content_v7 + style spans
-  -> GNNViewAdapter
-  -> graph.pt
-  -> TeX AST alignment labels
-  -> GATv2/Y-Network training / inference
-  -> edge_logits.pt + predicted_relations.json
-  -> TreeDecoder
+compiled PDF
+  -> MinerU middle.json + content_list.json
+  -> v8 middle reflow and reading-order repair
+  -> DocumentIR
+  -> FrontMatterIR
+  -> heading style registry + stack skeleton
   -> RenderTreeIR
+  -> StyleProfile / v8 style detector
   -> OriginalLikeIRLatexRenderer
 ```
 
-旧 v3/v4/v5 JSON 是历史实验。不要把它们喂给训练或评测。
+默认 E2E reconstruction 不加载 GNN checkpoint，也不渲染 GNN view。
 
-完整 v7 JSON 是完整事实层。它不能因为 GNN 不直接使用某些节点，就删除或改写 metadata、figures、tables、footnotes、headers、captions 或 references。图可见视图由 `src/perception/gnn_view_adapter.py` 单独构建。
-
-GNN 预测结果不能直接渲染。模型只在 graph-visible view 上预测每条候选边的 MERGE/PARENT_CHILD/NONE logits。`TreeDecoder` 在约束下把这些概率转成结构关系，然后 relation bridge 把 graph index 精确映射回 v7 source ids，最后 IR renderer 读取完整 v7 fact layer。
-
-当前模型/数据轨道：
-
-```text
-locked baseline/results:
-  tag: v7_registry_adapteraware_20260515_181724
-  raw edge_attr_dim: 22
-  保留所有 reports/checkpoints/generator outputs
-
-active experimental rebuild:
-  tag: v7_floatproxy_adapter_20260516_205926
-  raw edge_attr_dim: 26
-  float proxy + skip-over-float features
-```
-
-在新路径验证完成之前，不要删除之前的测试结果或权重。
-
-## 活跃入口
-
-从 PDF + TeX 生成新数据：
-
-```text
-scripts/pipeline/build_v7_dataset_staged.py
-```
-
-基于已有 v7 内容重建并重标注：
-
-```text
-scripts/pipeline/run_current_v7_rebuild_relabel.sh
-scripts/pipeline/rebuild_graphs_from_manifest.py
-scripts/pipeline/relabel_manifest.py
-```
-
-训练：
-
-```text
-scripts/pipeline/train_edge_gnn_full.py
-```
-
-Ablation：
-
-```text
-configs/ablation_matrix_v7_adapteraware_20260514_2109.json
-scripts/pipeline/prepare_ablation_suite.py
-data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
-```
-
-E2E 推理和视觉 QA：
-
-```text
-scripts/pipeline/batch_visual_qa_inference.py --renderer ir
-scripts/pipeline/run_e2e_inference.py --renderer ir
-scripts/pipeline/step5_generate_tex.py --renderer ir
-```
-
-实验性 float-proxy rebuild/relabel：
+当前默认入口：
 
 ```bash
-TAG=v7_floatproxy_adapter_$(date +%Y%m%d_%H%M%S) \
-INPUT_MANIFEST=data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json \
-WORKERS=4 \
-PYTHON_BIN=/root/miniconda3/envs/pdf2latex/bin/python \
-EMBEDDING_DEVICE=cpu \
-bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
+python scripts/pipeline/run_v8_layout_reconstruction.py ...
 ```
 
-`--renderer ir` 是当前 E2E 脚本暴露的唯一生产渲染面。旧 TreeDecoder renderer 只保留给历史单测和底层 helper 兼容；生产脚本不再接受 `--renderer tree`。
+## 3. 保留的 v7 / GNN 关系学习分支
 
-Decoder heading 模式：
+GNN 分支仍用于 relation-learning、ablation 和诊断：
 
 ```text
---heading-skeleton-mode stack    唯一生产模式：layout heading detector 提供候选/提示；
-                                 确定性 stack 提供 outline prior 和 section-scope 安全约束；
-                                 GNN parent edges 仍然进入 relation bridge，
-                                 但受物理/heading 约束保护
+content_list_v7_styles.json
+  -> GNNViewAdapter
+  -> graph.pt
+  -> TeX-derived relation labels
+  -> GNN training / diagnostics / ablations
 ```
 
-当前 E2E 生成应使用 `stack`。它不需要重新跑 MinerU、不需要 rebuild graph、不需要 relabel、不需要重新训练。stack 模式会显式过滤 front-matter paper title、长数学/OCR 残片等错误 heading evidence，再构建大纲。本地代码现在会拒绝旧 heading decoder mode，避免同一条生产链路里同时存在新旧方案。
+GNN view 是过滤/代理后的 graph-visible view，不是完整文档。生成器不得从
+GNN view 直接渲染；任何 GNN 预测都必须通过 exact graph-to-v7 bridge
+回到完整事实层。
 
-## 当前 Manifest 家族
-
-锁定基线训练集和 checkpoint 家族：
+历史/实验家族：
 
 ```text
-data/00_manifests/v7_registry_adapteraware_20260515_181724_labeled.json
-data/06_graph_features/v7_registry_adapteraware_20260515_181724_labeled_graphs
-data/09_eval_reports/ablations_v7_registry_adapteraware_20260515_181724/
+v7_registry_adapteraware_20260515_181724  edge_attr_dim=22
+v7_floatproxy_adapter_20260516_205926     edge_attr_dim=26
 ```
 
-当前正在 rebuild/relabel 的实验性 float-proxy 集：
+不要混用不同 schema 的 graph 和 checkpoint。
 
-```text
-data/00_manifests/v7_floatproxy_adapter_20260516_205926_rebuilt.json
-data/00_manifests/v7_floatproxy_adapter_20260516_205926_labeled.json
-data/06_graph_features/v7_floatproxy_adapter_20260516_205926_graphs
-data/06_graph_features/v7_floatproxy_adapter_20260516_205926_labeled_graphs
-```
+## 4. 数据与产物边界
 
-当前面向论文的完整评测套件：
-
-```text
-configs/ablation_matrix_current.json
-scripts/pipeline/run_current_full_eval_suite.py
-scripts/pipeline/collect_current_eval_results.py
-
-data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current/
-data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current_summary.json
-data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current_summary.csv
-data/09_eval_reports/current_e2e_comparison_hard20_floatcaption_rerun_20260518_132615/
-data/09_eval_reports/nougat_current_paired_hard20_floatcaption_rerun_20260518_132615/
-data/09_eval_reports/current_eval_rollup_hard20_floatcaption_rerun_20260518_132615_cleanmetrics/
-```
-
-`run_current_full_eval_suite.py` 是当前结果收集的顶层可复现实验命令。它可以跳过已经完成的阶段并复用输出。`collect_current_eval_results.py` 是只读汇总器，可以随时生成 pending 或 final 报告。
-
-ablation matrix 文件名仍然包含 `20260514` 是为了复现实验；新实验必须显式传入 manifest 和 graph root。不要仅凭 matrix 文件名推断当前数据家族。
-
-当前锁定关系模型方向：
-
-```text
-M05_current_y_network
-```
-
-M05 为 PARENT_CHILD 保留 type-aware GAT message passing，同时让 MERGE 绕过 message passing，直接使用 raw projected edge-pair features 预测 MERGE logit。hard MERGE gate 是当前主路径的一部分，不是额外的后处理补丁。
-
-## 运行边界
-
-应提交：
+应提交到 Git：
 
 ```text
 source code
 configs
 docs
 tests
-lightweight manifests when useful
+small metadata manifests when useful
 ```
 
 不要提交：
@@ -201,27 +101,42 @@ MinerU outputs
 graph .pt caches
 model checkpoints
 generated PDFs
-secrets
-AutoDL passwords
-Kaggle tokens
+API keys / .env / passwords / tokens
 ```
 
-## 当前维护文档
+当前大型产物均应放在 `data/` 和 `logs/`，并按
+`docs/PROJECT_FILE_LAYOUT.md` 的目录契约命名。
+
+## 5. 当前活跃数据策略
+
+arXiv 数据构建采用：
+
+```text
+download TeX source
+compile locally to PDF
+save source tree under data/03_tex_sources/{doc_id}/
+save compiled PDF under data/01_raw_pdfs/{doc_id}.pdf
+run MinerU over compiled PDFs
+```
+
+下载阶段不保存 arXiv 站点上的 PDF，但编译得到的 PDF 必须保留，因为它是
+MinerU 输入和 layout evaluation 的对齐基准。
+
+## 6. 当前维护文档
 
 ```text
 README.md
+docs/PROJECT_FILE_LAYOUT.md
 docs/PROJECT_ARCHITECTURE_FULL.md
-docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md
 docs/PROJECT_SOURCE_OF_TRUTH.md
 docs/PROJECT_OVERVIEW.md
-docs/frontend_backend_contract_v1.md
-docs/feature_schema_v0.md
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
+docs/generator_logic_audit_2026_05_17.md
+docs/layout_aware_reconstruction_target.md
 docs/ground_truth_labeling_v0.md
-docs/ablation_plan_v2.md
-docs/ablation_results_current.md
 docs/v7_training_and_monitoring.md
-docs/interface_audit_2026_05_14.md
-docs/LOCAL_CONFIGURATION.md
+docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md
+docs/MINERU_ADAPTER_CONTRACT.md
+docs/TABLE_ENGINE_CONTRACT.md
+docs/STYLE_TEMPLATE_CONTRACT.md
 ```
-
-此列表之外的内容，要么是源码注释、生成报告，要么是历史参考材料。

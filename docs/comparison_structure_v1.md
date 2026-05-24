@@ -1,6 +1,6 @@
 # Comparison Structure V1
 
-**Last updated**: 2026-05-17
+**Last updated**: 2026-05-24
 
 This schema is the neutral layer used to compare outputs from different
 document-to-text systems.  It is intentionally coarser than the production IR:
@@ -10,6 +10,10 @@ quality and not source-level TeX AST equivalence.
 The comparison target follows `docs/layout_aware_reconstruction_target.md`.
 Generated outputs are evaluated as layout-aware, block-structure-preserving,
 compilable LaTeX reconstructions from rendered PDFs.
+
+As of 2026-05-24, the default system output is produced by the v8/layout-first
+path.  Historical v7/GNN and Nougat outputs can still be converted through the
+same comparison layer so paper-facing metrics remain comparable.
 
 ## Inputs
 

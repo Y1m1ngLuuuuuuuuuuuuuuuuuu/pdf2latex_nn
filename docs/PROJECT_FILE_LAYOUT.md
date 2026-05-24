@@ -1,6 +1,6 @@
 # Project File Layout
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-24
 
 This document is the current directory contract for both the local checkout and
 the AutoDL runtime checkout.  When a path exists on both machines, it should
@@ -48,10 +48,11 @@ artifacts should not be recursively copied from local to AutoDL.
 | --- | --- | --- | --- |
 | `data/` | Canonical project data/artifact root. | Mostly ignored | Preserve active and historical run families. |
 | `logs/` | AutoDL long-run logs and PID files. | Ignored | Preserve active run logs; archive or delete only after review. |
-| `local_outputs/` | Local inspection copies and visual QA outputs. | Ignored | Local-only; can be archived separately. |
-| `e2e_outputs/` | Older local E2E outputs. | Ignored | Historical/local; do not treat as current production data. |
+| `local_outputs/` | Local inspection copies and visual QA outputs. | Ignored | Local-only; keep as manual visual reference, not a production path. |
+| `data/09_eval_reports/_archive/` | Archived historical run outputs that are not on the current path. | Ignored | Preserve for traceability; do not use as default input. |
+| `data/09_eval_reports/_obsolete/` | Obsolete experiments or invalidated debug branches. | Ignored | Kept only so old reasoning can be audited. |
 | `.venv*/` | Local Python environments. | Ignored | Local-only. |
-| `audit_bundle_*.zip` | External audit bundles. | Usually ignored | Keep only intentionally shared bundles. |
+| `audit_bundle_*.zip` | External audit bundles. | Usually ignored | Store under `data/09_eval_reports/_archive/<date>_audit_bundle/`, not the project root. |
 
 ## `data/` Contract
 
@@ -78,6 +79,44 @@ small subset; AutoDL is expected to hold the full runtime artifacts.
 | `data/10_checkpoints/` | Optional checkpoint storage/mirrors. | Training or manual curation. | Inference/training resume. |
 | `data/external/` | External benchmark material and predictions. | External bridge tools. | External benchmark evaluation only. |
 | `data/_tmp_*` | Temporary work directories. | Long-running builders. | Safe to clean only after confirming no active job uses them. |
+
+## `data/09_eval_reports/` Organization
+
+The top level of `data/09_eval_reports/` should stay readable.  Current or
+paper-facing reports remain directly under `data/09_eval_reports/<run_tag>/`.
+Old exploratory output should be moved under `_archive/` or `_obsolete/` instead
+of staying mixed with the current run list.
+
+Current local organization:
+
+```text
+data/09_eval_reports/
+  v8_reflow_20260523/                 current v8 middle-reflow / style path smoke outputs
+  post_audit_20260519/                post-audit diagnostic artifacts
+  targeted_structure_fix_20260519/    targeted heading/float/layout diagnostic artifacts
+  pre_expansion_wait_20260519/        wait-state reports and runbooks
+  virtual_heading_nodes_20260519/     virtual heading implementation report
+  current_eval_rollup_local_pending_20260517/
+  layout_default_pivot_20260523/
+  api_baselines/
+  comphrdoc_test500/
+  _archive/
+    20260509_legacy_e2e_outputs/      old root-level `e2e_outputs/`
+    20260515_generator_iterations/    superseded generator hardcase iterations
+    20260519_audit_bundle/            external audit bundle zip
+  _obsolete/
+    legacy_merge_gnn_generator_debug_20260523/
+```
+
+Do not put new experiment families at the project root.  For example:
+
+```text
+bad:  ./e2e_outputs/new_run/
+good: data/09_eval_reports/<run_tag>/
+```
+
+The root-level `e2e_outputs/` folder was archived on 2026-05-24 and is no
+longer a current output location.
 
 ## Current Fresh Data Rebuild Layout
 
@@ -198,8 +237,9 @@ Use these files for current questions:
 | What is the architecture and module ownership? | `docs/PROJECT_ARCHITECTURE_FULL.md` |
 | What is the project target and metric philosophy? | `docs/layout_aware_reconstruction_target.md` |
 | What is the local/GitHub/AutoDL boundary? | `docs/PROJECT_SOURCE_OF_TRUTH.md` |
+| What is the current v8 layout reconstruction path? | `docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md` |
+| How will precise author/affiliation/email parsing be added? | `docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md` |
 | How do we run data/training/eval? | `docs/v7_training_and_monitoring.md` |
 | How are labels generated? | `docs/ground_truth_labeling_v0.md` |
 | How does the generator consume v7/GNN/IR? | `docs/generator_logic_audit_2026_05_17.md` |
 | What are frontend/table/style plugin contracts? | `docs/MINERU_ADAPTER_CONTRACT.md`, `docs/TABLE_ENGINE_CONTRACT.md`, `docs/STYLE_TEMPLATE_CONTRACT.md` |
-

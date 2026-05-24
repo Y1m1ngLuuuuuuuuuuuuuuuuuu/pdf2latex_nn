@@ -1,10 +1,14 @@
 # Ablation Plan
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-24
 
-This is the current ablation protocol for the v7 graph-relation model. The
+This is the ablation protocol for the optional v7 graph-relation model branch. The
 filename remains `ablation_plan_v2.md`, but the active locked results now come
 from the registry/adapter-aware run tagged `v7_registry_adapteraware_20260515_181724`.
+
+The v8/layout-first reconstruction path is now the default generator path and
+does not require this GNN ablation suite.  Keep these experiments for relation
+model claims, diagnostics, and historical comparison.
 
 ## Controls
 

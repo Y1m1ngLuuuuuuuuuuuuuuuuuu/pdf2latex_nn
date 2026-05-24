@@ -1,8 +1,15 @@
 # 项目论文规划说明
 
-**最后更新**：2026-05-18
+**最后更新**：2026-05-24
 
 这份文档面向论文写作，用来统一描述当前系统的任务定义、整体架构、数据接口、模型设计、生成器、评测协议和当前实验路线。它比普通 runbook 更长，适合后面拆成论文中的方法、实验、讨论和消融分析。
+
+**当前状态说明，2026-05-24。** 这份文档最初写于 v7/GNN 关系模型阶段。
+当前维护的默认重建路径已经切换为 v8 / layout-first：系统从 MinerU
+`middle.json` 和 `content_list.json` 重建 `DocumentIR`，再经过 front matter
+提取、全篇 heading style registry、stack skeleton、style detector 和
+`OriginalLikeIRLatexRenderer` 输出 LaTeX。GNN 关系模型仍然保留为
+MERGE/PARENT_CHILD/NONE 的实验与诊断分支，但不再是默认 E2E 生成依赖。
 
 ## 1. 任务定义
 
@@ -32,18 +39,17 @@
 
 ## 2. 核心论点
 
-MinerU 是底层感知引擎。我们的贡献不是重新做 OCR，而是在 MinerU 之上完成结构推理和 LaTeX 重建：
+MinerU 是底层感知引擎。我们的贡献不是重新做 OCR，而是在 MinerU 之上完成版式推理和 LaTeX 重建：
 
 ```text
 MinerU 提供视觉事实。
-PyMuPDF 补充字体和 span 样式。
-TeX 侧 labeler 生成关系监督。
-GNN 预测不确定的文档关系。
-Decoder 应用物理和结构约束。
+v8 reflow 根据 middle/content-list 修复阅读顺序和逻辑块。
+Decoder 应用 heading/style/front-matter/float 约束。
 Generator 生成可编译、版式感知的 LaTeX。
+可选 GNN 分支研究不确定的 MERGE/PARENT_CHILD 关系。
 ```
 
-所以这个项目既不是纯 OCR，也不是纯语言模型，而是一个符号规则和神经网络结合的文档重建系统。
+所以这个项目既不是纯 OCR，也不是纯语言模型，而是一个版式感知的符号重建系统，并保留可选的神经关系学习分支。
 
 ## 3. 端到端流程
 
@@ -581,4 +587,3 @@ Nougat paired comparison 用来定位外部基线：
 6. Discussion
    source-level TeX recovery 为什么不适合作为唯一目标；规则和 GNN 各自的作用；剩余问题。
 ```
-

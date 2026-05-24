@@ -1,46 +1,58 @@
 # PDF2LaTeX NN
 
-**最后更新**：2026-05-18
+**最后更新**：2026-05-24
 
-PDF2LaTeX NN 是一个面向 born-digital 学术论文的、结构感知的 PDF 到 LaTeX 流水线。它不是把 PDF 转换简单看成 OCR，而是从 PDF 中提取视觉事实，从匹配的 TeX 源码中生成图关系真值标签，训练 GNN 预测文档关系，再通过解耦的 IR 渲染器重建可编译的 LaTeX。
+PDF2LaTeX NN 是一个面向 born-digital 学术论文的、版式感知 PDF 到
+LaTeX 重建流水线。它不是普通 OCR，也不是作者源码级 TeX AST 恢复。
+当前默认路径从渲染后的 PDF 事实出发，通过 v8 middle reflow、
+DocumentIR、RenderTreeIR 和 original-like renderer 生成可编译、保留
+块级结构的 LaTeX。
 
 ## 当前部署路径
 
-生产路径只使用 v7：
+当前默认重建路径是 v8 / layout-first：
 
 ```text
-compiled PDF + matching TeX
-  -> MinerU content_v2
-  -> v7 reading/layout cleanup
-  -> PyMuPDF style spans
-  -> GNNViewAdapter float-proxy graph view
-  -> SciBERT + geometry/style/sequence graph features
-  -> TeX AST alignment labels
-  -> GATv2/Y-Network edge-relation model
-  -> TreeDecoder / RenderTreeIR
+compiled PDF
+  -> MinerU middle.json + content_list.json
+  -> v8 middle reflow / reading-order repair
+  -> DocumentIR
+  -> FrontMatterIR
+  -> heading style registry + stack skeleton
+  -> RenderTreeIR
+  -> StyleProfile
   -> OriginalLikeIRLatexRenderer
   -> generated .tex / .pdf
 ```
 
-旧的 v3/v4/v5 预处理版本不再作为生产输入，只作为历史实验保留。
-
-当前代码明确区分两条数据/模型轨道：
+GNN 关系模型现在是显式实验分支，不再是默认生成依赖：
 
 ```text
-locked baseline/results:
-  v7_registry_adapteraware_20260515_181724
-  edge_attr_dim=22
-  已有 M05/M07 checkpoint 和报告保持不动
-
-current experimental rebuild:
-  v7_floatproxy_adapter_20260516_205926
-  edge_attr_dim=26
-  figure/table/algorithm 节点以 caption/placeholder float proxy 的形式进入 GNN
+content_list_v7_styles.json
+  -> GNNViewAdapter
+  -> graph.pt
+  -> TeX-derived MERGE/PARENT_CHILD/NONE labels
+  -> GNN training / ablation / diagnostics
 ```
 
-在评估新的 float-proxy 路径时，不要删除锁定基线的 checkpoint 或报告。
+不要把 GNN view 当作 renderer source。最终生成必须消费完整
+`DocumentIR` / `RenderTreeIR`。
 
-## 主要关系任务
+## 当前默认能力
+
+```text
+middle-derived reading-order repair
+source PDF page size preservation
+document-local heading style registry
+stack skeleton section hierarchy
+FrontMatter Phase 0 title/author/affiliation/email/abstract preservation
+single/two/mixed-column approximation
+wide figure* / table* rendering
+ordered enumerate / itemize recovery
+citation and bibliography repair
+```
+
+## 可选关系学习任务
 
 图模型预测三类有向边：
 
@@ -70,13 +82,13 @@ CitationResolution      citation/reference 修复状态
 ## 关键脚本
 
 ```bash
-# 从 PDF + TeX 继续构建新的生产数据
-python scripts/pipeline/build_v7_dataset_staged.py ...
+# 运行当前 v8 layout reconstruction
+python scripts/pipeline/run_v8_layout_reconstruction.py ...
 
-# 基于已有 v7 内容重建 graph tensor 并重新打标签
+# 可选：基于已有 v7 内容重建 graph tensor 并重新打标签
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 
-# 训练当前 GATv2/Y-Network 关系模型
+# 可选：训练 GATv2/Y-Network 关系模型
 python scripts/pipeline/train_edge_gnn_full.py ...
 
 # 生成 ablation 命令
@@ -99,17 +111,17 @@ EMBEDDING_DEVICE=cpu \
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
 
-当前面向论文结果收集的完整评测套件：
+历史/可选 GNN 关系分支和 hard20 对比的完整评测套件：
 
 ```bash
-# 运行当前 ablation、E2E generator QA、Nougat paired comparison 和最终汇总
+# 运行历史/current GNN ablation、E2E generator QA、Nougat paired comparison 和最终汇总
 python scripts/pipeline/run_current_full_eval_suite.py
 
 # 只汇总已有输出，不训练、不生成
 python scripts/pipeline/collect_current_eval_results.py
 ```
 
-默认评测输出：
+这些输出用于论文追溯和 GNN/Nougat 对比，不是当前 v8 默认生成路径本身：
 
 ```text
 data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current/
@@ -131,7 +143,9 @@ docs/feature_schema_v0.md             图张量特征合约
 docs/ground_truth_labeling_v0.md      TeX-to-PDF 真值标签生成
 docs/ablation_plan_v2.md              当前 ablation 协议
 docs/ablation_results_current.md      最新锁定 ablation 结果
-docs/v7_training_and_monitoring.md    生产数据/训练 runbook
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md 当前 v8 路径和参数
+docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md 后续精确 author/affiliation/email 解析计划
+docs/v7_training_and_monitoring.md    可选 GNN 关系学习 runbook
 docs/interface_audit_2026_05_14.md    当前接口审计和旧路径检查
 docs/LOCAL_CONFIGURATION.md           私有本地配置说明
 ```

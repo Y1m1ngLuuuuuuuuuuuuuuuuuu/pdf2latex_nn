@@ -1,47 +1,81 @@
 # PDF2LaTeX NN
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-24
 
-PDF2LaTeX NN is a structure-aware PDF-to-LaTeX pipeline for born-digital research papers. It does not treat PDF conversion as plain OCR. The current system extracts visual facts from PDF, derives graph relation labels from matching TeX source, trains a GNN to predict document relations, and reconstructs compilable LaTeX through a decoupled IR renderer.
+PDF2LaTeX NN is a layout-aware PDF-to-LaTeX reconstruction pipeline for
+born-digital research papers. It does not treat PDF conversion as plain OCR, and
+it does not aim to recover the author's original source-level TeX AST. The
+current default path reconstructs compilable, block-structure-preserving LaTeX
+from rendered PDF facts through a decoupled `DocumentIR` / `RenderTreeIR`
+renderer.
 
 ## Current Deployment
 
-The production path is v7-only:
+The maintained default reconstruction path is now v8 / layout-first:
 
 ```text
-compiled PDF + matching TeX
-  -> MinerU content_v2
-  -> v7 reading/layout cleanup
-  -> PyMuPDF style spans
-  -> GNNViewAdapter float-proxy graph view
-  -> SciBERT + geometry/style/sequence graph features
-  -> TeX AST alignment labels
-  -> GATv2/Y-Network edge-relation model
-  -> TreeDecoder / RenderTreeIR
+compiled PDF
+  -> MinerU middle.json + content_list.json
+  -> v8 middle reflow and page-local reading-order repair
+  -> DocumentIR
+  -> deterministic front matter extraction
+  -> full-document heading style registry + stack skeleton
+  -> RenderTreeIR
+  -> v8 style detector
   -> OriginalLikeIRLatexRenderer
   -> generated .tex / .pdf
 ```
 
-Old v3/v4/v5 preprocessing variants are no longer production inputs. They are historical experiments only.
+V8 does not mutate v7 JSON, does not build a GNN view, and does not change graph
+schema. It exists because MinerU content-list merging can combine text before
+the reading order is corrected; v8 rebuilds logical content from `middle.json`
+line/block evidence first, then reuses the existing IR renderer.
 
-The current checked-in code keeps two data/model tracks separate:
+The GNN relation model is retained as an explicit experimental branch:
 
 ```text
-locked baseline/results:
+relation-learning branch:
+  content_list_v7_styles.json
+  -> GNNViewAdapter
+  -> graph.pt
+  -> TeX-derived MERGE/PARENT_CHILD/NONE labels
+  -> GNN training / ablation / diagnostics
+
+historical locked baseline/results:
   v7_registry_adapteraware_20260515_181724
   edge_attr_dim=22
-  existing M05/M07 checkpoints and reports stay untouched
 
-current experimental rebuild:
+historical float-proxy branch:
   v7_floatproxy_adapter_20260516_205926
   edge_attr_dim=26
-  figure/table/algorithm nodes enter GNN as caption/placeholder float proxies
 ```
 
-Do not delete the locked baseline checkpoints or reports while evaluating the
-new float-proxy path.
+Do not use GNN view as a renderer source. Generation must consume full
+`DocumentIR` / `RenderTreeIR`.
 
-## Main Relation Task
+## Current Default Capabilities
+
+The current v8 path focuses on:
+
+```text
+middle-derived reading-order repair
+source-PDF page size preservation
+document-local heading style registry
+stack skeleton section hierarchy
+deterministic front matter preservation
+abstract handling
+single/two/mixed-column approximation
+wide figure* / table* rendering
+table/figure crop fallback from original PDF
+ordered/list marker recovery
+citation and bibliography repair
+```
+
+Author / affiliation / email handling is currently **FrontMatter Phase 0**:
+the system preserves and separates front-matter blocks, but it does not yet
+train an entity/linking model for exact author-affiliation-email binding.
+
+## Relation-Learning Task
 
 The graph model predicts three directed edge classes:
 
@@ -56,14 +90,18 @@ NONE         = 2  no structural relation
 ## Active Interfaces
 
 ```text
-content_v7_styles.json  complete PDF fact layer
-GNNViewAdapter          filtered/proxied graph-visible view + v7 mapping
-GraphInput.pt           node/edge tensors
-GraphLabels             TeX-derived edge labels over the GNN view
-PredictedRelations      GNN output probabilities
-RenderTreeIR            decoder output bridged back to full v7 ids
-StyleProfile            global/local layout profile
+middle.json             raw MinerU layout/line/block evidence for v8
+content_list.json       MinerU asset/caption/table sidecar
+content_v7_styles.json  optional style-span enrichment sidecar
+DocumentIR              complete document fact layer consumed by renderer
+RenderTreeIR            decoder/render structure
+StyleProfile            page/style/template profile
 CitationResolution      citation/reference repair state
+
+GNNViewAdapter          optional graph-visible view for relation experiments
+GraphInput.pt           optional node/edge tensors
+GraphLabels             optional TeX-derived edge labels over the GNN view
+PredictedRelations      optional GNN output probabilities
 ```
 
 See [docs/frontend_backend_contract_v1.md](docs/frontend_backend_contract_v1.md).
@@ -71,25 +109,32 @@ See [docs/frontend_backend_contract_v1.md](docs/frontend_backend_contract_v1.md)
 ## Key Scripts
 
 ```bash
-# Continue building new production data from PDF + TeX sources
-python scripts/pipeline/build_v7_dataset_staged.py ...
+# Run the current v8 layout reconstruction path
+python scripts/pipeline/run_v8_layout_reconstruction.py \
+  --doc-id <doc_id> \
+  --middle-json <path/to/*_middle.json> \
+  --content-list-json <path/to/*_content_list.json> \
+  --style-content-list-json <path/to/*_content_list_v7_styles.json> \
+  --pdf <path/to/original.pdf> \
+  --output-dir data/09_eval_reports/<run_tag>/<doc_id> \
+  --compile-engine auto
 
-# Rebuild graph tensors and relabel existing v7 content
+# Optional: rebuild graph tensors and relabel existing v7 content for GNN studies
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 
-# Train the current GATv2/Y-Network relation model
+# Optional: train the GATv2/Y-Network relation model
 python scripts/pipeline/train_edge_gnn_full.py ...
 
-# Generate ablation commands
+# Optional: generate ablation commands
 python scripts/pipeline/prepare_ablation_suite.py \
   --matrix configs/ablation_matrix_v7_adapteraware_20260514_2109.json \
   --output-sh data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
-
-# Batch visual QA / E2E inference with the current IR renderer
-python scripts/pipeline/batch_visual_qa_inference.py --renderer ir ...
 ```
 
-Current experimental rebuild/relabel command pattern:
+The current 00050 v8 smoke command is documented in
+[docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md](docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md).
+
+Optional GNN rebuild/relabel command pattern:
 
 ```bash
 TAG=v7_floatproxy_adapter_$(date +%Y%m%d_%H%M%S) \
@@ -100,24 +145,18 @@ EMBEDDING_DEVICE=cpu \
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
 
-Current paper-facing full evaluation suite:
+Current paper-facing evaluation and historical GNN ablations are still kept for
+traceability, but the default reconstruction claim should be phrased around the
+v8 layout-aware path.
 
-```bash
-# Run current ablation matrix, E2E generator QA, Nougat paired comparison,
-# and final rollup report. Use --skip-* flags to reuse completed stages.
-python scripts/pipeline/run_current_full_eval_suite.py
-
-# Collect existing outputs only, without training or generation.
-python scripts/pipeline/collect_current_eval_results.py
-```
-
-Current evaluation outputs are expected under:
+## Current Report Layout
 
 ```text
-data/09_eval_reports/ablations_v7_floatproxy_adapter_20260516_205926_current/
-data/09_eval_reports/current_e2e_comparison_hard20_floatcaption_rerun_20260518_132615/
-data/09_eval_reports/nougat_current_paired_hard20_floatcaption_rerun_20260518_132615/
-data/09_eval_reports/current_eval_rollup_hard20_floatcaption_rerun_20260518_132615_cleanmetrics/
+data/09_eval_reports/v8_reflow_20260523/                 current v8 smoke outputs
+data/09_eval_reports/post_audit_20260519/                post-audit diagnostics
+data/09_eval_reports/targeted_structure_fix_20260519/    targeted diagnostics
+data/09_eval_reports/_archive/                           old preserved runs
+data/09_eval_reports/_obsolete/                          invalidated/retired experiments
 ```
 
 ## Current Docs
@@ -128,12 +167,14 @@ docs/PROJECT_ARCHITECTURE_FULL.md     complete architecture, logic, metrics, and
 docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md paper-facing full project description
 docs/PROJECT_SOURCE_OF_TRUTH.md      local / GitHub / AutoDL boundary
 docs/PROJECT_OVERVIEW.md             architecture and implementation summary
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md current v8 path and parameters
+docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md future author/affiliation/email parser plan
 docs/frontend_backend_contract_v1.md decoupled IR contracts
 docs/feature_schema_v0.md            graph tensor feature contract
 docs/ground_truth_labeling_v0.md     TeX-to-PDF truth-label generation
 docs/ablation_plan_v2.md             current ablation protocol
 docs/ablation_results_current.md     latest locked ablation results
-docs/v7_training_and_monitoring.md   production data/training runbook
+docs/v7_training_and_monitoring.md   optional relation-learning runbook
 docs/interface_audit_2026_05_14.md   current interface audit and stale-path check
 docs/LOCAL_CONFIGURATION.md          private local configuration notes
 ```

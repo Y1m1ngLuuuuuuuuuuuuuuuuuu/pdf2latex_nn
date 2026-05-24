@@ -1,8 +1,16 @@
 # PDF2LaTeX-NN 完整架构与设计说明
 
-**最后更新**：2026-05-18
+**最后更新**：2026-05-24
 
 本文是项目的完整架构记录。它把 README、schema 文档、labeling 文档、ablation 说明和代码实现中分散的设计决策、数据流、判断规则、模型接口、评估指标和代码地图集中在一处。
+
+**当前状态说明，2026-05-24。** 本文主体保留了 v7/GNN 阶段的完整架构记录，
+用于追溯 relation-model 数据、label、ablation 和 decoder 设计。当前默认
+production reconstruction path 已经切换为 v8 / layout-first：从 MinerU
+`middle.json` 和 `content_list.json` 重建逻辑内容，经过 DocumentIR、
+FrontMatterIR、heading style registry、stack skeleton、RenderTreeIR 和
+OriginalLikeIRLatexRenderer 输出 LaTeX。GNN 分支保留为可选实验分支，不再是默认
+E2E 生成依赖。
 
 项目有两个目标：
 
@@ -13,7 +21,7 @@
 
 ## 0. 摘要
 
-当前维护系统只使用 v7。
+本文主体记录 v7/GNN 关系模型阶段的完整系统。当前维护的默认生成系统已经切换为 v8 / layout-first；下面的 v7/GNN 流程作为历史架构和可选实验分支保留。
 
 ```text
 compiled PDF + matching TeX source

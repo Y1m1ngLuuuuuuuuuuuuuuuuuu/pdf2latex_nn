@@ -1,8 +1,11 @@
 # Ground Truth Labeling v0
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-24
 
-This document describes the current automatic label generator. It creates training labels from matching TeX source and v7 PDF graph candidates.
+This document describes the automatic label generator for the optional GNN
+relation-learning branch. It creates training labels from matching TeX source
+and v7 PDF graph candidates. The default v8 reconstruction path does not depend
+on these labels at inference time.
 
 ## Inputs
 

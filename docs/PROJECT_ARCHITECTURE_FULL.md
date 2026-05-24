@@ -1,6 +1,6 @@
 # PDF2LaTeX-NN Full Architecture And Design Notes
 
-**Last updated**: 2026-05-23
+**Last updated**: 2026-05-24
 
 This is the full project architecture record. It collects the design decisions,
 data flow, judgment rules, model interfaces, evaluation metrics, and code map
@@ -12,8 +12,9 @@ For a paper-facing narrative version of the same architecture, see
 
 The repository has two maintained tracks:
 
-1. The default reconstruction track: use MinerU/v7 visual facts, deterministic
-   layout reasoning, heading stack decoding, and the full-v7 IR renderer to
+1. The default reconstruction track: use MinerU `middle.json` / content-list
+   facts, v8 middle reflow, deterministic layout reasoning, heading stack
+   decoding, and the full-IR renderer to
    reconstruct compilable, structurally faithful LaTeX.
 2. The optional relation-learning track: keep GNN relation experiments for
    diagnostics, ablations, and possible local continuation hints.
@@ -24,35 +25,40 @@ relation learning, deterministic safety constraints, and a LaTeX generator.
 
 ## 0. Executive Summary
 
-The current maintained reconstruction system is v7-only and layout-first.
+The current maintained reconstruction system is v8 and layout-first.
 
 ```text
-compiled PDF + matching TeX source
+compiled PDF
   -> MinerU extraction
-  -> v7 full visual fact layer
-  -> constrained decoder / heading skeleton / float grouping
-  -> full v7 IR generator
+  -> middle.json + content_list.json
+  -> v8 middle reflow / reading-order repair
+  -> DocumentIR
+  -> front matter extractor
+  -> heading style registry + stack skeleton
+  -> RenderTreeIR
+  -> StyleProfile
+  -> OriginalLikeIRLatexRenderer
   -> generated .tex and .pdf
 ```
 
 The most important architectural split is:
 
 ```text
-full v7 JSON = complete fact layer for generation
-GNN view     = filtered/proxied view for relation learning
+DocumentIR / v8 logical item list = complete fact layer for generation
+GNN view                          = filtered/proxied view for optional relation learning
 ```
 
 Do not delete, rewrite, or mark useful visual facts as noise just because they
 are not useful for GNN message passing. Title, authors, figures, tables,
-captions, references, footnotes, page furniture, and style spans remain in v7.
+captions, references, footnotes, page furniture, and style spans remain in the
+full document fact layer.
 When running GNN experiments, the model receives a separate view built by
 `GNNViewAdapter`; that view is not the renderer source.
 
-Current production default, 2026-05-23:
+Current production default, 2026-05-24:
 
 ```text
-scripts/pipeline/run_layout_aware_reconstruction.py
-scripts/pipeline/run_current_e2e_comparison.py
+scripts/pipeline/run_v8_layout_reconstruction.py
 ```
 
 These paths use rules-only layout-aware reconstruction by default.  Historical
@@ -63,6 +69,12 @@ scripts/pipeline/batch_visual_qa_inference.py
 scripts/pipeline/run_e2e_inference.py
 scripts/pipeline/step5_generate_tex.py
 scripts/pipeline/run_m05_e2e_comparison.py
+```
+
+The v8 path is documented in:
+
+```text
+docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
 ```
 
 Current model/data families:

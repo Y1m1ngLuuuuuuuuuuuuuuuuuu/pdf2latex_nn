@@ -1,9 +1,14 @@
 # Current Ablation Results
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-24
 
 This file records the current locked GNN ablation state, the float-proxy
 experimental branch, and the latest paper-facing hard20/Nougat comparison.
+
+Status note: these are historical/current relation-model and hard20 comparison
+results, not the default v8/layout-first reconstruction path.  Keep them for
+paper traceability and ablation discussion, but do not treat the GNN branch as
+the default generator dependency.
 
 The newest paper-facing evaluation collection is being run through:
 

@@ -1,6 +1,6 @@
 # Recovery And Current Runbook 2026-05-22
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-24
 
 This note records the current recovery state, remote rebuild path, and latest
 MERGE-label decisions so the project does not depend on chat history.
@@ -25,10 +25,10 @@ GitHub remote:
 https://github.com/Y1m1ngLuuuuuuuuuuuuuuuuuu/pdf2latex_nn.git
 ```
 
-Current pushed commit:
+The current pushed commit changes over time.  Check it with:
 
-```text
-7ec359c Add family-aware merge audit and decoder policy
+```bash
+git log --oneline -5
 ```
 
 The AutoDL project directory was reconstructed from a local Git bundle because
@@ -158,6 +158,22 @@ The project target remains:
 
 ```text
 layout-aware, block-structure-preserving, compilable LaTeX reconstruction
+
+As of 2026-05-24, the default reconstruction strategy has pivoted from
+GNN-centered v7 E2E to v8 layout-aware reconstruction:
+
+```text
+MinerU middle/content-list outputs
+  -> v8 reflow and reading-order repair
+  -> FrontMatterIR
+  -> heading style registry + stack skeleton
+  -> RenderTreeIR
+  -> OriginalLikeIRLatexRenderer
+```
+
+The GNN path remains available for optional relation-learning experiments and
+historical ablations, but it should not be described as the default generator
+dependency.
 from rendered scientific PDFs
 ```
 
@@ -309,4 +325,3 @@ After the fresh 8000-source rebuild produces enough accepted samples:
 Do not start full ablation immediately after the TeX-source rebuild.  First
 validate that the new labels have sane channel/family breakdown and candidate
 edge recall.
-

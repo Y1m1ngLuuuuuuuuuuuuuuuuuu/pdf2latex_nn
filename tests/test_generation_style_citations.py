@@ -590,6 +590,38 @@ def test_decimal_section_prefix_is_not_treated_as_ordered_list():
     assert list_environment_for_text("1. A real list item.") == "enumerate"
 
 
+def test_render_tree_list_item_falls_back_to_ordered_text_marker():
+    node = DocumentNode(
+        node_id="li0",
+        node_type=BlockType.TEXT,
+        text="1. Computes embeddings for support and query sets.",
+        page_idx=0,
+        bboxes=[BBox(100, 100, 500, 120)],
+        reading_index=0,
+    )
+    document = DocumentIR(
+        doc_id="ordered_list_fallback",
+        pages=[PageIR(page_idx=0, width=1000, height=1000, node_ids=["li0"])],
+        nodes=[node],
+        reading_order=["li0"],
+    )
+    profile = StyleProfileExtractor().extract(document)
+    tree = RenderTreeIR(
+        doc_id="ordered_list_fallback",
+        document_ir_path="document_ir.json",
+        root_id="r0",
+        nodes=[
+            RenderTreeNode(render_id="r0", role=RenderRole.ROOT, children=["li0"]),
+            RenderTreeNode(render_id="li0", role=RenderRole.LIST_ITEM, source_node_ids=["li0"]),
+        ],
+    )
+
+    tex = OriginalLikeIRLatexRenderer(IRLatexRenderConfig(include_maketitle=False)).render(document, tree, profile)
+
+    assert r"\begin{enumerate}" in tex
+    assert r"\item Computes embeddings for support and query sets." in tex
+
+
 def test_title_like_numbered_node_does_not_open_enumerate():
     title = DocumentNode(
         node_id="title",

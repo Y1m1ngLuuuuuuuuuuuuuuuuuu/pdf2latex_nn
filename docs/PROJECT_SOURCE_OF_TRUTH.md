@@ -1,8 +1,10 @@
 # Project Source Of Truth
 
-**Last updated**: 2026-05-23
+**Last updated**: 2026-05-24
 
-This repository is the source-control home for the v7 PDF-to-LaTeX system. AutoDL is the runtime home for datasets, MinerU outputs, graph tensors, checkpoints, generated PDFs, and long-running jobs.
+This repository is the source-control home for the PDF2LaTeX-NN reconstruction
+system. AutoDL is the runtime home for datasets, MinerU outputs, graph tensors,
+checkpoints, generated PDFs, and long-running jobs.
 
 ## Source Flow
 
@@ -71,17 +73,19 @@ All future model, decoder, renderer, and evaluation changes must respect this
 target definition.  The detailed rationale and metric contract are documented in
 `docs/layout_aware_reconstruction_target.md`.
 
-The production reconstruction pipeline is v7-only and **layout-first**.  As of
-2026-05-23, the default E2E reconstruction path does not load learned GNN
+The production reconstruction pipeline is now **v8 / layout-first**.  As of
+2026-05-24, the default E2E reconstruction path does not load learned GNN
 relation logits:
 
 ```text
-compiled PDF + matching TeX
-  -> MinerU content_v2
-  -> content_v7 + style spans
-  -> DocumentIR / LayoutIR
-  -> deterministic heading stack + layout-aware decoder rules
+compiled PDF
+  -> MinerU middle.json + content_list.json
+  -> v8 middle reflow and reading-order repair
+  -> DocumentIR
+  -> deterministic FrontMatterIR
+  -> full-document heading style registry + stack skeleton
   -> RenderTreeIR
+  -> StyleProfile / v8 style detector
   -> OriginalLikeIRLatexRenderer
 ```
 
@@ -98,6 +102,19 @@ content_v7 + style spans
 Use GNN results only when a command or experiment explicitly requests them.
 The paper-facing default compares the layout-aware reconstruction system, while
 GNN relation studies are reported as auxiliary ablations.
+
+The old root-level `e2e_outputs/` directory and superseded generator iteration
+outputs have been archived under:
+
+```text
+data/09_eval_reports/_archive/
+```
+
+Obsolete merge/GNN generator debug experiments are under:
+
+```text
+data/09_eval_reports/_obsolete/
+```
 
 Old v3/v4/v5 JSON variants are historical experiments. Do not feed them into training or evaluation.
 
