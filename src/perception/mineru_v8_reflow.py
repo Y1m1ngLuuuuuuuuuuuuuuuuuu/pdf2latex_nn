@@ -29,6 +29,11 @@ CONTINUATION_START_RE = re.compile(
     r"^(?:and|or|but|for|to|of|in|on|with|which|where|while|because|that|than|from|as|by|into|through|under|over)\\b",
     re.IGNORECASE,
 )
+FLOAT_SKIP_CONTINUATION_START_RE = re.compile(
+    r"^\(\s*(?:Table|Tab\.?|Fig\.?|Figure|Eq\.?|Equation)\b|"
+    r"^\(\s*[A-Z][A-Za-z-]+(?:\s+et\s+al\.|,|\s+\d{4})",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -187,6 +192,8 @@ def build_v8_from_middle(
 
 CONTENT_LIST_COPY_KEYS = {
     "img_path",
+    "sub_type",
+    "subtype",
     "table_caption",
     "table_footnote",
     "table_body",
@@ -197,8 +204,10 @@ CONTENT_LIST_COPY_KEYS = {
     "figure_caption",
     "figure_footnote",
     "code_caption",
+    "code_body",
     "code_footnote",
     "algorithm_caption",
+    "algorithm_content",
     "algorithm_footnote",
     "html",
 }
@@ -439,7 +448,7 @@ def copy_style_metadata_from_content_item(target: dict[str, Any], item: dict[str
 
 
 def content_list_text(item: dict[str, Any]) -> str:
-    for key in ("text", "text_for_embedding", "text_preview"):
+    for key in ("text", "text_for_embedding", "text_preview", "algorithm_content", "code_body"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return normalize_space(value)
@@ -555,9 +564,29 @@ def extract_atomic_blocks(payload: Any, *, doc_id: str, source: str) -> list[V8B
                     lines=lines,
                     score=float_or_none(raw.get("score")),
                     source=source,
+                    metadata=middle_algorithm_metadata(raw),
                 )
             )
     return blocks
+
+
+def middle_algorithm_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    subtype = raw.get("sub_type") or raw.get("subtype")
+    if subtype not in (None, "", [], {}):
+        metadata["raw_sub_type"] = subtype
+        metadata["mineru_subtype"] = subtype
+    for key in ("algorithm_content", "algorithm_caption", "algorithm_footnote", "code_body", "code_caption", "code_footnote"):
+        value = raw.get(key)
+        if value not in (None, "", [], {}):
+            metadata[key] = value
+    raw_type = str(raw.get("type") or "").casefold().strip()
+    raw_subtype = str(subtype or "").casefold().strip()
+    if raw_type == "algorithm" or raw_subtype == "algorithm":
+        metadata["is_algorithm_subtype"] = True
+        metadata["algorithm_origin"] = "middle"
+        metadata["algorithm_confidence"] = "strong_subtype"
+    return metadata
 
 
 def extract_lines(raw: dict[str, Any], *, block_id: str, page_idx: int) -> list[V8Line]:
@@ -723,25 +752,35 @@ def order_column_band(blocks: list[V8Block]) -> list[V8Block]:
 def infer_continuation_merges(ordered_blocks: list[V8Block]) -> list[MergeDecision]:
     decisions: list[MergeDecision] = []
     last_text: V8Block | None = None
+    skipped_float_blocks: list[V8Block] = []
     for block in ordered_blocks:
         if not is_body_merge_candidate(block):
             if block.type in FLOAT_SKIP_TYPES:
                 # Floats/tables can be skipped between a previous open text
                 # block and the next continuation, so do not reset last_text.
+                if last_text is not None:
+                    skipped_float_blocks.append(block)
                 continue
             # Headings, equations, captions, and unknown text barriers should
             # not allow a paragraph continuation to jump across them.
             last_text = None
+            skipped_float_blocks = []
             continue
         if last_text is not None:
-            decision = continuation_decision(last_text, block)
+            decision = continuation_decision(last_text, block, skipped_float_blocks=skipped_float_blocks)
             if decision is not None:
                 decisions.append(decision)
         last_text = block
+        skipped_float_blocks = []
     return decisions
 
 
-def continuation_decision(prev: V8Block, curr: V8Block) -> MergeDecision | None:
+def continuation_decision(
+    prev: V8Block,
+    curr: V8Block,
+    *,
+    skipped_float_blocks: list[V8Block] | None = None,
+) -> MergeDecision | None:
     if prev.block_id == curr.block_id:
         return None
     if prev.type in NON_MERGE_TYPES or curr.type in NON_MERGE_TYPES:
@@ -750,7 +789,9 @@ def continuation_decision(prev: V8Block, curr: V8Block) -> MergeDecision | None:
         return None
     if not is_open_ended(prev.text):
         return None
-    if not starts_like_continuation(curr.text):
+    skipped_float_blocks = skipped_float_blocks or []
+    float_skip_continuation = bool(skipped_float_blocks) and starts_like_float_skip_continuation(curr.text)
+    if not starts_like_continuation(curr.text) and not float_skip_continuation:
         return None
 
     same_column = prev.page_idx == curr.page_idx and prev.column_id == curr.column_id
@@ -760,6 +801,25 @@ def continuation_decision(prev: V8Block, curr: V8Block) -> MergeDecision | None:
     prev_near_page_bottom = bbox_y1(prev) >= page_height(prev) * 0.82
     curr_near_column_top = bbox_y0(curr) <= page_height(curr) * 0.62
 
+    if float_skip_continuation:
+        return make_decision(
+            prev,
+            curr,
+            "float_skip_continuation",
+            0.84,
+            extra_evidence={
+                "skipped_float_count": len(skipped_float_blocks),
+                "skipped_float_blocks": [
+                    {
+                        "block_id": skipped.block_id,
+                        "type": skipped.type,
+                        "page_idx": skipped.page_idx,
+                        "bbox": skipped.bbox,
+                    }
+                    for skipped in skipped_float_blocks
+                ],
+            },
+        )
     if close_vertical:
         return make_decision(prev, curr, "same_column_open_sentence", 0.86)
     if cross_column and prev_near_page_bottom and curr_near_column_top:
@@ -769,25 +829,36 @@ def continuation_decision(prev: V8Block, curr: V8Block) -> MergeDecision | None:
     return None
 
 
-def make_decision(prev: V8Block, curr: V8Block, reason: str, confidence: float) -> MergeDecision:
+def make_decision(
+    prev: V8Block,
+    curr: V8Block,
+    reason: str,
+    confidence: float,
+    *,
+    extra_evidence: dict[str, Any] | None = None,
+) -> MergeDecision:
+    evidence = {
+        "prev_text_tail": prev.text[-120:],
+        "curr_text_head": curr.text[:120],
+        "prev_page_idx": prev.page_idx,
+        "curr_page_idx": curr.page_idx,
+        "prev_column_id": prev.column_id,
+        "curr_column_id": curr.column_id,
+        "prev_bbox": prev.bbox,
+        "curr_bbox": curr.bbox,
+        "prev_open_ended": is_open_ended(prev.text),
+        "curr_starts_continuation": starts_like_continuation(curr.text),
+        "curr_starts_float_skip_continuation": starts_like_float_skip_continuation(curr.text),
+        "vertical_gap": vertical_gap(prev, curr),
+    }
+    if extra_evidence:
+        evidence.update(extra_evidence)
     return MergeDecision(
         src_block_id=prev.block_id,
         dst_block_id=curr.block_id,
         reason=reason,
         confidence=confidence,
-        evidence={
-            "prev_text_tail": prev.text[-120:],
-            "curr_text_head": curr.text[:120],
-            "prev_page_idx": prev.page_idx,
-            "curr_page_idx": curr.page_idx,
-            "prev_column_id": prev.column_id,
-            "curr_column_id": curr.column_id,
-            "prev_bbox": prev.bbox,
-            "curr_bbox": curr.bbox,
-            "prev_open_ended": is_open_ended(prev.text),
-            "curr_starts_continuation": starts_like_continuation(curr.text),
-            "vertical_gap": vertical_gap(prev, curr),
-        },
+        evidence=evidence,
     )
 
 
@@ -880,8 +951,14 @@ def materialize_v8_items(ordered_blocks: list[V8Block], decisions: list[MergeDec
 def should_use_content_list_text(block: V8Block, semantic_text: str, middle_text: str) -> bool:
     if not semantic_text:
         return False
-    if normalize_content_type(block.type) == "title":
+    block_type = normalize_content_type(block.type)
+    if block_type == "title":
         return True
+    # Body text must stay anchored to middle.json.  MinerU content_list may have
+    # already merged text with the wrong owner before v8 reading-order repair,
+    # so it is only a sidecar for traceability/styles/assets here.
+    if block_type in {"text", "paragraph", "list", "abstract", "ref_text", "reference"}:
+        return False
     score = float(block.metadata.get("content_list_match_score") or 0.0)
     iou = float(block.metadata.get("content_list_text_iou") or 0.0)
     if iou < 0.35 and score < 0.45:
@@ -971,6 +1048,13 @@ def starts_like_continuation(text: str) -> bool:
     # Hyphenated previous line often resumes with an uppercase acronym or
     # dataset token, e.g. "CI-" -> "CEVSE2024".
     return bool(re.match(r"^[A-Z]{2,}[A-Za-z0-9-]*[,)]?", clean))
+
+
+def starts_like_float_skip_continuation(text: str) -> bool:
+    clean = normalize_space(text)
+    if not clean:
+        return False
+    return bool(FLOAT_SKIP_CONTINUATION_START_RE.search(clean))
 
 
 def join_continuation_text(prev: str, curr: str) -> str:

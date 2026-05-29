@@ -42,7 +42,6 @@ SILENT_COMMAND_NAMES = {
     "hspace",
     "includegraphics",
     "indent",
-    "label",
     "linebreak",
     "maketitle",
     "medskip",

@@ -14,6 +14,7 @@ class FigureRenderer:
             context.text,
             context.citations,
             document_nodes=context.document_nodes,
+            render_node=context.node,
         )
 
     def render_document_node(self, context: DocumentNodeRenderContext) -> str:

@@ -8,6 +8,8 @@ frontend/backend docs. For the complete architecture, data-flow, judgment
 rules, code map, and metrics taxonomy, see `docs/PROJECT_ARCHITECTURE_FULL.md`.
 For a paper-facing long-form description, see
 `docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md`.
+For the single current production command and output contract, see
+`docs/V8_MAINLINE_RECONSTRUCTION_PATH.md`.
 
 ## 1. Objective
 

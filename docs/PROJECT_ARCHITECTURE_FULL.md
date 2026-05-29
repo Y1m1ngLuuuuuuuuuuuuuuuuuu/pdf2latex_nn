@@ -74,6 +74,7 @@ scripts/pipeline/run_m05_e2e_comparison.py
 The v8 path is documented in:
 
 ```text
+docs/V8_MAINLINE_RECONSTRUCTION_PATH.md
 docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
 ```
 
@@ -194,28 +195,33 @@ Rules-only:
 
 ```mermaid
 flowchart TD
-    A["arXiv TeX source"] --> B["compile PDF"]
-    B --> C["MinerU extraction"]
-    C --> D["content_list_v7_styles.json"]
-    D --> E["GNNViewAdapter"]
-    E --> F["graph.pt"]
-    A --> G["LaTeX flattener + Tex AST parser"]
-    D --> H["PDF text stream for alignment"]
-    G --> I["Sliding-window alignment"]
-    H --> I
-    I --> J["edge labels y: MERGE / PARENT_CHILD / NONE"]
-    F --> K["train EdgeRelationGAT / Y-Network"]
+    A["compiled PDF"] --> B["MinerU extraction"]
+    B --> C["middle.json"]
+    B --> D["content_list.json asset/caption sidecar"]
+    B --> E["optional styled content_list sidecar"]
+    C --> F["v8 middle reflow and reading-order repair"]
+    D --> F
+    E --> F
+    F --> G["content_list_v8.json"]
+    G --> H["DocumentIR"]
+    H --> I["FrontMatterIR"]
+    H --> J["heading style registry + stack skeleton"]
+    I --> K["RenderTreeIR"]
     J --> K
-    K --> L["predicted edge probabilities"]
-    D --> M["full DocumentIR"]
-    L --> N["TreeDecoder + heading skeleton + constraints"]
-    M --> N
-    N --> O["RenderTreeIR"]
-    O --> P["OriginalLikeIRLatexRenderer"]
-    M --> P
-    P --> Q["generated.tex"]
-    Q --> R["pdflatex/xelatex generated.pdf"]
+    H --> L["v8 StyleProfile"]
+    K --> M["OriginalLikeIRLatexRenderer"]
+    L --> M
+    H --> M
+    M --> N["generated.tex"]
+    N --> O["pdflatex/xelatex generated.pdf"]
+
+    G -. optional relation research .-> P["GNNViewAdapter or future v8 graph-visible view"]
+    P -.-> Q["graph.pt"]
+    Q -.-> R["MERGE / PARENT_CHILD / NONE diagnostics"]
 ```
+
+The solid path is the only current default reconstruction path.  The dotted GNN
+branch is optional and cannot become a renderer source.
 
 ## 3. Repository Code Map
 
@@ -276,6 +282,7 @@ src/adapters/
 | File | Responsibility |
 | --- | --- |
 | `mineru_v7_document_ir.py` | Converts full MinerU v7 styled JSON into DocumentIR. |
+| `mineru_v8_document_ir.py` | Converts v8 middle-reflow payloads into the same stable DocumentIR contract. |
 
 ### 3.4 Reasoning Layer
 
@@ -295,6 +302,9 @@ src/reasoning/
 | `postprocess.py` | TreeDecoder, merge contraction, constraints, relation-to-render tree bridge. |
 | `prediction_io.py` | Writes auditable `PredictedRelations` JSON sidecars from raw GNN edge logits/probabilities. |
 | `heading_skeleton.py` | Heading evidence and document-local heading style profile. |
+| `front_matter_extractor.py` | Deterministic FrontMatterIR Phase 0 extraction and heading negative-mask source. |
+| `v8_heading_style_stack.py` | Document-local v8 heading style registry and stack-level style assignment. |
+| `v8_render_tree.py` | Rules-only v8 RenderTreeIR construction from DocumentIR and FrontMatterIR. |
 | `layout_state_machine.py` | Layout state-machine parsing helpers. |
 
 ### 3.5 Generation Layer
@@ -309,6 +319,7 @@ src/generation/
 | `ir_renderer.py` | Original-like IR renderer and document-level rendering logic. |
 | `ir_renderers/` | Registry-style role renderers: headings, text, math, figures, tables, lists, references, notes, front matter. |
 | `style_profile.py` | Global page/style profile: paper size, margins, columns, fonts, headers/footers. |
+| `v8_style_detector.py` | v8-specific body font, line-height, paragraph spacing, page-size, and heading-style evidence. |
 | `table_assets.py` | Crop fallback assets for tables/figures, grouping, bbox union, asset paths. |
 | `citations.py` | Citation and reference resolution helpers. |
 | `front_matter.py` | Title/author/abstract handling helpers. |
@@ -358,16 +369,17 @@ scripts/pipeline/
 
 | Script | Responsibility |
 | --- | --- |
-| `build_v7_dataset_staged.py` | End-to-end staged data production from source/PDF material. |
-| `run_current_v7_rebuild_relabel.sh` | Current rebuild/relabel orchestration over existing v7 JSON. |
+| `run_v8_layout_reconstruction.py` | Current default single-document v8 reconstruction entrypoint. |
+| `build_v7_dataset_staged.py` | Optional v7/GNN staged data production from source/PDF material. |
+| `run_current_v7_rebuild_relabel.sh` | Optional rebuild/relabel orchestration over existing v7 JSON. |
 | `rebuild_graphs_from_manifest.py` | Rebuild graph `.pt` files from v7 content. |
 | `relabel_manifest.py` | Generate labels for a manifest of graph/content/TeX pairs. |
-| `train_edge_gnn_full.py` | Full relation model training with CE/Focal/OHEM/threshold calibration options. |
-| `prepare_ablation_suite.py` | Generate ablation run commands. |
+| `train_edge_gnn_full.py` | Optional relation model training with CE/Focal/OHEM/threshold calibration options. |
+| `prepare_ablation_suite.py` | Generate optional GNN ablation run commands. |
 | `summarize_ablation_results.py` | Summarize ablation outputs. |
-| `run_e2e_inference.py` | Batch/single E2E inference into TeX/PDF. |
-| `batch_visual_qa_inference.py` | E2E visual QA batch runner. |
-| `step5_generate_tex.py` | Single document inference/generation entrypoint. |
+| `run_e2e_inference.py` | Legacy/optional v7-GNN batch/single E2E inference into TeX/PDF. |
+| `batch_visual_qa_inference.py` | Legacy/optional v7-GNN visual QA batch runner. |
+| `step5_generate_tex.py` | Legacy/optional single-document v7-GNN generation entrypoint. |
 | `run_nougat_comparison.py` | Nougat comparison runner. |
 | `download_nougat_checkpoint.py` | Nougat checkpoint download helper. |
 | `run_current_full_eval_suite.py` | Current paper-facing full evaluation suite: ablation, E2E, Nougat, rollup. |
@@ -380,12 +392,13 @@ scripts/pipeline/
 
 ## 4. Data Artifacts And Contracts
 
-### 4.1 Full v7 Fact Layer
+### 4.1 Full Normalized Fact Layer
 
 File pattern:
 
 ```text
-content_list_v7_styles.json
+content_list_v8.json                 current default
+content_list_v7_styles.json          optional v7/GNN branch
 ```
 
 Purpose:
@@ -490,6 +503,11 @@ edge_dim = 26
 ```
 
 ## 5. V7 Frontend Processing
+
+This section is retained for the optional v7/GNN relation branch and historical
+training data.  The current default reconstruction frontend is v8, described in
+`docs/V8_MAINLINE_RECONSTRUCTION_PATH.md` and
+`docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md`.
 
 ### 5.1 MinerU Stage
 

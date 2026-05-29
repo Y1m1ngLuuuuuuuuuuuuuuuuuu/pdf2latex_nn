@@ -1,6 +1,6 @@
 # Project File Layout
 
-**Last updated**: 2026-05-24
+**Last updated**: 2026-05-26
 
 This document is the current directory contract for both the local checkout and
 the AutoDL runtime checkout.  When a path exists on both machines, it should
@@ -24,7 +24,7 @@ artifacts should not be recursively copied from local to AutoDL.
 | `src/` | Production Python package. | Yes | Core pipeline code. |
 | `src/perception/` | PDF/v7 perception layer, graph-visible adapter, reading order, style/title probes. | Yes | Does not own final rendering. |
 | `src/adapters/` | Frontend adapters, especially MinerU v7 -> `DocumentIR`. | Yes | Replaceable frontend boundary. |
-| `src/reasoning/` | Graph builder, label generation, GNN model, decoder/postprocess, heading/float logic. | Yes | GNN view and decoder logic live here. |
+| `src/reasoning/` | Decoder/postprocess, heading/float logic, and archived relation-learning modules. | Yes | Production v8 uses deterministic reasoning; GNN modules are historical/optional. |
 | `src/ir/` | Intermediate representation schemas, serialization, validators. | Yes | Shared semantic/layout IR contract. |
 | `src/generation/` | Render surface, IR renderer, style profile, table/figure/citation rendering helpers. | Yes | Production rendering is full-v7-first through IR. |
 | `src/evaluation/` | Comparison structure and metric implementations. | Yes | Paper-facing evaluation logic. |
@@ -34,6 +34,7 @@ artifacts should not be recursively copied from local to AutoDL.
 | `scripts/debug/` | Manual visualization/debug scripts. | Yes | Useful for bbox/reading-order inspection. |
 | `tools/` | One-off tools and reusable CLIs for evaluation, conversion, audit, and external bridges. | Yes | Tools should write outputs under `data/09_eval_reports/` unless otherwise documented. |
 | `tools/audit/` | Diagnostic/audit tools for labels, MERGE/PARENT usage, heading/float/layout issues. | Yes | Read-only or report-generating by default. |
+| `tools/_archive/` | Archived experimental tools that should not be imported by the main path. | Yes | Includes closed v8 atomic MERGE / GNN tools. |
 | `tools/api_baselines/` | API/VLM baseline pipeline scaffolding. | Yes | Real API calls require explicit environment opt-in. |
 | `tools/comphrdoc/` | External CompHRDoc/HRDH adapter smoke tooling. | Yes | Not a main training target. |
 | `configs/` | Ablation, prompt, external-eval, and API-baseline configuration. | Yes | No secrets. |
@@ -95,6 +96,7 @@ Current local organization:
 ```text
 data/09_eval_reports/
   v8_reflow_20260523/                 current v8 middle-reflow / style path smoke outputs
+  v8_mainline_final_20260526/         final selected200 deterministic-v8 / learned-branch closure
   post_audit_20260519/                post-audit diagnostic artifacts
   targeted_structure_fix_20260519/    targeted heading/float/layout diagnostic artifacts
   pre_expansion_wait_20260519/        wait-state reports and runbooks
@@ -110,6 +112,42 @@ data/09_eval_reports/
   _obsolete/
     legacy_merge_gnn_generator_debug_20260523/
 ```
+
+Current v8 runs must use:
+
+```text
+data/09_eval_reports/v8_reflow_<YYYYMMDD>/<doc_id>_<short_run_tag>/
+```
+
+Each run directory should keep the full v8 trace:
+
+```text
+<doc_id>_content_list_v8.json
+<doc_id>_v8_diagnostics.json
+document_ir.json
+front_matter_diag.json
+render_tree_ir.json
+style_profile.json
+v8_style_detector_diag.json
+generated.tex
+generated.pdf
+compile_report.json
+v8_layout_reconstruction_record.json
+```
+
+Do not create a second current output family for the same v8 pipeline.  If a run
+uses GNN logits, v7 content, or a relation-source comparison, its directory name
+must say so explicitly and it belongs to the optional/legacy relation branch.
+
+Archived v8 atomic MERGE JSON experiments used:
+
+```text
+data/09_eval_reports/_archive/v8_gnn_closed_20260526/
+tools/_archive/v8_gnn_merge_experiments_20260526/v8_atomic/
+```
+
+Do not create new v8 atomic MERGE output as a current report family unless a
+new research branch is explicitly reopened.
 
 Do not put new experiment families at the project root.  For example:
 
@@ -240,7 +278,10 @@ Use these files for current questions:
 | What is the architecture and module ownership? | `docs/PROJECT_ARCHITECTURE_FULL.md` |
 | What is the project target and metric philosophy? | `docs/layout_aware_reconstruction_target.md` |
 | What is the local/GitHub/AutoDL boundary? | `docs/PROJECT_SOURCE_OF_TRUTH.md` |
+| What is the single current production path? | `docs/V8_MAINLINE_RECONSTRUCTION_PATH.md` |
 | What is the current v8 layout reconstruction path? | `docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md` |
+| How do we refresh paragraph order metrics? | `tools/audit/refresh_paragraph_order_audits.py` |
+| Where is the archived middle-derived atomic MERGE route? | `docs/_archive/v8_gnn_merge_experiments_20260526/V8_ATOMIC_MERGE_GNN_ROUTE.md` |
 | How will precise author/affiliation/email parsing be added? | `docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md` |
 | How do we run data/training/eval? | `docs/v7_training_and_monitoring.md` |
 | How are labels generated? | `docs/ground_truth_labeling_v0.md` |

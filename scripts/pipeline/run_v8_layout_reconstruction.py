@@ -31,6 +31,8 @@ from src.generation.v8_style_detector import detect_v8_style  # noqa: E402
 from src.ir.serialization import read_json, write_json  # noqa: E402
 from src.perception.mineru_v8_reflow import build_v8_from_middle, dump_json  # noqa: E402
 from src.reasoning.front_matter_extractor import extract_front_matter  # noqa: E402
+from src.reasoning.front_matter_ir_loader import load_front_matter_ir_sidecar  # noqa: E402
+from src.reasoning.float_caption_layout import build_float_caption_layout_sidecars  # noqa: E402
 from src.reasoning.v8_render_tree import build_v8_render_tree  # noqa: E402
 
 
@@ -57,6 +59,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-resolve-citations",
         action="store_true",
         help="Disable the standard v7 citation/bibliography repair path.",
+    )
+    parser.add_argument(
+        "--enable-float-caption-layout-experimental",
+        action="store_true",
+        help="Opt into the experimental v8 FloatCaptionLayout pass. Default production path is unchanged.",
+    )
+    parser.add_argument(
+        "--enable-algorithm-region-renderer-experimental",
+        action="store_true",
+        help="Opt into the experimental v8 AlgorithmRegion renderer Phase 0. Default production path is unchanged.",
+    )
+    parser.add_argument(
+        "--enable-frontmatter-ir-renderer-experimental",
+        action="store_true",
+        help="Opt into the experimental FrontMatterIR renderer Phase 0. Default production path is unchanged.",
+    )
+    parser.add_argument(
+        "--frontmatter-ir-sidecar",
+        type=Path,
+        help="FrontMatterIR Phase0 sidecar to consume when --enable-frontmatter-ir-renderer-experimental is set.",
     )
     return parser
 
@@ -96,11 +118,30 @@ def main() -> int:
     document_path = args.output_dir / "document_ir.json"
     write_json(document_path, document)
 
-    front_matter = extract_front_matter(document)
+    if args.enable_frontmatter_ir_renderer_experimental:
+        if args.frontmatter_ir_sidecar is None:
+            raise SystemExit("--frontmatter-ir-sidecar is required with --enable-frontmatter-ir-renderer-experimental")
+        front_matter = load_front_matter_ir_sidecar(args.frontmatter_ir_sidecar)
+    else:
+        front_matter = extract_front_matter(document)
     write_json(args.output_dir / "front_matter_diag.json", front_matter.to_diagnostic())
-    tree = build_v8_render_tree(document, document_ir_path=str(document_path), front_matter=front_matter)
+    float_caption_sidecars = build_float_caption_layout_sidecars(document)
+    write_json(args.output_dir / "float_caption_fix_diag.json", float_caption_sidecars.to_diagnostic())
+    tree = build_v8_render_tree(
+        document,
+        document_ir_path=str(document_path),
+        front_matter=front_matter,
+        enable_float_caption_layout=args.enable_float_caption_layout_experimental,
+        enable_algorithm_region_renderer=args.enable_algorithm_region_renderer_experimental,
+    )
     render_tree_path = args.output_dir / "render_tree_ir.json"
     write_json(render_tree_path, tree)
+    algorithm_diag = tree.metadata.get("algorithm_region_renderer_diag") if isinstance(tree.metadata, dict) else None
+    if isinstance(algorithm_diag, dict):
+        write_json(args.output_dir / "algorithm_region_render_diag.json", algorithm_diag)
+        write_json(args.output_dir / "algorithm_region_consumed_nodes.json", algorithm_diag.get("consumed_nodes", []))
+        write_json(args.output_dir / "algorithm_region_compile_risk.json", algorithm_diag.get("compile_risks", []))
+        write_json(args.output_dir / "algorithm_region_render_policy.json", algorithm_diag.get("render_policies", []))
     style, style_diagnostics = detect_v8_style(document, tree=tree)
     style_path = args.output_dir / "style_profile.json"
     style_diag_path = args.output_dir / "v8_style_detector_diag.json"
@@ -120,6 +161,8 @@ def main() -> int:
             figure_asset_output_dir=args.output_dir / "assets",
             table_asset_latex_prefix="assets",
             figure_asset_latex_prefix="assets",
+            front_matter_ir=front_matter if args.enable_frontmatter_ir_renderer_experimental else None,
+            front_matter_renderer_experimental=args.enable_frontmatter_ir_renderer_experimental,
         ),
         resolve_citations=not args.no_resolve_citations,
         source_tex_path=args.source_tex,
@@ -162,6 +205,14 @@ def main() -> int:
         },
         "document_node_count": len(document.nodes),
         "render_tree_node_count": len(tree.nodes),
+        "float_caption_layout_experimental_enabled": args.enable_float_caption_layout_experimental,
+        "float_caption_layout_sidecar": str(args.output_dir / "float_caption_fix_diag.json"),
+        "algorithm_region_renderer_experimental_enabled": args.enable_algorithm_region_renderer_experimental,
+        "algorithm_region_renderer_sidecar": str(args.output_dir / "algorithm_region_render_diag.json")
+        if isinstance(algorithm_diag, dict)
+        else None,
+        "frontmatter_ir_renderer_experimental_enabled": args.enable_frontmatter_ir_renderer_experimental,
+        "frontmatter_ir_sidecar": str(args.frontmatter_ir_sidecar) if args.frontmatter_ir_sidecar else None,
     }
     write_json(args.output_dir / "v8_layout_reconstruction_record.json", record)
     print(json.dumps(record, ensure_ascii=False, indent=2))

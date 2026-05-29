@@ -329,6 +329,28 @@ class FrontMatterLineBuilder:
                 "metadata_layer": str(node.metadata.get("layout_layer") or "").casefold(),
                 "canonical_type": str(node.metadata.get("canonical_type") or node.raw_type or "").casefold(),
                 "node_type": node.node_type.value,
+                "model_label": node.metadata.get("model_label"),
+                "model_score": node.metadata.get("model_score"),
+                "model_role_vote": node.metadata.get("model_role_vote"),
+                "model_label_confidence": node.metadata.get("model_label_confidence"),
+                "mineru_page_furniture_role": node.metadata.get("mineru_page_furniture_role"),
+                "page_furniture_confidence": node.metadata.get("page_furniture_confidence"),
+                "is_page_header": node.metadata.get("is_page_header"),
+                "is_page_footer": node.metadata.get("is_page_footer"),
+                "is_page_number": node.metadata.get("is_page_number"),
+                "is_page_footnote": node.metadata.get("is_page_footnote"),
+                "is_aside_or_margin_note": node.metadata.get("is_aside_or_margin_note"),
+                "is_discarded_block": node.metadata.get("is_discarded_block"),
+                "is_document_title_candidate": node.metadata.get("is_document_title_candidate"),
+                "is_front_matter_candidate": node.metadata.get("is_front_matter_candidate"),
+                "is_author_affiliation_candidate": node.metadata.get("is_author_affiliation_candidate"),
+                "is_abstract_title_candidate": node.metadata.get("is_abstract_title_candidate"),
+                "front_matter_negative_for_body_heading": node.metadata.get("front_matter_negative_for_body_heading"),
+                "title_negative_for_body_heading": node.metadata.get("title_negative_for_body_heading"),
+                "abstract_title_negative_for_body_heading": node.metadata.get("abstract_title_negative_for_body_heading"),
+                "should_exclude_from_body_order": node.metadata.get("should_exclude_from_body_order"),
+                "should_exclude_from_heading_detection": node.metadata.get("should_exclude_from_heading_detection"),
+                "should_exclude_from_visible_prose_metric": node.metadata.get("should_exclude_from_visible_prose_metric"),
             },
         )
 
@@ -341,6 +363,54 @@ class RuleBasedFrontMatterSequenceTagger:
         seen_abstract = False
         for index, line in enumerate(lines):
             scores, evidence = _role_scores(line, state=state, seen_title=seen_title, seen_abstract=seen_abstract, index=index)
+            role = _decode_role(scores, state=state)
+            confidence = _score_confidence(scores, role)
+            if role == "TITLE":
+                seen_title = True
+                state = "TITLE"
+            elif role in {"AUTHOR", "AFFILIATION", "EMAIL", "ORCID", "FRONT_NOTE"}:
+                state = role
+            elif role == "ABSTRACT_TITLE":
+                seen_abstract = True
+                state = "ABSTRACT_BODY"
+            elif role == "ABSTRACT_BODY":
+                state = "ABSTRACT_BODY"
+            elif role == "BODY":
+                state = "BODY"
+            tagged.append(
+                FrontMatterLine(
+                    **{
+                        **line.__dict__,
+                        "role_scores": scores,
+                        "pred_role": role,
+                        "confidence": confidence,
+                        "evidence": evidence,
+                    }
+                )
+            )
+        return tagged
+
+
+class RuleBasedFrontMatterPhase0SequenceTagger(RuleBasedFrontMatterSequenceTagger):
+    """P0-E evidence-aware tagger for audit/IR sidecars only.
+
+    The production renderer continues to call :func:`extract_front_matter`.
+    Phase0 callers must opt in through :func:`extract_front_matter_phase0`.
+    """
+
+    def tag(self, lines: list[FrontMatterLine]) -> list[FrontMatterLine]:
+        tagged: list[FrontMatterLine] = []
+        state: FrontMatterRole = "TITLE"
+        seen_title = False
+        seen_abstract = False
+        for index, line in enumerate(lines):
+            scores, evidence = _role_scores_phase0(
+                line,
+                state=state,
+                seen_title=seen_title,
+                seen_abstract=seen_abstract,
+                index=index,
+            )
             role = _decode_role(scores, state=state)
             confidence = _score_confidence(scores, role)
             if role == "TITLE":
@@ -402,6 +472,73 @@ def extract_front_matter(document: DocumentIR) -> FrontMatterIR:
     lines = FrontMatterLineBuilder(document).build()
     tagged = RuleBasedFrontMatterSequenceTagger().tag(lines)
     return FrontMatterIRBuilder().build(tagged)
+
+
+def extract_front_matter_phase0(document: DocumentIR) -> FrontMatterIR:
+    """Extract deterministic FrontMatterIR for Phase0 diagnostics.
+
+    This consumes P0-E metadata already attached to DocumentIR nodes in-memory.
+    It does not mutate raw MinerU/v8 JSON and is intentionally separate from
+    the renderer-facing ``extract_front_matter`` path.
+    """
+
+    lines = FrontMatterLineBuilder(document).build()
+    tagged = RuleBasedFrontMatterPhase0SequenceTagger().tag(lines)
+    return FrontMatterIRBuilder().build(tagged)
+
+
+def front_matter_ir_to_phase0_sidecar(doc_id: str, front_matter: FrontMatterIR) -> dict[str, Any]:
+    """Serialize FrontMatterIR to the audit sidecar schema requested for Phase0."""
+
+    lines_by_id = {line.line_id: line for line in front_matter.lines}
+
+    def item(span: FrontMatterSpan | None) -> dict[str, Any] | None:
+        if span is None:
+            return None
+        source_lines = [lines_by_id[line_id] for line_id in span.line_ids if line_id in lines_by_id]
+        return {
+            "text": span.text,
+            "source_v8_ids": span.source_node_ids,
+            "confidence": _confidence_tier(span.confidence),
+            "evidence": [_line_phase0_evidence(line) for line in source_lines],
+        }
+
+    abstract_title = item(front_matter.abstract.title) if front_matter.abstract else None
+    abstract_body = item(front_matter.abstract.body) if front_matter.abstract else None
+    return {
+        "doc_id": doc_id,
+        "schema_version": "frontmatter_ir_phase0_v1",
+        "title": item(front_matter.title),
+        "authors": [payload for span in front_matter.authors if (payload := item(span)) is not None],
+        "affiliations": [payload for span in front_matter.affiliations if (payload := item(span)) is not None],
+        "emails": [payload for span in front_matter.emails if (payload := item(span)) is not None and not ORCID_RE.search(payload["text"])],
+        "orcids": [payload for span in front_matter.emails if (payload := item(span)) is not None and ORCID_RE.search(payload["text"])],
+        "abstract": {
+            "title": abstract_title["text"] if abstract_title else None,
+            "body": abstract_body["text"] if abstract_body else None,
+            "source_v8_ids": sorted(
+                set((abstract_title or {}).get("source_v8_ids") or [])
+                | set((abstract_body or {}).get("source_v8_ids") or [])
+            ),
+            "confidence": _combine_confidence_tiers(
+                [tier for tier in ((abstract_title or {}).get("confidence"), (abstract_body or {}).get("confidence")) if tier]
+            ),
+            "evidence": (abstract_title or {}).get("evidence", []) + (abstract_body or {}).get("evidence", []),
+        },
+        "front_notes": [payload for span in front_matter.notes if (payload := item(span)) is not None],
+        "first_body_boundary": _first_body_boundary_sidecar(front_matter.lines),
+        "unassigned_frontmatter_lines": [
+            {
+                "text": line.text,
+                "source_v8_ids": [line.source_node_id],
+                "confidence": _confidence_tier(line.confidence),
+                "evidence": [_line_phase0_evidence(line)],
+            }
+            for line in front_matter.lines
+            if line.pred_role in {"OTHER", "BODY"} and line.page_idx == 0 and line.line_order <= (front_matter.region.end_order if front_matter.region else 30)
+        ],
+        "diagnostic": front_matter.to_diagnostic(),
+    }
 
 
 def _role_scores(
@@ -514,6 +651,80 @@ def _role_scores(
         "font_size_vs_body": line.font_size_vs_body,
         "bold_ratio": line.bold_ratio,
         "centeredness": line.centeredness,
+    }
+    return scores, evidence
+
+
+def _role_scores_phase0(
+    line: FrontMatterLine,
+    *,
+    state: FrontMatterRole,
+    seen_title: bool,
+    seen_abstract: bool,
+    index: int,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    scores, evidence = _role_scores(line, state=state, seen_title=seen_title, seen_abstract=seen_abstract, index=index)
+    p0e = line.evidence
+    model_label = str(p0e.get("model_label") or "").casefold()
+    model_role_vote = str(p0e.get("model_role_vote") or "").casefold()
+    model_confidence = str(p0e.get("model_label_confidence") or "").casefold()
+    page_role = str(p0e.get("mineru_page_furniture_role") or "").casefold()
+    is_page_furniture = any(
+        bool(p0e.get(key))
+        for key in (
+            "is_page_header",
+            "is_page_footer",
+            "is_page_number",
+            "is_page_footnote",
+            "is_aside_or_margin_note",
+            "is_discarded_block",
+            "should_exclude_from_visible_prose_metric",
+        )
+    ) or page_role in {"page_header", "page_footer", "page_number", "page_footnote", "aside_text", "margin_note", "discarded_block"}
+    if is_page_furniture:
+        for role in ("TITLE", "AUTHOR", "AFFILIATION", "EMAIL", "ORCID", "ABSTRACT_TITLE", "ABSTRACT_BODY"):
+            scores[role] -= 8.0
+        if FRONT_NOTE_RE.search(line.text) and line.page_idx == 0 and not seen_abstract:
+            scores["FRONT_NOTE"] += 2.0
+        else:
+            scores["OTHER"] += 4.0
+    if p0e.get("is_document_title_candidate") or model_label == "doc_title" or model_role_vote == "doc_title":
+        scores["TITLE"] += 7.0 if model_confidence == "strong_model_label" else 4.5
+    elif model_label in {"title", "paragraph_title"} and line.page_idx == 0 and index <= 3 and not seen_title:
+        scores["TITLE"] += 3.0
+    if p0e.get("is_author_affiliation_candidate"):
+        if EMAIL_RE.search(line.text):
+            scores["EMAIL"] += 5.0
+        elif ORCID_RE.search(line.text):
+            scores["ORCID"] += 4.0
+        elif AFFILIATION_RE.search(line.text):
+            scores["AFFILIATION"] += 4.0
+        elif _looks_like_author_line(line.text):
+            scores["AUTHOR"] += 3.5
+        else:
+            scores["AFFILIATION"] += 1.5
+    if p0e.get("is_abstract_title_candidate") or p0e.get("abstract_title_negative_for_body_heading"):
+        scores["ABSTRACT_TITLE"] += 5.0
+    if p0e.get("front_matter_negative_for_body_heading") and not seen_abstract:
+        scores["TITLE"] += 1.0
+        scores["FRONT_NOTE"] += 0.5
+    if p0e.get("title_negative_for_body_heading") and not seen_title:
+        scores["TITLE"] += 2.0
+    evidence = {
+        **evidence,
+        "phase0_evidence_source": _phase0_evidence_source(p0e),
+        "model_label": p0e.get("model_label"),
+        "model_score": p0e.get("model_score"),
+        "model_role_vote": p0e.get("model_role_vote"),
+        "model_label_confidence": p0e.get("model_label_confidence"),
+        "mineru_page_furniture_role": p0e.get("mineru_page_furniture_role"),
+        "is_document_title_candidate": bool(p0e.get("is_document_title_candidate")),
+        "is_author_affiliation_candidate": bool(p0e.get("is_author_affiliation_candidate")),
+        "is_abstract_title_candidate": bool(p0e.get("is_abstract_title_candidate")),
+        "front_matter_negative_for_body_heading": bool(p0e.get("front_matter_negative_for_body_heading")),
+        "title_negative_for_body_heading": bool(p0e.get("title_negative_for_body_heading")),
+        "abstract_title_negative_for_body_heading": bool(p0e.get("abstract_title_negative_for_body_heading")),
+        "page_furniture_guard": is_page_furniture,
     }
     return scores, evidence
 
@@ -636,6 +847,66 @@ def _span_diag(span: FrontMatterSpan | None) -> dict[str, Any] | None:
         "confidence": span.confidence,
         "bbox": None if span.bbox is None else span.bbox.to_list(),
     }
+
+
+def _line_phase0_evidence(line: FrontMatterLine) -> dict[str, Any]:
+    return {
+        "line_id": line.line_id,
+        "source_v8_id": line.source_node_id,
+        "page_idx": line.page_idx,
+        "role": line.pred_role,
+        "score": line.confidence,
+        "evidence_source": line.evidence.get("phase0_evidence_source") or "style_position",
+        "confidence_tier": _confidence_tier(line.confidence),
+        "model_label": line.evidence.get("model_label"),
+        "model_score": line.evidence.get("model_score"),
+        "p0e_negative_masks": {
+            "front_matter_negative_for_body_heading": line.evidence.get("front_matter_negative_for_body_heading"),
+            "title_negative_for_body_heading": line.evidence.get("title_negative_for_body_heading"),
+            "abstract_title_negative_for_body_heading": line.evidence.get("abstract_title_negative_for_body_heading"),
+        },
+        "bbox": None if line.bbox is None else line.bbox.to_list(),
+    }
+
+
+def _first_body_boundary_sidecar(lines: list[FrontMatterLine]) -> dict[str, Any]:
+    body_lines = [line for line in lines if line.pred_role == "BODY"]
+    if body_lines:
+        first = sorted(body_lines, key=lambda line: (line.page_idx, line.line_order))[0]
+        reason = "first_body_heading" if BODY_HEADING_RE.match(first.text) else "after_abstract"
+        return {"page_idx": first.page_idx, "source_v8_id": first.source_node_id, "reason": reason}
+    return {"page_idx": None, "source_v8_id": None, "reason": "unknown"}
+
+
+def _confidence_tier(score: float | None) -> str:
+    value = float(score or 0.0)
+    if value >= 0.82:
+        return "high"
+    if value >= 0.62:
+        return "medium"
+    if value > 0.0:
+        return "low"
+    return "diagnostic_only"
+
+
+def _combine_confidence_tiers(tiers: list[str]) -> str:
+    order = {"diagnostic_only": 0, "low": 1, "medium": 2, "high": 3}
+    if not tiers:
+        return "diagnostic_only"
+    return max(tiers, key=lambda tier: order.get(tier, 0))
+
+
+def _phase0_evidence_source(evidence: dict[str, Any]) -> str:
+    sources: list[str] = []
+    if evidence.get("model_label") is not None:
+        sources.append("model_label")
+    if evidence.get("front_matter_negative_for_body_heading") or evidence.get("title_negative_for_body_heading") or evidence.get("abstract_title_negative_for_body_heading"):
+        sources.append("p0e_negative_mask")
+    if evidence.get("mineru_page_furniture_role"):
+        sources.append("page_furniture")
+    if len(sources) > 1:
+        return "mixed"
+    return sources[0] if sources else "style_position"
 
 
 def _cluster_spans_into_lines(spans: list[StyleSpan]) -> list[list[StyleSpan]]:

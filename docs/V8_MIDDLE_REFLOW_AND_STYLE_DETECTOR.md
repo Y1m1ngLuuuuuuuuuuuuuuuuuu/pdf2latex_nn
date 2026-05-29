@@ -6,6 +6,10 @@ This document records the current v8 reconstruction path and its parameters.
 V8 is a new input normalization path; it does not mutate v7 JSON, does not build
 a GNN view, and does not change graph schema.
 
+The single production-path contract is `docs/V8_MAINLINE_RECONSTRUCTION_PATH.md`.
+This file gives implementation details for the same path; it should not be read
+as a second reconstruction route.
+
 ## Goal
 
 V8 starts from MinerU raw `middle.json` so that page-local reading order can be
@@ -35,6 +39,26 @@ MinerU middle.json
 
 The renderer still consumes full `DocumentIR` and `RenderTreeIR`; it never
 renders from a GNN view.
+
+## Text Source Policy
+
+Body text is canonicalized from `middle.json` after v8 reading-order repair.
+`content_list.json` and PyMuPDF/style spans are sidecars, not alternate body text
+owners.
+
+Rules:
+
+- body-like nodes (`text`, paragraph, list, abstract, reference text) use v8
+  middle canonical text;
+- `content_list` may help title/caption/asset metadata but must not silently
+  replace body text;
+- style spans provide style ranges only when their visible text aligns to the
+  v8 canonical node text;
+- if span text contains extra prefix/suffix text from a neighboring bbox, the
+  renderer falls back to node text and keeps only safe aligned style evidence.
+
+This policy prevents oversized bbox/span artifacts from introducing text that is
+not present in the corrected v8 logical item.
 
 ## Main Runner
 

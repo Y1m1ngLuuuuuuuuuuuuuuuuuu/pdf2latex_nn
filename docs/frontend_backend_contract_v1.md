@@ -1,15 +1,25 @@
 # Frontend / Backend Contract v1
 
-**Last updated**: 2026-05-18
+**Last updated**: 2026-05-24
 
-This contract fixes the boundary between PDF extraction, TeX truth generation, GNN training, decoding, and LaTeX rendering.
+This contract fixes the boundary between PDF extraction, optional TeX truth
+generation, optional GNN training, decoding, and LaTeX rendering.  The current
+default reconstruction path is v8/layout-first; the v7/GNN flow below is kept as
+an optional relation-learning branch.
 
 ## Contract Summary
 
 ```text
 PDF Frontend
-  -> content_v7_styles.json
+  -> middle.json + content_list.json + optional style sidecar
+  -> content_list_v8.json
   -> DocumentIR
+  -> FrontMatterIR / heading style stack
+  -> RenderTreeIR
+  -> Generator
+
+Optional Relation Branch
+  -> content_v7_styles.json or future v8 graph-visible view
   -> GNNViewAdapter
   -> GraphInput.pt
 
@@ -18,10 +28,7 @@ TeX Label Backend
   -> alignment mapping
 
 GNN
-  -> PredictedRelations
-
-Decoder
-  -> RenderTreeIR
+  -> PredictedRelations / diagnostics
 
 Generator
   -> .tex / .pdf
@@ -31,14 +38,26 @@ Each layer owns one job and must not silently rewrite another layer's facts.
 
 ## PDF Frontend Output
 
-Canonical internal JSON:
+Current default internal JSON:
+
+```text
+*_content_list_v8.json
+```
+
+Current default IR adapter:
+
+```text
+src/adapters/mineru_v8_document_ir.py
+```
+
+Optional v7/GNN internal JSON:
 
 ```text
 *_content_list_v7.json
 *_content_list_v7_styles.json
 ```
 
-Canonical IR adapter:
+Optional v7/GNN IR adapter:
 
 ```text
 src/adapters/mineru_v7_document_ir.py
@@ -64,8 +83,9 @@ Frontend must not write edge labels or model predictions.
 
 ## GNN View Adapter
 
-The full v7 JSON is the complete fact layer for rendering. The graph model uses
-a narrower view produced by:
+The full normalized payload and `DocumentIR` are the complete fact layer for
+rendering.  The graph model, when enabled for optional relation studies, uses a
+narrower view produced by:
 
 ```text
 src/perception/gnn_view_adapter.py
@@ -82,8 +102,9 @@ excluded_items_summary
 ```
 
 This means "not sent to the GNN" never means "deleted from the document".
-Generator code must render from full v7 / DocumentIR plus bridged predicted
-relations, not from the filtered graph view alone.
+Generator code must render from full `DocumentIR` plus `RenderTreeIR` and, when
+used, bridged predicted relations. It must not render from the filtered graph
+view alone.
 
 Float policy:
 

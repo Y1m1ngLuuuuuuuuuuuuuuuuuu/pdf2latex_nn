@@ -174,16 +174,24 @@ PSEUDOCODE_END_RE = re.compile(r"^\s*end(?:\s+(for|if|while))?\s*$", re.IGNORECA
 ALGORITHM_CODE_MARKER_RE = re.compile(r"([{};]|(?:\+\+|--|==|!=|&&|\|\|))")
 
 
-TABLE_CAPTION_RE = re.compile(r"^\s*(Table\s*\d*[:.\-]?\s*[^\n]+)", re.IGNORECASE)
+FLOAT_CAPTION_NUMBER_PATTERN = r"(?:S?\d+(?:\.\d+)*(?:\([A-Za-z]\))?|[IVXLCDM]+)"
+TABLE_CAPTION_RE = re.compile(
+    rf"^\s*(Table\s*{FLOAT_CAPTION_NUMBER_PATTERN}?[:.\-–—]?\s*[^\n]+)",
+    re.IGNORECASE,
+)
 
 
 FLOAT_CAPTION_LABEL_RE = {
     "table": re.compile(
-        r"^\s*(?:Table|Tab\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]?\s*",
+        rf"^\s*(?:Table|Tab\.?)\s+{FLOAT_CAPTION_NUMBER_PATTERN}\s*[:.\-–—]?\s*",
         re.IGNORECASE,
     ),
     "figure": re.compile(
-        r"^\s*(?:Figure|Fig\.?)\s+(?:\d+(?:\.\d+)*[A-Za-z]?|[IVXLCDM]+)\s*[:.\-–—]?\s*",
+        rf"^\s*(?:Figure|Fig\.?)\s+{FLOAT_CAPTION_NUMBER_PATTERN}\s*[:.\-–—]?\s*",
+        re.IGNORECASE,
+    ),
+    "algorithm": re.compile(
+        rf"^\s*(?:Algorithm|Alg\.?)\s+{FLOAT_CAPTION_NUMBER_PATTERN}\s*[:.\-–—]?\s*",
         re.IGNORECASE,
     ),
 }
@@ -268,6 +276,55 @@ def render_algorithm_block(text: str, *, label: str | None = None) -> str:
     lines.append(r"\end{algorithmic}")
     lines.append(r"\end{algorithm}")
     return "\n".join(lines)
+
+
+def render_algorithm_region_phase0(
+    *,
+    caption: str = "",
+    body: str = "",
+    asset_path: str | None = None,
+    label: str | None = None,
+    render_policy: str = "verbatim_fallback",
+) -> str:
+    """Render a PatchA-preserved algorithm region without algorithm packages.
+
+    Phase 0 intentionally uses a figure-style wrapper so algorithm/pseudocode
+    OCR does not require algorithmic/algorithm2e syntax.  Text fallback is
+    escaped inside a ttfamily minipage rather than emitted as raw pseudocode.
+    """
+
+    rendered_caption = render_text_with_inline_latex(caption) if caption else ""
+    lines = [r"\begin{figure}[H]", r"\centering"]
+    if asset_path and render_policy == "crop_fallback":
+        lines.append(rf"\includegraphics[width=1.000\linewidth]{{{asset_path}}}")
+    elif body.strip():
+        lines.extend(
+            [
+                r"\fbox{%",
+                r"\begin{minipage}{0.92\linewidth}",
+                r"\ttfamily\small",
+                *algorithm_text_fallback_lines(body),
+                r"\end{minipage}%",
+                r"}",
+            ]
+        )
+    else:
+        lines.append(r"\fbox{\parbox{0.8\linewidth}{Algorithm content not visually recoverable}}")
+    if rendered_caption:
+        lines.append(rf"\caption{{{rendered_caption}}}")
+    if label:
+        lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{figure}")
+    return "\n".join(lines)
+
+
+def algorithm_text_fallback_lines(text: str) -> list[str]:
+    rendered: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = escape_latex(safe_verbatim_text(raw_line.rstrip()))
+        if line:
+            rendered.append(line + r"\\")
+    return rendered or [r"\mbox{}"]
 
 
 def parse_pseudo_code(text: str) -> tuple[str | None, list[str]]:
@@ -405,8 +462,8 @@ def render_table_placeholder(
         return ""
     table_id = table_node_identifier(record)
     bbox = format_table_bbox(record.get("table_group_bbox") or record.get("bbox"))
-    caption = table_caption_text(record) or extract_table_caption(text) or "Table reconstruction placeholder"
-    caption = clean_float_caption_text(caption, "table") or "Table reconstruction placeholder"
+    caption = table_caption_text(record) or extract_table_caption(text) or ""
+    caption = clean_float_caption_text(caption, "table")
     graphic = ensure_table_pdf_crop(
         record,
         source_pdf=source_pdf or cfg_source_pdf(record),
@@ -442,7 +499,8 @@ def render_table_placeholder(
             f"width={source_layout.get('source_width_scope')}]"
         )
     lines.append(graphic_line)
-    lines.append(rf"\captionof{{table}}{{{render_text_with_inline_latex(caption)}}}" if as_nonfloat else rf"\caption{{{render_text_with_inline_latex(caption)}}}")
+    if caption:
+        lines.append(rf"\captionof{{table}}{{{render_text_with_inline_latex(caption)}}}" if as_nonfloat else rf"\caption{{{render_text_with_inline_latex(caption)}}}")
     if label:
         lines.append(rf"\label{{{label}}}")
     lines.append(r"\end{center}" if as_nonfloat else rf"\end{{{environment}}}")
@@ -469,9 +527,9 @@ def render_figure_block(
 ) -> str:
     caption = rendered_caption
     if caption is None:
-        caption_text = str(record.get("figure_group_caption") or record.get("image_group_caption") or record.get("figure_caption") or record.get("caption") or text or "Figure")
-        caption_text = clean_float_caption_text(caption_text, "figure") or "Figure"
-        caption = render_text_with_inline_latex(caption_text)
+        caption_text = str(record.get("figure_group_caption") or record.get("image_group_caption") or record.get("figure_caption") or record.get("caption") or text or "")
+        caption_text = clean_float_caption_text(caption_text, "figure")
+        caption = render_text_with_inline_latex(caption_text) if caption_text else ""
     asset_path = ensure_figure_asset(
         record,
         source_pdf=source_pdf or cfg_source_pdf(record),
@@ -486,8 +544,9 @@ def render_figure_block(
         lines = [
             r"\begin{center}",
             graphic_line,
-            rf"\captionof{{figure}}{{{caption}}}",
         ]
+        if caption:
+            lines.append(rf"\captionof{{figure}}{{{caption}}}")
         if label:
             lines.append(rf"\label{{{label}}}")
         lines.append(r"\end{center}")
@@ -498,8 +557,9 @@ def render_figure_block(
         rf"\begin{{{environment}}}[{placement}]",
         r"\centering",
         graphic_line,
-        rf"\caption{{{caption}}}",
     ]
+    if caption:
+        lines.append(rf"\caption{{{caption}}}")
     if use_starred_float:
         lines.insert(2, "% [FLOAT_WIDTH_SCOPE: page, environment=figure*]")
     if label:
@@ -538,8 +598,8 @@ def render_figure_minipage_group(
     caption = rendered_caption
     if caption is None:
         caption_text = _figure_group_caption(records, text)
-        caption_text = clean_float_caption_text(caption_text, "figure") or "Figure"
-        caption = render_text_with_inline_latex(caption_text or "Figure")
+        caption_text = clean_float_caption_text(caption_text, "figure")
+        caption = render_text_with_inline_latex(caption_text) if caption_text else ""
     group_width = 0.96 if as_nonfloat else _figure_group_width_fraction(records, members)
     group_is_wide = group_width >= 0.90 or any(
         is_wide_visual_record(record, bbox_keys=("figure_group_bbox", "image_group_bbox", "bbox"))
@@ -802,7 +862,43 @@ def clean_float_caption_text(text: str, kind: str) -> str:
     value = normalize_caption_ocr_math(value)
     value = select_float_caption_segment(value, kind)
     value = strip_float_caption_label(value, kind)
-    return value.strip(" \t\n\r:.-–—")
+    value = value.strip(" \t\n\r:.-–—")
+    if is_synthetic_or_panel_float_caption(value):
+        return ""
+    return value
+
+
+def is_synthetic_or_panel_float_caption(text: str) -> bool:
+    value = " ".join(str(text or "").casefold().split()).strip(" .:;,-–—")
+    compact = re.sub(r"[^0-9a-z]+", "", value)
+    if not compact:
+        return True
+    if compact in {
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "left",
+        "right",
+        "figure",
+        "fig",
+        "table",
+        "algorithm",
+        "reconstructionplaceholder",
+        "figurereconstructionplaceholder",
+        "tablereconstructionplaceholder",
+    }:
+        return True
+    panel_token = r"(?:\([a-z]\)|[a-z]\))"
+    if re.fullmatch(rf"{panel_token}(?:\s+{panel_token}){{1,7}}", value, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"[a-z](?:\s+[a-z]){1,7}", value, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\(?[a-z]\)?\s+", value, flags=re.IGNORECASE):
+        return True
+    return bool(re.fullmatch(r"\(?[a-z]\)?", value, flags=re.IGNORECASE))
 
 
 def select_float_caption_segment(text: str, kind: str) -> str:
@@ -1497,6 +1593,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "β": r"\beta",
     "γ": r"\gamma",
     "δ": r"\delta",
+    "ϕ": r"\phi",
     "ϵ": r"\epsilon",
     "ε": r"\epsilon",
     "ζ": r"\zeta",
@@ -1520,6 +1617,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "ω": r"\omega",
     "Γ": r"\Gamma",
     "Δ": r"\Delta",
+    "∆": r"\Delta{}",
     "Θ": r"\Theta",
     "Λ": r"\Lambda",
     "Ξ": r"\Xi",
@@ -1534,6 +1632,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "≈": r"\approx",
     "±": r"\pm",
     "×": r"\times",
+    "−": "-",
     "÷": r"\div",
     "∞": r"\infty",
     "∂": r"\partial",
@@ -1582,6 +1681,7 @@ CODE_UNICODE_REPLACEMENTS = {
     "β": "beta",
     "γ": "gamma",
     "δ": "delta",
+    "ϕ": "phi",
     "ϵ": "epsilon",
     "ε": "epsilon",
     "ζ": "zeta",
@@ -1604,6 +1704,7 @@ CODE_UNICODE_REPLACEMENTS = {
     "ω": "omega",
     "Γ": "Gamma",
     "Δ": "Delta",
+    "∆": "Delta",
     "Θ": "Theta",
     "Λ": "Lambda",
     "Ξ": "Xi",
@@ -1676,10 +1777,15 @@ CODE_UNICODE_REPLACEMENTS = {
 
 
 UNICODE_LATEX_REPLACEMENTS = {
+    "\u00a0": " ",
+    "\u2007": " ",
+    "\u202f": " ",
+    "\ufeff": "",
     "α": r"\ensuremath{\alpha}",
     "β": r"\ensuremath{\beta}",
     "γ": r"\ensuremath{\gamma}",
     "δ": r"\ensuremath{\delta}",
+    "ϕ": r"\ensuremath{\phi}",
     "ϵ": r"\ensuremath{\epsilon}",
     "ε": r"\ensuremath{\epsilon}",
     "η": r"\ensuremath{\eta}",
@@ -1703,6 +1809,7 @@ UNICODE_LATEX_REPLACEMENTS = {
     "ω": r"\ensuremath{\omega}",
     "Γ": r"\ensuremath{\Gamma}",
     "Δ": r"\ensuremath{\Delta}",
+    "∆": r"\ensuremath{\Delta}",
     "Θ": r"\ensuremath{\Theta}",
     "Λ": r"\ensuremath{\Lambda}",
     "Ξ": r"\ensuremath{\Xi}",
@@ -1764,9 +1871,12 @@ UNICODE_LATEX_REPLACEMENTS = {
     "¹": r"\ensuremath{^1}",
     "²": r"\ensuremath{^2}",
     "³": r"\ensuremath{^3}",
+    "‐": "-",
+    "‑": "-",
+    "‒": "-",
     "–": "--",
     "—": "---",
-    "−": r"\ensuremath{-}",
+    "−": "-",
     "•": r"\textbullet{}",
     "“": "``",
     "”": "''",

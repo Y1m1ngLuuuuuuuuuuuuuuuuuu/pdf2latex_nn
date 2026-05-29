@@ -74,7 +74,7 @@ target definition.  The detailed rationale and metric contract are documented in
 `docs/layout_aware_reconstruction_target.md`.
 
 The production reconstruction pipeline is now **v8 / layout-first**.  As of
-2026-05-24, the default E2E reconstruction path does not load learned GNN
+2026-05-26, the default E2E reconstruction path does not load learned GNN
 relation logits:
 
 ```text
@@ -89,7 +89,8 @@ compiled PDF
   -> OriginalLikeIRLatexRenderer
 ```
 
-GNN artifacts are still maintained as an explicit experimental relation branch:
+GNN artifacts are now archived as historical/optional relation-learning
+material:
 
 ```text
 content_v7 + style spans
@@ -99,9 +100,31 @@ content_v7 + style spans
   -> GNN training / diagnostics / ablations
 ```
 
-Use GNN results only when a command or experiment explicitly requests them.
-The paper-facing default compares the layout-aware reconstruction system, while
-GNN relation studies are reported as auxiliary ablations.
+Do not treat GNN outputs as the default reconstruction path. The paper-facing
+default compares the v8 layout-aware deterministic reconstruction system. GNN
+relation studies are retained only as auxiliary historical ablations.
+
+The single current production path contract is:
+
+```text
+docs/V8_MAINLINE_RECONSTRUCTION_PATH.md
+```
+
+Canonical command:
+
+```bash
+python3 scripts/pipeline/run_v8_layout_reconstruction.py \
+  --doc-id <doc_id> \
+  --middle-json <path/to/*_middle.json> \
+  --content-list-json <path/to/*_content_list.json> \
+  --style-content-list-json <path/to/*_content_list_v7_styles.json> \
+  --pdf <path/to/input.pdf> \
+  --output-dir data/09_eval_reports/v8_reflow_<YYYYMMDD>/<doc_id>_<run_tag>
+```
+
+Do not introduce another default reconstruction route.  If a v7/GNN script is
+used, its run name and report must say that it is an optional relation-learning
+or legacy comparison branch.
 
 The old root-level `e2e_outputs/` directory and superseded generator iteration
 outputs have been archived under:
@@ -115,6 +138,18 @@ Obsolete merge/GNN generator debug experiments are under:
 ```text
 data/09_eval_reports/_obsolete/
 ```
+
+The selected200 learned-MERGE closure report is:
+
+```text
+data/09_eval_reports/v8_mainline_final_20260526/V8_MAINLINE_FINAL_REPORT.md
+```
+
+Paragraph/source audits now report legacy body coverage and visible-prose order
+metrics side by side. The visible-prose layer is type-aware and excludes front
+matter, captions, references, display math/formula-only blocks, URL/metadata,
+and no-render artifacts before computing prose-order inversion, adjacent
+inversion, displacement, and LIS-disorder rates.
 
 Old v3/v4/v5 JSON variants are historical experiments. Do not feed them into training or evaluation.
 
@@ -158,10 +193,12 @@ Do not put accepted sources or input PDFs under `data/09_eval_reports/` or
 `local_outputs/`; those directories are for reports, copied inspections, and
 temporary experiment outputs.
 
-The full v7 JSON is the complete fact layer. It must not delete or rewrite
-metadata, figures, tables, footnotes, headers, captions, or references just
-because the GNN does not consume them directly. The graph-visible view is built
-separately by `src/perception/gnn_view_adapter.py`.
+The full normalized frontend payload is the complete fact layer.  In the current
+default path this is `content_list_v8.json`; in optional relation-learning
+experiments this can still be `content_list_v7_styles.json`.  Neither form may
+delete or rewrite metadata, figures, tables, footnotes, headers, captions, or
+references just because the GNN does not consume them directly. The
+graph-visible view is built separately by `src/perception/gnn_view_adapter.py`.
 
 GNN predictions are never rendered directly. The model predicts per-edge
 MERGE/PARENT_CHILD/NONE logits on the graph-visible view. `TreeDecoder` turns
@@ -188,13 +225,31 @@ validated.
 
 ## Active Entrypoints
 
-New data from PDF + TeX:
+Current production reconstruction:
+
+```text
+scripts/pipeline/run_v8_layout_reconstruction.py
+```
+
+Current v8 helper modules:
+
+```text
+tools/mineru_v8/build_v8_from_middle.py
+tools/mineru_v8/render_v8_smoke.py
+src/perception/mineru_v8_reflow.py
+src/adapters/mineru_v8_document_ir.py
+src/reasoning/v8_heading_style_stack.py
+src/reasoning/v8_render_tree.py
+src/generation/v8_style_detector.py
+```
+
+Optional v7/GNN data from PDF + TeX:
 
 ```text
 scripts/pipeline/build_v7_dataset_staged.py
 ```
 
-Rebuild and relabel existing v7 content:
+Optional rebuild and relabel existing v7 content:
 
 ```text
 scripts/pipeline/run_current_v7_rebuild_relabel.sh
@@ -202,13 +257,20 @@ scripts/pipeline/rebuild_graphs_from_manifest.py
 scripts/pipeline/relabel_manifest.py
 ```
 
-Training:
+Optional GNN training:
 
 ```text
 scripts/pipeline/train_edge_gnn_full.py
 ```
 
-Ablation:
+Archived v8 atomic MERGE JSON route:
+
+```text
+tools/_archive/v8_gnn_merge_experiments_20260526/v8_atomic/
+docs/_archive/v8_gnn_merge_experiments_20260526/V8_ATOMIC_MERGE_GNN_ROUTE.md
+```
+
+Optional GNN ablation:
 
 ```text
 configs/ablation_matrix_v7_adapteraware_20260514_2109.json
@@ -216,7 +278,7 @@ scripts/pipeline/prepare_ablation_suite.py
 data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
 ```
 
-E2E inference and visual QA:
+Legacy/optional v7-GNN E2E inference and visual QA:
 
 ```text
 scripts/pipeline/batch_visual_qa_inference.py --renderer ir
@@ -235,9 +297,10 @@ EMBEDDING_DEVICE=cpu \
 bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
 ```
 
-`--renderer ir` is the only production surface exposed by current E2E scripts.
+`--renderer ir` is the only supported surface for these legacy/optional scripts.
 The standalone TreeDecoder renderer is not a production surface; production
-scripts no longer accept `--renderer tree`.
+scripts no longer accept `--renderer tree`.  These scripts are not the v8
+default path unless a run explicitly says it is a v7/GNN branch.
 
 Generator module ownership and the current full-v7/GNN-view/render-tree bridge
 are frozen in:
@@ -431,7 +494,9 @@ docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md
 docs/PROJECT_SOURCE_OF_TRUTH.md
 docs/PROJECT_OVERVIEW.md
 docs/PROJECT_FILE_LAYOUT.md
+docs/V8_MAINLINE_RECONSTRUCTION_PATH.md
 docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md
+docs/_archive/v8_gnn_merge_experiments_20260526/V8_ATOMIC_MERGE_GNN_ROUTE.md
 docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md
 docs/ENVIRONMENT_SETUP.md
 docs/frontend_backend_contract_v1.md

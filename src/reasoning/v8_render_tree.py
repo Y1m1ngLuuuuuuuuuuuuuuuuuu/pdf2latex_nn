@@ -68,6 +68,8 @@ def build_v8_render_tree(
     *,
     document_ir_path: str,
     front_matter: FrontMatterIR | None = None,
+    enable_float_caption_layout: bool = False,
+    enable_algorithm_region_renderer: bool = False,
 ) -> RenderTreeIR:
     """Build a hierarchical RenderTreeIR for v8 reconstruction."""
 
@@ -159,7 +161,7 @@ def build_v8_render_tree(
         parent_id = heading_stack[-1][1] if heading_stack else "root"
         mutable_nodes[parent_id].children.append(render_id)
 
-    return RenderTreeIR(
+    tree = RenderTreeIR(
         doc_id=document.doc_id,
         root_id="root",
         nodes=[node.frozen() for node in mutable_nodes.values()],
@@ -172,6 +174,15 @@ def build_v8_render_tree(
             "heading_style_registry": heading_style_resolver.to_diagnostic(),
         },
     )
+    if enable_float_caption_layout:
+        from src.reasoning.float_caption_layout import apply_float_caption_layout
+
+        tree, _layout_result = apply_float_caption_layout(document, tree, enabled=True)
+    if enable_algorithm_region_renderer:
+        from src.reasoning.algorithm_region_renderer import apply_algorithm_region_renderer
+
+        tree, _algorithm_result = apply_algorithm_region_renderer(document, tree, enabled=True)
+    return tree
 
 
 def add_explicit_front_matter_nodes(

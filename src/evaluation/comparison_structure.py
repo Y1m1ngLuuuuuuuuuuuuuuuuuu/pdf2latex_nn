@@ -39,6 +39,7 @@ SECTION_COMMAND_RE = re.compile(
 BEGIN_END_RE = re.compile(r"\\(?P<kind>begin|end)\s*\{\s*(?P<name>[^}]+?)\s*\}")
 ITEM_RE = re.compile(r"\\item\b(?:\s*\[[^\]]*\])?")
 CAPTION_RE = re.compile(r"\\(?:captionof\*?|caption\*?)")
+LABEL_RE = re.compile(r"\\label\s*\{\s*(?P<label>[^}]+?)\s*\}")
 # Treat ``$$...$$`` as display math only when it appears as a standalone
 # delimiter.  Generated OCR-LaTeX often contains adjacent inline math fragments
 # such as ``$Q$$\tau$``; a plain ``\$\$.*?\$\$`` regex swallows everything up
@@ -75,6 +76,7 @@ LATEX_TOKEN_RE = re.compile(
     r"|\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
     r"|\\(?:title|author)\*?"
     r"|\\(?:captionof\*?|caption\*?)"
+    r"|\\label\s*\{\s*[^}]+?\s*\}"
     r"|\\item\b(?:\s*\[[^\]]*\])?"
     r"|\\bibitem\b(?:\s*\[[^\]]*\])?\s*\{[^}]*\}"
     r"|\\\[.*?\\\]"
@@ -84,9 +86,16 @@ LATEX_TOKEN_RE = re.compile(
 
 MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LIST_RE = re.compile(r"^\s*(?P<marker>(?:[-*+])|(?:\d+\.))\s+(?P<text>.+?)\s*$")
+CAPTION_NUMBER_PATTERN = (
+    r"(?:"
+    r"S?\d+(?:\.\d+)*(?:\([A-Za-z]\))?"
+    r"|[IVXLCDM]+"
+    r"|[A-Za-z]\d+(?:\.\d+)*(?:\([A-Za-z]\))?"
+    r")"
+)
 CAPTION_TEXT_RE = re.compile(
     r"^\s*(?P<kind>fig(?:ure)?|table|alg(?:orithm)?)\s*\.?\s*"
-    r"(?P<number>[A-Za-z0-9.:-]+)?\s*[:.\-]?\s*(?P<text>.*)$",
+    rf"(?P<number>{CAPTION_NUMBER_PATTERN})?\s*[:.\-–—]?\s*(?P<text>.*)$",
     re.I,
 )
 MARKDOWN_LATEX_SECTION_RE = re.compile(
@@ -219,7 +228,8 @@ def markdown_to_comparison(
 
 class _LatexComparisonParser:
     def __init__(self, tex: str, *, doc_id: str, source_path: Path | None, metadata: dict[str, Any]) -> None:
-        self.tex = document_body(strip_comments(tex))
+        cleaned_tex = strip_comments(tex)
+        self.tex = "\n".join(part for part in [preamble_front_matter_commands(cleaned_tex), document_body(cleaned_tex)] if part)
         self.doc_id = doc_id
         self.source_path = str(source_path) if source_path else None
         self.metadata = metadata
@@ -251,6 +261,8 @@ class _LatexComparisonParser:
                 end = self.handle_caption(match.end(), token)
                 cursor = end
                 continue
+            elif LABEL_RE.match(token):
+                self.handle_label(token)
             elif ITEM_RE.match(token):
                 self.handle_item(token)
             elif token.startswith("\\bibitem"):
@@ -384,10 +396,56 @@ class _LatexComparisonParser:
                 marker=f"captionof:{forced_parent_type}",
                 metadata={"source_command": "captionof"},
             ).block_id
-        caption_text = latex_text(text)
-        kind, label = caption_kind_and_label(caption_text, forced_parent_type or parent)
-        self.add_block("caption", caption_text, parent_id=parent, marker=kind, label=label)
+        caption_text = latex_caption_text(text)
+        parent_kind = forced_parent_type or self.current_float_context_type()
+        kind, label = caption_kind_and_label(caption_text, parent_kind)
+        if kind == "algorithm" and parent:
+            self.promote_algorithm_caption_parent(parent, source="caption")
+        self.add_block(
+            "caption",
+            caption_text,
+            parent_id=parent,
+            marker=kind,
+            label=label,
+            metadata={
+                "source_command": token.lstrip("\\"),
+                "caption_parent_kind": parent_kind,
+                "caption_normalized_without_label": normalize_caption_for_compare(caption_text),
+            },
+        )
         return close
+
+    def handle_label(self, token: str) -> None:
+        match = LABEL_RE.match(token)
+        label = match.group("label").strip() if match else ""
+        parent = self.current_float_parent()
+        if parent and is_algorithm_label(label):
+            self.promote_algorithm_caption_parent(parent, source="label", label=label)
+
+    def promote_algorithm_caption_parent(self, parent_id: str, *, source: str, label: str | None = None) -> None:
+        """Treat figure-style safe algorithm fallbacks as algorithm blocks.
+
+        Phase 0 algorithm rendering intentionally uses a figure environment by
+        default to avoid requiring algorithm packages.  The visible caption still
+        carries the Algorithm label, so the comparison layer should count that
+        float as an algorithm without changing ordinary figure/table handling.
+        """
+
+        for ctx in self.context_stack:
+            if ctx.get("id") == parent_id and ctx.get("type") == "figure":
+                ctx["type"] = "algorithm"
+                ctx["algorithm_identity_source"] = source
+        for block in self.blocks:
+            if block.block_id != parent_id:
+                continue
+            if block.block_type == "figure":
+                block.block_type = "algorithm"
+                block.marker = "algorithm_phase0_figure_fallback"
+                block.metadata["algorithm_phase0_figure_fallback"] = True
+                block.metadata["algorithm_identity_source"] = source
+                if label:
+                    block.label = label
+            return
 
     def handle_item(self, token: str) -> None:
         parent_id = self.current_parent_id()
@@ -423,12 +481,17 @@ class _LatexComparisonParser:
         self.next_id += 1
         parent = parent_id if parent_id is not None else self.current_parent_id()
         clean_text_value = " ".join(text.split())
+        normalized = (
+            normalize_caption_for_compare(clean_text_value, marker)
+            if block_type == "caption"
+            else normalize_for_compare(clean_text_value)
+        )
         block = ComparisonBlock(
             block_id=block_id,
             block_type=block_type,
             order=len(self.blocks),
             text=clean_text_value,
-            normalized_text=normalize_for_compare(clean_text_value),
+            normalized_text=normalized,
             level=level,
             parent_id=None if parent == ROOT_ID else parent,
             marker=marker,
@@ -484,6 +547,12 @@ class _LatexComparisonParser:
         for ctx in reversed(self.context_stack):
             if ctx.get("type") in {"figure", "table", "algorithm"}:
                 return ctx.get("id")
+        return None
+
+    def current_float_context_type(self) -> str | None:
+        for ctx in reversed(self.context_stack):
+            if ctx.get("type") in {"figure", "table", "algorithm"}:
+                return ctx.get("type")
         return None
 
     def current_parent_id(self) -> str:
@@ -757,12 +826,17 @@ class _MarkdownComparisonParser:
         self.next_id += 1
         clean_text_value = " ".join(str(text or "").split())
         parent = parent_id if parent_id is not None else self.current_parent_id()
+        normalized = (
+            normalize_caption_for_compare(clean_text_value, marker)
+            if block_type == "caption"
+            else normalize_for_compare(clean_text_value)
+        )
         block = ComparisonBlock(
             block_id=block_id,
             block_type=block_type,
             order=len(self.blocks),
             text=clean_text_value,
-            normalized_text=normalize_for_compare(clean_text_value),
+            normalized_text=normalized,
             level=level,
             parent_id=None if parent == ROOT_ID else parent,
             marker=marker,
@@ -786,7 +860,12 @@ class _MarkdownComparisonParser:
                 break
             index += 1
         raw = "\n".join(env_lines)
-        if env_name in FIGURE_ENVS:
+        label_match = LABEL_RE.search(raw)
+        algorithm_label = bool(label_match and is_algorithm_label(label_match.group("label")))
+        if env_name in FIGURE_ENVS and algorithm_label:
+            float_block = self.add_block("algorithm", "", marker="algorithm_phase0_figure_fallback")
+            float_block.label = label_match.group("label").strip() if label_match else None
+        elif env_name in FIGURE_ENVS:
             float_block = self.add_block("figure", "", marker=env_name)
         elif env_name in TABLE_ENVS:
             float_block = self.add_block("table", latex_text(raw), marker=env_name)
@@ -796,6 +875,10 @@ class _MarkdownComparisonParser:
         if caption_match:
             caption_text = latex_text(caption_match.group("caption"))
             kind, label = caption_kind_and_label(caption_text, float_block.block_type)
+            if kind == "algorithm" and float_block.block_type == "figure":
+                float_block.block_type = "algorithm"
+                float_block.marker = "algorithm_phase0_figure_fallback"
+                float_block.label = label_match.group("label").strip() if label_match else None
             self.add_block("caption", caption_text, parent_id=float_block.block_id, marker=kind, label=label)
         return index
 
@@ -849,6 +932,20 @@ def build_test_items(blocks: list[ComparisonBlock]) -> dict[str, Any]:
 def document_body(tex: str) -> str:
     match = re.search(r"\\begin\s*\{\s*document\s*\}(?P<body>.*)\\end\s*\{\s*document\s*\}", tex, re.DOTALL)
     return match.group("body") if match else tex
+
+
+def preamble_front_matter_commands(tex: str) -> str:
+    begin_match = re.search(r"\\begin\s*\{\s*document\s*\}", tex)
+    if begin_match is None:
+        return ""
+    preamble = tex[: begin_match.start()]
+    commands: list[str] = []
+    for match in re.finditer(r"\\(?:title|author)\*?", preamble):
+        after = skip_optional_args(preamble, match.end())
+        _text, close = read_braced(preamble, after)
+        if close > after:
+            commands.append(preamble[match.start() : close])
+    return "\n".join(commands)
 
 
 def env_name_from_token(token: str) -> str:
@@ -967,6 +1064,42 @@ def latex_text(value: str) -> str:
     return " ".join(text.split())
 
 
+def latex_caption_text(value: str) -> str:
+    """Return caption text for comparison while preserving visible math tokens."""
+
+    text = str(value or "")
+    text = SILENT_LATEX_DOUBLE_ARG_COMMAND_RE.sub(" ", text)
+    text = SILENT_LATEX_ARG_COMMAND_RE.sub(" ", text)
+    text = CITATION_RE.sub(lambda match: " [" + ",".join(key.strip() for key in match.group("keys").split(",")) + "] ", text)
+    text = re.sub(r"\\(?:ref|autoref|cref|Cref|eqref)\s*\{([^}]+)\}", r" \1 ", text)
+    text = re.sub(r"\\\[(.*?)\\\]", r" \1 ", text, flags=re.DOTALL)
+    text = re.sub(DISPLAY_DOLLAR_MATH_PATTERN, lambda match: " " + match.group(0).strip("$") + " ", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\\)\$(.*?)(?<!\\)\$", r" \1 ", text, flags=re.DOTALL)
+    text = re.sub(r"\\\((.*?)\\\)", r" \1 ", text, flags=re.DOTALL)
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?\s*\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\[a-zA-Z]+\*?(?:\s*\[[^\]]*\])?", " ", text)
+    text = re.sub(r"[_^]\s*\{([^{}]*)\}", r" \1 ", text)
+    text = re.sub(r"[_^]\s*([A-Za-z0-9])", r" \1 ", text)
+    text = re.sub(r"\\([#$%&_{}])", r"\1", text)
+    replacements = {
+        "~": " ",
+        r"\&": "&",
+        r"\%": "%",
+        r"\_": "_",
+        r"\#": "#",
+        "---": "-",
+        "--": "-",
+        "``": '"',
+        "''": '"',
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return " ".join(text.split())
+
+
 def is_latex_structural_residue(text: str) -> bool:
     """Return true for standalone TeX layout fragments, not real content."""
 
@@ -1004,6 +1137,17 @@ def normalize_for_compare(text: str) -> str:
     value = re.sub(r"\[(?:display_)?math\]", " math ", value)
     value = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", value)
     return " ".join(value.split())
+
+
+def normalize_caption_for_compare(text: str, kind: str | None = None) -> str:
+    value = latex_caption_text(text)
+    match = CAPTION_TEXT_RE.match(value)
+    if match:
+        value = match.group("text") or ""
+    normalized = normalize_for_compare(value)
+    if normalized:
+        return normalized
+    return normalize_for_compare(text)
 
 
 def extract_latex_citations(text: str) -> list[str]:
@@ -1073,6 +1217,11 @@ def normalize_captionof_kind(kind: str | None) -> str | None:
     if value in {"algorithm", "alg"}:
         return "algorithm"
     return None
+
+
+def is_algorithm_label(label: str | None) -> bool:
+    value = str(label or "").strip().casefold()
+    return value.startswith(("alg:", "algorithm:"))
 
 
 def strip_markdown_inline(text: str) -> str:

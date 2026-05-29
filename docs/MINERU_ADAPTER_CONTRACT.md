@@ -1,6 +1,6 @@
 # MinerU Adapter Contract
 
-**Last updated**: 2026-05-20
+**Last updated**: 2026-05-24
 
 This contract defines the boundary between MinerU-style document extraction and
 the maintained PDF2LaTeX-NN pipeline. MinerU is a replaceable frontend. The
@@ -11,26 +11,45 @@ rest of the system should depend on `DocumentIR`, not on MinerU internals.
 ```text
 src/perception/content_resolver.py
 src/adapters/mineru_v7_document_ir.py
+src/perception/mineru_v8_reflow.py
+src/adapters/mineru_v8_document_ir.py
 src/ir/schema.py
 src/ir/validators.py
 src/pipeline/v7_contract.py
 ```
 
-`content_resolver.py` chooses the best full v7 JSON from explicit roots.
-`mineru_v7_document_ir.py` converts that JSON to `DocumentIR`.
-`v7_contract.py` validates source-json and graph compatibility.
+`mineru_v8_reflow.py` is the current default frontend normalizer. It starts
+from MinerU `middle.json`, repairs reading order, and emits a v7-compatible v8
+logical payload. `mineru_v8_document_ir.py` converts that payload to
+`DocumentIR`.
+
+`content_resolver.py`, `mineru_v7_document_ir.py`, and `v7_contract.py` remain
+for the optional v7/GNN relation branch and historical graph compatibility.
 
 ## Input Contract
 
-The canonical frontend artifact is:
+The current default frontend inputs are:
+
+```text
+middle.json                         primary body text, line/block geometry
+content_list.json                   asset/caption/table sidecar
+content_list_v7_styles.json         optional style sidecar
+```
+
+The current default normalized artifact is:
+
+```text
+content_list_v8.json
+```
+
+For the optional v7/GNN relation branch, the canonical frontend artifact remains:
 
 ```text
 content_list_v7_styles.json
 ```
 
-The adapter accepts MinerU output only after it has been normalized into the v7
-fact-layer shape. A record may contain extra fields, but these fields are the
-stable minimum:
+Both v8 and v7 adapters produce the same `DocumentIR` contract. A normalized
+record may contain extra fields, but these fields are the stable minimum:
 
 | Field | Meaning | Required |
 | --- | --- | --- |
@@ -74,11 +93,13 @@ Required invariants:
 
 ## Full-v7 First Rule
 
-The full v7 JSON and `DocumentIR` are the complete fact layer. The GNN view is a
-filtered or proxied training view built later by `GNNViewAdapter`.
+The full normalized frontend payload and `DocumentIR` are the complete fact
+layer. In the current default path this is v8. In optional relation experiments
+this can still be v7. The GNN view is a filtered or proxied training view built
+later by `GNNViewAdapter`.
 
 ```text
-full v7 fact layer
+full normalized fact layer
   -> DocumentIR for generation/evaluation
   -> GNNViewAdapter for graph learning
 ```
@@ -139,4 +160,3 @@ When MinerU changes version or output format:
 - The adapter does not decide final section parentage.
 - The adapter does not delete content to improve GNN training.
 - The adapter does not recover the author's source-level TeX AST.
-

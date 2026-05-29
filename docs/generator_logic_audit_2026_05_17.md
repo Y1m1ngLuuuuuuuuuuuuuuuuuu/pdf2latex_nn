@@ -31,18 +31,21 @@ The final renderer must always consume complete document facts, otherwise
 title, authors, header/footer, footnotes, floats and full style spans disappear
 or get misclassified as noise.
 
-## Production Entrypoints
+## Entrypoints
 
 | Entrypoint | Current role |
 | --- | --- |
 | `scripts/pipeline/run_v8_layout_reconstruction.py` | Current default v8 reconstruction entrypoint. Consumes `middle.json`, optional `content_list.json`, optional style sidecar, and renders without GNN. |
-| `scripts/pipeline/step5_generate_tex.py` | Single-document canonical inference/generation entry. Defaults to `--renderer ir` and `--heading-skeleton-mode stack`. |
-| `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper only. It now forwards `--renderer ir` and `--heading-skeleton-mode stack` to `step5_generate_tex.py`. |
-| `scripts/pipeline/run_layout_aware_reconstruction.py` | Current default no-GNN layout-aware E2E reconstruction entrypoint. It keeps the full-v7 IR renderer but ignores legacy checkpoint arguments. |
-| `scripts/pipeline/run_current_e2e_comparison.py` | Compatibility wrapper for `run_layout_aware_reconstruction.py`; current paper-facing E2E no longer loads learned GNN logits by default. |
-| `scripts/pipeline/batch_visual_qa_inference.py` | Batch E2E visual QA path. Defaults to the IR renderer and stack heading skeleton. |
-| `scripts/pipeline/run_e2e_inference.py` | Full E2E front-end + inference + compile path. Defaults to the IR renderer and stack heading skeleton. |
-| `scripts/pipeline/run_m05_e2e_comparison.py` | Locked-model comparison wrapper. Defaults to the IR renderer and stack heading skeleton. |
+| `scripts/pipeline/step5_generate_tex.py` | Legacy/optional v7-GNN single-document generation entrypoint. Use only for explicit relation-branch experiments. |
+| `scripts/pipeline/step5_run_inference.py` | Compatibility wrapper for the legacy/optional v7-GNN path. |
+| `scripts/pipeline/run_layout_aware_reconstruction.py` | Historical no-GNN v7 layout-aware wrapper; superseded as default by v8. |
+| `scripts/pipeline/run_current_e2e_comparison.py` | Historical comparison wrapper for old current E2E reports. |
+| `scripts/pipeline/batch_visual_qa_inference.py` | Legacy/optional v7-GNN visual QA batch runner. |
+| `scripts/pipeline/run_e2e_inference.py` | Legacy/optional v7-GNN front-end + inference + compile path. |
+| `scripts/pipeline/run_m05_e2e_comparison.py` | Locked-model comparison wrapper for historical GNN experiments. |
+
+The single current production command/output contract is
+`docs/V8_MAINLINE_RECONSTRUCTION_PATH.md`.
 
 `src.generation.latex_helpers` provides low-level LaTeX helper functions used
 by the IR renderer. `src.generation.latex_renderer` is a deprecated standalone

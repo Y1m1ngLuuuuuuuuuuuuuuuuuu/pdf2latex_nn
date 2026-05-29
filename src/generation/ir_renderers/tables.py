@@ -9,7 +9,7 @@ class TableRenderer:
     block_types = frozenset({BlockType.TABLE})
 
     def render(self, context: RenderContext) -> str:
-        return context.owner._render_table(context.source_nodes, context.text)
+        return context.owner._render_table(context.source_nodes, context.text, render_node=context.node)
 
     def render_document_node(self, context: DocumentNodeRenderContext) -> str:
         return context.owner._render_table([context.node], context.text)

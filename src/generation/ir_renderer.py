@@ -24,6 +24,7 @@ from src.generation.latex_helpers import (
     render_figure_block,
     render_figure_minipage_group,
     render_algorithm_block,
+    render_algorithm_region_phase0,
     render_inline_math,
     render_table_placeholder,
     render_text_with_inline_latex,
@@ -77,6 +78,8 @@ class IRLatexRenderConfig:
     title: str | None = None
     include_maketitle: bool = True
     front_matter_mode: str = "maketitle"
+    front_matter_ir: FrontMatterIR | None = None
+    front_matter_renderer_experimental: bool = False
     table_asset_output_dir: Path | None = None
     figure_asset_output_dir: Path | None = None
     table_asset_latex_prefix: str = "assets"
@@ -153,9 +156,15 @@ class OriginalLikeIRLatexRenderer:
 
         lines = self._render_preamble(style, citations, tree)
         title = self.config.title or self._infer_title(document)
-        extracted_front_matter = self._front_matter_for_original_like(document, tree)
+        experimental_front_matter = self._front_matter_for_renderer_phase0()
+        extracted_front_matter = None if experimental_front_matter is not None else self._front_matter_for_original_like(document, tree)
         use_maketitle = self._use_maketitle()
-        if title and use_maketitle:
+        if experimental_front_matter is not None:
+            phase0_preamble = self._front_matter_phase0_preamble_lines(experimental_front_matter)
+            if phase0_preamble:
+                lines.extend(phase0_preamble)
+                lines.append("")
+        elif title and use_maketitle:
             lines.extend([rf"\title{{{escape_latex(title)}}}", r"\date{}", ""])
         lines.append(r"\begin{document}")
         if self.config.render_header_footer and _header_footer_profile_enabled(style):
@@ -164,7 +173,12 @@ class OriginalLikeIRLatexRenderer:
             # repeated running headers are printed above the title and look like
             # duplicated document text.  Keep running headers for later pages.
             lines.append(r"\thispagestyle{plain}")
-        if title and use_maketitle:
+        if experimental_front_matter is not None:
+            front_lines = self._render_front_matter_renderer_phase0(experimental_front_matter)
+            if front_lines:
+                lines.extend(front_lines)
+                lines.append("")
+        elif title and use_maketitle:
             lines.append(r"\maketitle")
             lines.append("")
         elif extracted_front_matter is not None:
@@ -371,6 +385,80 @@ class OriginalLikeIRLatexRenderer:
             return None
         return extracted
 
+    def _front_matter_for_renderer_phase0(self) -> FrontMatterIR | None:
+        if not self.config.front_matter_renderer_experimental:
+            return None
+        front_matter = self.config.front_matter_ir
+        if front_matter is None or not front_matter.all_spans():
+            return None
+        return front_matter
+
+    def _front_matter_phase0_preamble_lines(self, front_matter: FrontMatterIR) -> list[str]:
+        lines: list[str] = []
+        if front_matter.title is not None and self._front_matter_span_is_renderable(front_matter.title):
+            title = _compact_front_matter_line(front_matter.title.text)
+            if title:
+                lines.append(rf"\title{{{escape_latex(title)}}}")
+        author_lines = self._front_matter_phase0_author_lines(front_matter)
+        if author_lines:
+            lines.append(r"\author{" + r" \\ ".join(author_lines) + "}")
+        if lines:
+            lines.append(r"\date{}")
+        return lines
+
+    def _render_front_matter_renderer_phase0(self, front_matter: FrontMatterIR) -> list[str]:
+        lines: list[str] = []
+        has_title = front_matter.title is not None and self._front_matter_span_is_renderable(front_matter.title)
+        has_author = bool(self._front_matter_phase0_author_lines(front_matter))
+        if has_title or has_author:
+            lines.append(r"\maketitle")
+            if has_title and front_matter.title is not None:
+                self._consume_front_matter_span(front_matter.title)
+            for span in [*front_matter.authors, *front_matter.affiliations, *front_matter.emails]:
+                if self._front_matter_span_is_renderable(span):
+                    self._consume_front_matter_span(span)
+
+        if front_matter.abstract is not None and front_matter.abstract.body is not None:
+            body = front_matter.abstract.body.text.strip()
+            if body and self._front_matter_span_is_renderable(front_matter.abstract.body):
+                lines.extend(
+                    [
+                        r"\begin{abstract}",
+                        render_text_with_citations(body),
+                        r"\end{abstract}",
+                    ]
+                )
+                if front_matter.abstract.title is not None:
+                    self._consume_front_matter_span(front_matter.abstract.title)
+                self._consume_front_matter_span(front_matter.abstract.body)
+        return lines
+
+    def _front_matter_phase0_author_lines(self, front_matter: FrontMatterIR) -> list[str]:
+        rendered: list[str] = []
+        seen: set[str] = set()
+        for span in [*front_matter.authors, *front_matter.affiliations]:
+            if not self._front_matter_span_is_renderable(span):
+                continue
+            for line in _front_matter_text_lines(span.text):
+                key = _front_matter_dedupe_key(line)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                rendered.append(escape_latex(line))
+        for span in front_matter.emails:
+            if not self._front_matter_span_is_renderable(span):
+                continue
+            for line in _front_matter_text_lines(span.text):
+                key = _front_matter_dedupe_key(line)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                rendered.append(rf"\texttt{{{escape_latex(line)}}}")
+        return rendered
+
+    def _front_matter_span_is_renderable(self, span: FrontMatterSpan) -> bool:
+        return bool(span.text.strip()) and float(span.confidence or 0.0) >= 0.62
+
     def _render_extracted_front_matter(
         self,
         front_matter: FrontMatterIR,
@@ -503,6 +591,8 @@ class OriginalLikeIRLatexRenderer:
         if self._should_skip_consumed_front_matter(node, source_nodes):
             return ""
         if self._should_skip_consumed_float_caption(node, source_nodes, text):
+            return ""
+        if node.attributes.get("algorithm_region_consumed"):
             return ""
 
         context = RenderContext(
@@ -1123,6 +1213,8 @@ class OriginalLikeIRLatexRenderer:
         if not any(_span_has_visible_inline_style(span, node, self._active_style) for span in node.spans):
             return False
         canonical = _compact_span_coverage_text(text or node.text)
+        if not _span_sequence_starts_at_canonical_text(node.spans, canonical):
+            return False
         if len(canonical) < 60:
             return True
         span_text = " ".join(str(span.text or "") for span in node.spans if str(span.text or "").strip())
@@ -1190,7 +1282,14 @@ class OriginalLikeIRLatexRenderer:
             return "subscript"
         return None
 
-    def _render_table(self, source_nodes: list[DocumentNode], text: str) -> str:
+    def _render_table(
+        self,
+        source_nodes: list[DocumentNode],
+        text: str,
+        *,
+        render_node: RenderTreeNode | None = None,
+    ) -> str:
+        layout_caption = _layout_caption_from_render_node(render_node, "table")
         if source_nodes:
             primary = _primary_table_node(source_nodes)
             if primary.metadata.get("table_group_primary") is False:
@@ -1200,14 +1299,22 @@ class OriginalLikeIRLatexRenderer:
                 return ""
             self._rendered_float_groups.add(render_key)
             record = document_node_record(primary)
+            if layout_caption:
+                record["table_caption"] = layout_caption
             source_layout = self._match_source_table_layout(primary, text)
             if source_layout is not None:
                 record["source_table_layout"] = source_layout.to_record()
             label = self._cross_ref_label_for_document_node(primary, "table")
-            self._remember_float_caption(text or primary.text, "table")
+            caption_text = layout_caption or text or primary.text
+            cleaned_caption = clean_float_caption_text(caption_text, "table")
+            if cleaned_caption and self._float_caption_already_rendered(cleaned_caption, "table"):
+                caption_text = ""
+                _clear_table_caption_metadata(record)
+            elif cleaned_caption:
+                self._remember_float_caption(cleaned_caption, "table")
             return render_table_placeholder(
                 record,
-                text or primary.text,
+                caption_text,
                 source_pdf=primary.metadata.get("source_pdf") if self.config.table_asset_output_dir else None,
                 asset_output_dir=self.config.table_asset_output_dir,
                 asset_latex_prefix=self.config.table_asset_latex_prefix,
@@ -1215,7 +1322,14 @@ class OriginalLikeIRLatexRenderer:
                 wide_float=True,
                 label=label,
             )
-        return render_table_placeholder({"type": "table", "text": text}, text, as_nonfloat=self._mixed_column_stack > 0, wide_float=True)
+        caption_text = layout_caption or text
+        cleaned_caption = clean_float_caption_text(caption_text, "table")
+        if cleaned_caption and self._float_caption_already_rendered(cleaned_caption, "table"):
+            caption_text = ""
+            layout_caption = ""
+        elif cleaned_caption:
+            self._remember_float_caption(cleaned_caption, "table")
+        return render_table_placeholder({"type": "table", "text": caption_text, "table_caption": layout_caption}, caption_text, as_nonfloat=self._mixed_column_stack > 0, wide_float=True)
 
     def _match_source_table_layout(self, primary: DocumentNode, text: str) -> SourceTableLayout | None:
         layout = self._active_source_float_layout
@@ -1252,17 +1366,19 @@ class OriginalLikeIRLatexRenderer:
         citations: CitationResolution | None = None,
         *,
         document_nodes: dict[str, DocumentNode] | None = None,
+        render_node: RenderTreeNode | None = None,
     ) -> str:
-        caption = text or "Figure"
+        layout_caption = _layout_caption_from_render_node(render_node, "figure")
+        caption = layout_caption or text or "Figure"
         primary = _primary_visual_node(source_nodes, BlockType.FIGURE)
         metadata_caption = _figure_caption_from_metadata(primary, source_nodes)
-        if metadata_caption:
+        if metadata_caption and not layout_caption:
             caption = metadata_caption
         caption_from_citations = False
-        if not metadata_caption and citations is not None and primary is not None and primary.node_id in citations.text_by_node_id:
+        if not layout_caption and not metadata_caption and citations is not None and primary is not None and primary.node_id in citations.text_by_node_id:
             caption = citations.text_by_node_id[primary.node_id]
             caption_from_citations = True
-        if source_nodes and not caption_from_citations and not metadata_caption:
+        if source_nodes and not layout_caption and not caption_from_citations and not metadata_caption:
             for node in source_nodes:
                 value = (
                     node.metadata.get("figure_group_caption")
@@ -1275,7 +1391,7 @@ class OriginalLikeIRLatexRenderer:
                     break
         if primary is not None:
             members = _figure_group_members(primary, source_nodes, document_nodes)
-            if not metadata_caption:
+            if not layout_caption and not metadata_caption:
                 member_caption = _figure_caption_from_metadata(primary, members)
                 if member_caption:
                     caption = member_caption
@@ -1287,8 +1403,11 @@ class OriginalLikeIRLatexRenderer:
             if any(render_key in self._rendered_float_groups for render_key in render_keys):
                 return ""
             self._rendered_float_groups.update(render_keys)
-            caption = clean_float_caption_text(caption, "figure") or "Figure"
-            self._remember_float_caption(caption, "figure")
+            caption = clean_float_caption_text(caption, "figure")
+            if caption and self._float_caption_already_rendered(caption, "figure"):
+                caption = ""
+            if caption:
+                self._remember_float_caption(caption, "figure")
             label_source = _figure_label_source_node(members, primary)
             if len(members) > 1 and _should_render_figure_minipages(members):
                 return render_figure_minipage_group(
@@ -1303,9 +1422,12 @@ class OriginalLikeIRLatexRenderer:
                     label=self._cross_ref_label_for_document_node(label_source, "figure"),
                 )
         else:
-            caption = clean_float_caption_text(caption, "figure") or "Figure"
+            caption = clean_float_caption_text(caption, "figure")
+            if caption and self._float_caption_already_rendered(caption, "figure"):
+                caption = ""
         record = document_node_record(primary) if primary is not None else {"type": "figure", "text": caption}
-        self._remember_float_caption(caption, "figure")
+        if caption:
+            self._remember_float_caption(caption, "figure")
         return render_figure_block(
             record,
             caption,
@@ -1324,6 +1446,7 @@ class OriginalLikeIRLatexRenderer:
         text: str,
         *,
         label: str | None = None,
+        render_node: RenderTreeNode | None = None,
     ) -> str:
         """Render algorithms as visual crops when PDF geometry is available.
 
@@ -1335,6 +1458,9 @@ class OriginalLikeIRLatexRenderer:
         source PDF.
         """
 
+        if render_node is not None and render_node.attributes.get("algorithm_region_phase0"):
+            return self._render_algorithm_region_phase0(source_nodes, text, label=label, render_node=render_node)
+
         primary = _primary_visual_node(source_nodes, BlockType.ALGORITHM)
         if primary is None and source_nodes:
             primary = min(source_nodes, key=lambda node: node.reading_index)
@@ -1342,7 +1468,12 @@ class OriginalLikeIRLatexRenderer:
             return render_algorithm_block(text, label=label)
 
         record = document_node_record(primary)
-        caption = _algorithm_caption_from_node(primary, text)
+        layout_caption = _layout_caption_from_render_node(render_node, "algorithm")
+        caption = (
+            clean_float_caption_text(layout_caption, "algorithm")
+            if layout_caption
+            else _algorithm_caption_from_node(primary, text)
+        )
         asset_path = ensure_pdf_region_crop(
             record,
             source_pdf=_source_pdf_for_node(primary),
@@ -1360,16 +1491,67 @@ class OriginalLikeIRLatexRenderer:
         # the crop shrink inside the algorithm float; instead, let the crop
         # occupy the full available algorithm frame.
         lines = [r"\begin{algorithm}[H]", r"\centering", rf"\includegraphics[width=1.000\linewidth]{{{asset_path}}}"]
+        if caption and self._float_caption_already_rendered(caption, "algorithm"):
+            caption = ""
         if caption:
+            self._remember_float_caption(caption, "algorithm")
             lines.append(rf"\caption{{{render_text_with_inline_latex(caption)}}}")
         if label:
             lines.append(rf"\label{{{label}}}")
         lines.append(r"\end{algorithm}")
         return "\n".join(lines)
 
+    def _render_algorithm_region_phase0(
+        self,
+        source_nodes: list[DocumentNode],
+        text: str,
+        *,
+        label: str | None = None,
+        render_node: RenderTreeNode,
+    ) -> str:
+        region = render_node.attributes.get("algorithm_region")
+        region = region if isinstance(region, dict) else {}
+        caption = str(render_node.attributes.get("algorithm_caption") or region.get("algorithm_caption") or "")
+        body = str(render_node.attributes.get("algorithm_body") or region.get("algorithm_body") or text or "")
+        render_policy = str(render_node.attributes.get("render_policy") or region.get("render_policy") or "verbatim_fallback")
+        primary = source_nodes[0] if source_nodes else None
+        asset_path = None
+        if render_policy == "crop_fallback" and primary is not None:
+            record = document_node_record(primary)
+            asset_path = ensure_pdf_region_crop(
+                record,
+                source_pdf=_source_pdf_for_node(primary),
+                asset_output_dir=self.config.figure_asset_output_dir or self.config.table_asset_output_dir,
+                asset_latex_prefix=self.config.figure_asset_latex_prefix,
+                kind="algorithm",
+                bbox_keys=("algorithm_group_bbox", "code_group_bbox", "bbox"),
+                id_keys=("algorithm_group_id", "code_group_id", "node_id", "id", "block_id", "global_order", "original_index", "mineru_block_idx"),
+            )
+            if not asset_path:
+                render_policy = "verbatim_fallback" if body.strip() else "caption_only_placeholder"
+        if not body.strip() and caption:
+            render_policy = "caption_only_placeholder"
+        if caption and self._float_caption_already_rendered(caption, "algorithm"):
+            caption = ""
+        if caption:
+            self._remember_float_caption(caption, "algorithm")
+        label = label or _algorithm_region_phase0_label(region)
+        return render_algorithm_region_phase0(
+            caption=caption,
+            body=body,
+            asset_path=asset_path,
+            label=label,
+            render_policy=render_policy,
+        )
+
     def _remember_float_caption(self, text: str, kind: str) -> None:
         for key in _float_caption_dedup_keys(text, kind):
             self._consumed_float_caption_keys.add(key)
+
+    def _float_caption_already_rendered(self, text: str, kind: str) -> bool:
+        if not text or not self._consumed_float_caption_keys:
+            return False
+        return any(key in self._consumed_float_caption_keys for key in _float_caption_dedup_keys(text, kind))
 
     def _should_skip_consumed_front_matter(
         self,
@@ -1378,6 +1560,9 @@ class OriginalLikeIRLatexRenderer:
     ) -> bool:
         if not self._consumed_front_matter_source_ids or not node.source_node_ids:
             return False
+        if node.role in {RenderRole.DOCUMENT_TITLE, RenderRole.AUTHOR_BLOCK, RenderRole.ABSTRACT, RenderRole.TOC_PLACEHOLDER}:
+            if any(source_id in self._consumed_front_matter_source_ids for source_id in node.source_node_ids):
+                return True
         if not all(source_id in self._consumed_front_matter_source_ids for source_id in node.source_node_ids):
             return False
         if node.role in {RenderRole.DOCUMENT_TITLE, RenderRole.AUTHOR_BLOCK, RenderRole.ABSTRACT, RenderRole.TOC_PLACEHOLDER}:
@@ -1392,13 +1577,15 @@ class OriginalLikeIRLatexRenderer:
         source_nodes: list[DocumentNode],
         text: str,
     ) -> bool:
+        if node.attributes.get("float_caption_consumed"):
+            return True
         if not text or not self._consumed_float_caption_keys:
             return False
-        if node.role in {RenderRole.FIGURE, RenderRole.TABLE}:
+        if node.role in {RenderRole.FIGURE, RenderRole.TABLE, RenderRole.ALGORITHM}:
             return False
         if not _render_node_is_caption_like(node, source_nodes, text):
             return False
-        for kind in ("figure", "table"):
+        for kind in ("figure", "table", "algorithm"):
             if any(key in self._consumed_float_caption_keys for key in _float_caption_dedup_keys(text, kind)):
                 return True
         return False
@@ -1628,6 +1815,22 @@ def render_text_with_citations(text: str, *, strip: bool = True) -> str:
     return output.strip() if strip else output
 
 
+def _front_matter_text_lines(text: str) -> list[str]:
+    lines = [_compact_front_matter_line(line) for line in str(text or "").splitlines()]
+    if len(lines) <= 1:
+        lines = [_compact_front_matter_line(str(text or ""))]
+    return [line for line in lines if line]
+
+
+def _compact_front_matter_line(text: str) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    return value.strip(" ;,")
+
+
+def _front_matter_dedupe_key(text: str) -> str:
+    return re.sub(r"\W+", "", str(text or "").casefold())
+
+
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
@@ -1804,7 +2007,7 @@ def _render_node_is_caption_like(node: RenderTreeNode, source_nodes: list[Docume
         return True
     if any(_document_node_is_caption_like(source) for source in source_nodes):
         return True
-    return bool(re.match(r"^\s*(?:Fig(?:ure)?|Table)\s*[\dA-ZIVXLCDM]", str(text or ""), re.IGNORECASE))
+    return bool(re.match(r"^\s*(?:Fig(?:ure)?|Table|Algorithm|Alg\.?)\s*[\dA-ZIVXLCDM]", str(text or ""), re.IGNORECASE))
 
 
 def _document_node_is_caption_like(node: DocumentNode) -> bool:
@@ -1825,6 +2028,8 @@ def _document_node_is_caption_like(node: DocumentNode) -> bool:
             "image_group_caption",
             "table_caption",
             "table_group_caption",
+            "algorithm_caption",
+            "algorithm_group_caption",
         )
     ):
         return True
@@ -2247,6 +2452,14 @@ def _sanitize_cross_ref_number(value: str) -> str:
 
 def _sanitize_cross_ref_label(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z:._-]+", "_", str(value or "").strip()).strip("_")
+
+
+def _algorithm_region_phase0_label(region: dict[str, Any]) -> str:
+    region_id = str(region.get("region_id") or region.get("doc_id") or "algorithm_region")
+    safe = _sanitize_cross_ref_label(region_id.replace(":", "_"))
+    if not safe.startswith("alg:"):
+        safe = f"alg:{safe}"
+    return safe
 
 
 def _safe_render_id(value: str) -> str:
@@ -3413,8 +3626,25 @@ def _clean_algorithm_caption_candidate(text: str) -> str:
         return ""
     title = match.group("title").strip()
     if not title or len(title) > 120:
-        return "Algorithm"
+        return ""
     return clean_float_caption_text(title, "algorithm") or title
+
+
+def _clear_table_caption_metadata(record: dict[str, object]) -> None:
+    for key in ("table_group_caption", "table_caption", "caption"):
+        record.pop(key, None)
+
+
+def _layout_caption_from_render_node(node: RenderTreeNode | None, kind: str) -> str:
+    if node is None:
+        return ""
+    payload = node.attributes.get("float_caption_layout_caption")
+    if not isinstance(payload, dict):
+        return ""
+    text = str(payload.get("text") or payload.get("normalized_caption_text") or "").strip()
+    if not text:
+        return ""
+    return clean_float_caption_text(text, kind)
 
 
 def _should_render_figure_minipages(nodes: list[DocumentNode]) -> bool:
@@ -3689,6 +3919,33 @@ def _span_has_visible_inline_style(span: StyleSpan, node: DocumentNode, style: S
     info = resolve_pdf_font(span.font_name)
     if info is not None and info.font_class not in {"math", body_font_class}:
         return True
+    return False
+
+
+def _span_sequence_starts_at_canonical_text(spans: list[StyleSpan], canonical_compact: str) -> bool:
+    """Reject span-sidecar text that starts before the canonical node text.
+
+    V8 treats middle.json as the canonical text surface.  PyMuPDF/style spans
+    are allowed to describe typography, but they must not become a second text
+    source.  A common failure mode is a span sequence whose first visible span
+    contains the tail of the previous paragraph followed by the current node's
+    text.  Coverage can look high, so explicitly require the first meaningful
+    span to align at the beginning of the canonical text.
+    """
+
+    if not canonical_compact:
+        return True
+    for span in spans:
+        raw_text = str(span.text or "")
+        compact = _compact_span_coverage_text(raw_text)
+        if not compact:
+            continue
+        if _is_orphan_ocr_noise_span(raw_text, canonical_compact):
+            continue
+        if len(compact) < 8:
+            return canonical_compact.startswith(compact)
+        probe_len = min(len(compact), max(8, min(32, len(canonical_compact))))
+        return canonical_compact.startswith(compact[:probe_len])
     return False
 
 

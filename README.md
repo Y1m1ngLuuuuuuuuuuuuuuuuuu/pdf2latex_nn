@@ -1,6 +1,6 @@
 # PDF2LaTeX NN
 
-**Last updated**: 2026-05-24
+**Last updated**: 2026-05-26
 
 PDF2LaTeX NN is a layout-aware PDF-to-LaTeX reconstruction pipeline for
 born-digital research papers. It does not treat PDF conversion as plain OCR, and
@@ -31,7 +31,8 @@ schema. It exists because MinerU content-list merging can combine text before
 the reading order is corrected; v8 rebuilds logical content from `middle.json`
 line/block evidence first, then reuses the existing IR renderer.
 
-The GNN relation model is retained as an explicit experimental branch:
+The historical GNN relation model is retained only as an archived/optional
+research branch:
 
 ```text
 relation-learning branch:
@@ -51,7 +52,8 @@ historical float-proxy branch:
 ```
 
 Do not use GNN view as a renderer source. Generation must consume full
-`DocumentIR` / `RenderTreeIR`.
+`DocumentIR` / `RenderTreeIR`. As of 2026-05-26, the v8 atomic MERGE / learned
+overlay route is archived and is not part of the production path.
 
 ## Current Default Capabilities
 
@@ -98,13 +100,15 @@ RenderTreeIR            decoder/render structure
 StyleProfile            page/style/template profile
 CitationResolution      citation/reference repair state
 
-GNNViewAdapter          optional graph-visible view for relation experiments
+GNNViewAdapter          archived/optional graph-visible view for relation experiments
 GraphInput.pt           optional node/edge tensors
 GraphLabels             optional TeX-derived edge labels over the GNN view
 PredictedRelations      optional GNN output probabilities
 ```
 
 See [docs/frontend_backend_contract_v1.md](docs/frontend_backend_contract_v1.md).
+The single current production command/output contract is
+[docs/V8_MAINLINE_RECONSTRUCTION_PATH.md](docs/V8_MAINLINE_RECONSTRUCTION_PATH.md).
 
 ## Key Scripts
 
@@ -116,43 +120,31 @@ python scripts/pipeline/run_v8_layout_reconstruction.py \
   --content-list-json <path/to/*_content_list.json> \
   --style-content-list-json <path/to/*_content_list_v7_styles.json> \
   --pdf <path/to/original.pdf> \
-  --output-dir data/09_eval_reports/<run_tag>/<doc_id> \
+  --output-dir data/09_eval_reports/v8_reflow_<YYYYMMDD>/<doc_id>_<run_tag> \
   --compile-engine auto
 
-# Optional: rebuild graph tensors and relabel existing v7 content for GNN studies
-bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
-
-# Optional: train the GATv2/Y-Network relation model
-python scripts/pipeline/train_edge_gnn_full.py ...
-
-# Optional: generate ablation commands
-python scripts/pipeline/prepare_ablation_suite.py \
-  --matrix configs/ablation_matrix_v7_adapteraware_20260514_2109.json \
-  --output-sh data/08_runs/run_ablation_matrix_v7_adapteraware_20260514_2109.sh
+# Archived relation-learning scripts still exist for traceability, but they are
+# no longer part of the default reconstruction workflow.
 ```
 
 The current 00050 v8 smoke command is documented in
 [docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md](docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md).
 
-Optional GNN rebuild/relabel command pattern:
-
-```bash
-TAG=v7_floatproxy_adapter_$(date +%Y%m%d_%H%M%S) \
-INPUT_MANIFEST=data/00_manifests/v7_layers_epigraph_20260514_0238_trainable_recall98.json \
-WORKERS=4 \
-PYTHON_BIN=/root/miniconda3/envs/pdf2latex/bin/python \
-EMBEDDING_DEVICE=cpu \
-bash scripts/pipeline/run_current_v7_rebuild_relabel.sh
-```
-
 Current paper-facing evaluation and historical GNN ablations are still kept for
-traceability, but the default reconstruction claim should be phrased around the
-v8 layout-aware path.
+traceability, but the default reconstruction claim is now the v8 layout-aware
+deterministic path.
+
+Paragraph/source audits report both legacy body coverage and type-aware
+visible-prose order metrics. The latter excludes front matter, captions,
+references, display math/formula-only blocks, URL/metadata, and OCR/no-render
+artifacts before computing prose-order inversion, adjacent inversion,
+displacement, and LIS-disorder rates.
 
 ## Current Report Layout
 
 ```text
 data/09_eval_reports/v8_reflow_20260523/                 current v8 smoke outputs
+data/09_eval_reports/v8_mainline_final_20260526/         final selected200 v8/GNN-closure summary
 data/09_eval_reports/post_audit_20260519/                post-audit diagnostics
 data/09_eval_reports/targeted_structure_fix_20260519/    targeted diagnostics
 data/09_eval_reports/_archive/                           old preserved runs
@@ -167,7 +159,9 @@ docs/PROJECT_ARCHITECTURE_FULL.md     complete architecture, logic, metrics, and
 docs/PROJECT_PAPER_DESCRIPTION_2026_05_18.md paper-facing full project description
 docs/PROJECT_SOURCE_OF_TRUTH.md      local / GitHub / AutoDL boundary
 docs/PROJECT_OVERVIEW.md             architecture and implementation summary
+docs/V8_MAINLINE_RECONSTRUCTION_PATH.md single current v8 production path contract
 docs/V8_MIDDLE_REFLOW_AND_STYLE_DETECTOR.md current v8 path and parameters
+docs/_archive/v8_gnn_merge_experiments_20260526/ archived v8 atomic MERGE/GNN route
 docs/FRONT_MATTER_ENTITY_MODEL_PLAN.md future author/affiliation/email parser plan
 docs/ENVIRONMENT_SETUP.md             conda/venv setup and dependency profiles
 docs/frontend_backend_contract_v1.md decoupled IR contracts

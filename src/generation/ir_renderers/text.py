@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.generation.ir_renderers.context import DocumentNodeRenderContext, RenderContext
-from src.generation.latex_helpers import strip_list_marker
+from src.generation.latex_helpers import escape_latex, render_inline_math, render_text_with_inline_latex, strip_list_marker
 from src.ir import BlockType, RenderRole
 
 
@@ -39,3 +39,50 @@ class TextRenderer:
         if context.citations and context.node.node_id in context.citations.text_by_node_id:
             return owner._render_body_text(text, node=context.node)
         return owner._render_body_text(text, node=context.node)
+
+
+def render_paragraph_with_inline_math_attachments(
+    text_before: str,
+    inline_formulae: list[str],
+    text_after: str = "",
+) -> str:
+    """Render a paragraph span with attached inline formula fragments.
+
+    The helper is intentionally standalone so Phase 0 tests and future
+    RenderTreeIR materialization can use it without changing the production
+    renderer's default path.
+    """
+
+    parts: list[str] = []
+    before = render_text_with_inline_latex(text_before, strip=False)
+    after = render_text_with_inline_latex(text_after, strip=False)
+    if before:
+        parts.append(before.rstrip())
+    for formula in inline_formulae:
+        rendered = render_inline_math(formula)
+        if rendered:
+            parts.append(rendered)
+    if after:
+        parts.append(after.lstrip())
+    return " ".join(part for part in parts if part).strip()
+
+
+def render_theorem_proof_context(
+    label_text: str,
+    body_text: str = "",
+    *,
+    fallback_plain: bool = False,
+) -> str:
+    """Render theorem/proof-like prose without requiring theorem packages."""
+
+    label = str(label_text or "").strip()
+    body = str(body_text or "").strip()
+    if not label:
+        return render_text_with_inline_latex(body)
+    if fallback_plain:
+        joined = " ".join(part for part in [label, body] if part)
+        return render_text_with_inline_latex(joined)
+    rendered_label = escape_latex(label)
+    rendered_body = render_text_with_inline_latex(body)
+    suffix = f" {rendered_body}" if rendered_body else ""
+    return rf"\noindent\textbf{{{rendered_label}}}{suffix}"
