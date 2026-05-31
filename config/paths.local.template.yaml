@@ -1,0 +1,9 @@
+# Copy to config/paths.local.yaml for a specific machine.
+# Do not commit secrets or machine-private credentials.
+project_root: /home/<user>/projects/pdf2latex_nn
+data_root: /mnt/d/pdf2latex_nn_data
+output_root: /mnt/d/pdf2latex_nn_outputs
+report_root: /mnt/d/pdf2latex_nn_reports
+runtime_root: /mnt/d/pdf2latex_nn_runtime
+paper_root: /mnt/d/pdf2latex_paper
+autodl_root: /root/autodl-tmp/pdf2latex_nn

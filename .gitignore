@@ -5,8 +5,17 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.env
+*.env.*
+!.env.example
 *.pem
 *.key
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials*
+*token*
 kaggle.json
 .kaggle/
 secrets/
@@ -20,6 +29,8 @@ _legacy_reference/
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.ipynb_checkpoints/
 
 .venv/
 .venv_*/
@@ -35,6 +46,12 @@ paper_artifacts/
 reports*/
 demo_*/
 logs*/
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
 
 # Model/checkpoint binaries should be stored in external artifact storage or
 # regenerated on AutoDL, not committed to the source repository.
@@ -81,6 +98,8 @@ tmp_qa_visuals_mergesafe/
 local_outputs/
 audit_bundle_*/
 audit_bundle_*.zip
+data/runtime/
+checkpoints/
 
 # Local transfer/download staging.
 artifacts/local_arxiv_sources/

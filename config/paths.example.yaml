@@ -1,0 +1,7 @@
+project_root: .
+data_root: data
+output_root: outputs
+report_root: data/09_eval_reports
+runtime_root: data/runtime
+paper_root: ../paper
+autodl_root: /root/autodl-tmp/pdf2latex_nn
