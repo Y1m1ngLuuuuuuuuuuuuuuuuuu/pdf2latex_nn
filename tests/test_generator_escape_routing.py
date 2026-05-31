@@ -144,7 +144,7 @@ def test_math_and_raw_latex_paths_are_protected_from_text_escape() -> None:
         ["m", "raw"],
     )
 
-    assert r"$\Delta{}t - C$" in tex
+    assert r"\(\Delta{}t - C\)" in tex
     assert r"\customraw{ϕ_∆}" in tex
 
 

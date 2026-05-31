@@ -25,20 +25,20 @@ def test_greek_sequence_in_text_maps_safely() -> None:
 
 
 def test_existing_latex_command_is_rendered_as_math_not_double_escaped() -> None:
-    assert render_text_with_inline_latex(r"\alpha") == r"$\alpha$"
+    assert render_text_with_inline_latex(r"\alpha") == r"\(\alpha\)"
 
 
 def test_existing_inline_math_is_not_corrupted() -> None:
-    assert render_text_with_inline_latex(r"$x-\phi$") == r"$x-\phi$"
+    assert render_text_with_inline_latex(r"$x-\phi$") == r"\(x-\phi\)"
 
 
 def test_increment_sign_maps_safely_in_text_and_math() -> None:
     assert escape_latex("∆t") == r"\ensuremath{\Delta}t"
-    assert render_inline_math("∆t") == r"$\Delta{}t$"
+    assert render_inline_math("∆t") == r"\(\Delta{}t\)"
 
 
 def test_unicode_minus_maps_safely_inside_math_payload() -> None:
-    assert render_inline_math("− C") == "$- C$"
+    assert render_inline_math("− C") == r"\(- C\)"
 
 
 def test_smart_quotes_and_nonbreaking_space_map_safely() -> None:

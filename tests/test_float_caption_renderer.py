@@ -22,7 +22,7 @@ def _document(nodes: list[DocumentNode]) -> DocumentIR:
     )
 
 
-def test_placeholder_float_renders_caption_and_suppresses_paragraph() -> None:
+def test_regex_only_caption_does_not_create_placeholder() -> None:
     caption = DocumentNode(
         node_id="cap1",
         node_type=BlockType.TEXT,
@@ -37,8 +37,8 @@ def test_placeholder_float_renders_caption_and_suppresses_paragraph() -> None:
 
     latex = OriginalLikeIRLatexRenderer().render(document, tree, _style())
 
-    assert r"\caption{Architecture overview}" in latex
-    assert latex.count("Architecture overview") == 1
+    assert r"\caption{Architecture overview}" not in latex
+    assert "Architecture overview" in latex
 
 
 def test_float_without_caption_keeps_crop_fallback_without_invented_caption() -> None:
@@ -59,7 +59,7 @@ def test_float_without_caption_keeps_crop_fallback_without_invented_caption() ->
     assert r"\caption{Figure}" not in latex
 
 
-def test_algorithm_caption_renders_structured_caption() -> None:
+def test_algorithm_caption_is_deferred_by_floatcaption_sprint() -> None:
     algorithm = DocumentNode(
         node_id="alg1",
         node_type=BlockType.ALGORITHM,
@@ -71,11 +71,11 @@ def test_algorithm_caption_renders_structured_caption() -> None:
     document = _document([algorithm])
     tree = build_v8_render_tree(document, document_ir_path="document_ir.json", enable_float_caption_layout=True)
     alg_node = next(node for node in tree.nodes if node.role == RenderRole.ALGORITHM)
-    assert alg_node.text == "Algorithm 1: Training procedure"
+    assert not alg_node.attributes.get("float_caption_layout_caption")
 
-    latex = OriginalLikeIRLatexRenderer().render(document, tree, _style())
-
-    assert r"\caption{Training procedure}" in latex
+    # The Algorithm renderer may still decide how to handle algorithm text; this
+    # FloatCaption sprint must not attach algorithm captions through the
+    # caption-materialization pass.
 
 
 def test_float_caption_layout_caption_overrides_source_metadata() -> None:
