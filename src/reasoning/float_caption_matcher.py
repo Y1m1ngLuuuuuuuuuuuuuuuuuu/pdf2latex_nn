@@ -551,10 +551,24 @@ def _candidate_from_match(
     )
 
 
+def caption_float_types_compatible(caption_type: str, float_type: str) -> bool:
+    """Return whether a caption type may be attached to a rendered float type."""
+
+    caption_value = str(caption_type or "").casefold()
+    float_value = str(float_type or "").casefold()
+    if caption_value in {"figure", "image", "chart"} and float_value == "figure":
+        return True
+    if caption_value == "table" and float_value == "table":
+        return True
+    if caption_value == "algorithm" and float_value == "algorithm":
+        return True
+    return False
+
+
 def _pairing_score(caption: CaptionCandidate, float_candidate: FloatCandidate) -> tuple[float, dict[str, Any]]:
     score = 0.0
     evidence: dict[str, Any] = {}
-    if caption.caption_type != "unknown" and caption.caption_type == float_candidate.float_type:
+    if caption.caption_type != "unknown" and caption_float_types_compatible(caption.caption_type, float_candidate.float_type):
         score += 0.42
         evidence["type_match"] = True
     elif caption.caption_type != "unknown":
@@ -631,7 +645,7 @@ def _caption_type_from_node(node: DocumentNode) -> str | None:
         node.metadata.get("float_type"),
     ]
     joined = " ".join(str(value or "").casefold() for value in role_values)
-    if "figure" in joined or "image" in joined:
+    if "figure" in joined or "image" in joined or "chart" in joined:
         return "figure"
     if "table" in joined:
         return "table"

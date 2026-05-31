@@ -147,6 +147,58 @@ def ensure_table_pdf_crop(
     )
 
 
+def ensure_existing_table_asset(
+    record: dict[str, Any],
+    *,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+) -> str | None:
+    """Return a usable LaTeX path for an already-extracted table image asset."""
+
+    asset_path = first_existing_asset_path(record, TABLE_ASSET_KEYS)
+    if asset_path is None:
+        return None
+    if asset_output_dir:
+        output_dir = Path(asset_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ext = asset_path.suffix or ".png"
+        table_id = safe_asset_stem(str(record_identifier(record, fallback=0, keys=TABLE_ID_KEYS)))
+        output_path = output_dir / f"table_{table_id}{ext}"
+        if not output_path.exists():
+            try:
+                shutil.copy2(asset_path, output_path)
+            except OSError:
+                return None
+        return latex_asset_path(output_path, asset_output_dir=output_dir, asset_latex_prefix=asset_latex_prefix)
+    return latex_safe_path(asset_path)
+
+
+def ensure_table_visual_asset(
+    record: dict[str, Any],
+    *,
+    source_pdf: str | Path | None = None,
+    asset_output_dir: str | Path | None = None,
+    asset_latex_prefix: str = "assets",
+    padding: float = 3.0,
+) -> str | None:
+    """Resolve a table visual asset, preferring MinerU images before PDF crops."""
+
+    existing = ensure_existing_table_asset(
+        record,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+    )
+    if existing:
+        return existing
+    return ensure_table_pdf_crop(
+        record,
+        source_pdf=source_pdf,
+        asset_output_dir=asset_output_dir,
+        asset_latex_prefix=asset_latex_prefix,
+        padding=padding,
+    )
+
+
 def ensure_figure_pdf_crop(
     record: dict[str, Any],
     *,
@@ -378,6 +430,24 @@ FIGURE_ASSET_KEYS = (
     "image_path",
     "figure_path",
     "asset_path",
+)
+TABLE_ASSET_KEYS = (
+    "table_asset_path",
+    "table_image_path",
+    "table_img_path",
+    "img_path",
+    "image_path",
+    "asset_path",
+)
+TABLE_ID_KEYS = (
+    "table_group_id",
+    "node_id",
+    "id",
+    "block_id",
+    "table_id",
+    "global_order",
+    "original_index",
+    "mineru_block_idx",
 )
 FIGURE_ID_KEYS = (
     "figure_group_id",

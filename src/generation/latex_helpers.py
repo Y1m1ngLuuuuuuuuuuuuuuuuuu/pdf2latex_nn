@@ -1021,6 +1021,7 @@ def render_display_math_fallback(text: str) -> str:
     compact = re.sub(r"\s+", " ", str(text or "").strip())
     escaped = escape_latex(compact)
     return (
+        "% formula_fallback_escaped_display\n"
         "\\begin{center}\n"
         "\\begin{minipage}{0.95\\linewidth}\n"
         "\\footnotesize\\ttfamily\\raggedright\n"
@@ -1038,11 +1039,31 @@ def is_safe_display_math_latex(text: str) -> bool:
         return False
     if _contains_unescaped_dollar(value):
         return False
-    if re.search(r"\\(?:frac|dfrac|tfrac)\s+(?!\{)", value):
+    if has_unsafe_fraction_command(value):
+        return False
+    if has_unescaped_math_special(value, "#"):
+        return False
+    if has_unsafe_escaped_math_brace(value) or has_text_mode_command_in_math_payload(value):
+        return False
+    if has_repeated_script_operator(value):
+        return False
+    if has_unsafe_math_accent_command(value):
+        return False
+    if has_ambiguous_math_primitive(value):
+        return False
+    if has_malformed_kern_dimension(value):
+        return False
+    if contains_dangerous_tex_primitive(value):
         return False
     if re.search(r"\^\s*[-+]\s*[A-Za-z0-9]", value):
         return False
+    if re.search(r"\\[A-Za-z]+\\\\", value) or value.endswith("\\"):
+        return False
     if not _has_balanced_unescaped_braces(value):
+        return False
+    if RISKY_DISPLAY_ENV_RE.search(value):
+        return False
+    if should_fallback_noenv_raw_ampersand_display(value):
         return False
     if len(re.findall(r"\\left\b|\\left(?=[\\.()\\[\\]{}|])", value)) != len(
         re.findall(r"\\right\b|\\right(?=[\\.()\\[\\]{}|])", value)
@@ -1061,6 +1082,100 @@ def is_safe_display_math_latex(text: str) -> bool:
         if stack:
             return False
     return True
+
+
+LATEX_ENVIRONMENT_TOKEN_RE = re.compile(r"\\(?:begin|end)\s*\{")
+
+
+def has_latex_environment(text: str) -> bool:
+    """Return true if payload already contains a LaTeX environment token."""
+
+    return bool(LATEX_ENVIRONMENT_TOKEN_RE.search(str(text or "")))
+
+
+def has_raw_ampersand_outside_escape(text: str) -> bool:
+    r"""Detect raw alignment tabs while respecting escaped ``\&`` text."""
+
+    escaped = False
+    for char in str(text or ""):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "&":
+            return True
+    return False
+
+
+def should_fallback_noenv_raw_ampersand_display(text: str) -> bool:
+    """Only quarantine raw ``&`` display payloads with no LaTeX environment."""
+
+    value = str(text or "")
+    if has_latex_environment(value):
+        return False
+    return has_raw_ampersand_outside_escape(value)
+
+
+UNSUPPORTED_MATH_MACRO_REPLACEMENTS = {
+    "astrosun": r"\odot",
+}
+
+
+def normalize_unsupported_math_macros(text: str) -> str:
+    """Map observed unsupported OCR macros to compile-safe standard math."""
+
+    value = str(text or "")
+    for macro, replacement in UNSUPPORTED_MATH_MACRO_REPLACEMENTS.items():
+        value = re.sub(rf"\\{macro}\b", lambda _match, repl=replacement: repl, value)
+    return value
+
+
+MATH_ACCENT_COMMANDS_REQUIRING_GROUP = {
+    "bar",
+    "breve",
+    "check",
+    "ddot",
+    "dot",
+    "hat",
+    "mathring",
+    "overline",
+    "tilde",
+    "vec",
+    "widehat",
+    "widetilde",
+}
+
+
+def has_unsafe_math_accent_command(text: str) -> bool:
+    """Reject OCR math accents that lost the braced argument."""
+
+    value = str(text or "")
+    for match in MATH_COMMAND_RE.finditer(value):
+        if match.group(1) not in MATH_ACCENT_COMMANDS_REQUIRING_GROUP:
+            continue
+        cursor = match.end()
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor >= len(value) or value[cursor] != "{":
+            return True
+    return False
+
+
+def has_ambiguous_math_primitive(text: str) -> bool:
+    """Reject TeX primitives that commonly require hand-authored grouping."""
+
+    return bool(re.search(r"\\(?:atop|above|overwithdelims|atopwithdelims)\b", str(text or "")))
+
+
+MALFORMED_KERN_DIMENSION_RE = re.compile(r"\\kern\s*[-+]?\s*(?:[A-Za-z_]+|\\[A-Za-z]+)\b")
+
+
+def has_malformed_kern_dimension(text: str) -> bool:
+    r"""Detect OCR like ``\kern - delimiterspace`` before TeX reads a dimension."""
+
+    return bool(MALFORMED_KERN_DIMENSION_RE.search(str(text or "")))
 
 
 def _has_balanced_unescaped_braces(text: str) -> bool:
@@ -1109,6 +1224,11 @@ SINGLE_EXPLICIT_TAG_RE = re.compile(r"^(?P<body>.+?)\s*\\tag\s*\{\s*(?P<tag>[^{}
 WIDE_DISPLAY_MATH_ENV_RE = re.compile(
     r"\\begin\s*\{\s*(?:array|aligned|alignedat|split|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\s*\}",
     re.DOTALL,
+)
+
+RISKY_DISPLAY_ENV_RE = re.compile(
+    r"\\begin\s*\{\s*(?:array|aligned|alignedat|split|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\s*\}",
+    re.IGNORECASE,
 )
 
 
@@ -1213,19 +1333,60 @@ def should_render_as_align(text: str) -> bool:
 def render_inline_math(text: str) -> str:
     stripped = sanitize_latex_render_artifacts(str(text or "")).strip()
     if not stripped:
-        return "$$"
-    if contains_structural_latex_command(stripped) or _contains_unescaped_dollar(stripped[1:-1] if stripped.startswith("$") and stripped.endswith("$") else stripped):
-        return escape_latex(stripped)
-    if not _has_balanced_unescaped_braces(stripped):
-        return escape_latex(stripped)
-    stripped = strip_unbalanced_left_right_delimiters(stripped)
-    if not is_plausible_inline_math_payload(stripped):
-        return escape_latex(stripped)
-    if stripped.startswith("$") and stripped.endswith("$") and len(stripped) >= 2:
-        return "$" + normalize_inline_math_unicode(stripped[1:-1].strip()) + "$"
-    if stripped.startswith(r"\(") and stripped.endswith(r"\)") and len(stripped) >= 4:
-        return r"\(" + normalize_inline_math_unicode(stripped[2:-2].strip()) + r"\)"
-    return "$" + normalize_inline_math_unicode(stripped) + "$"
+        return ""
+    payload, had_wrapper = unwrap_inline_math_payload(stripped)
+    if not had_wrapper and (stripped.startswith("$") or stripped.startswith(r"\(")):
+        return render_inline_math_fallback(stripped)
+    if contains_structural_latex_command(payload) or _contains_unescaped_dollar(payload):
+        return render_inline_math_fallback(stripped)
+    if not _has_balanced_unescaped_braces(payload):
+        return render_inline_math_fallback(stripped)
+    if has_unsafe_fraction_command(payload):
+        return render_inline_math_fallback(stripped)
+    if has_unescaped_math_special(payload, "#") or has_unescaped_math_special(payload, "&"):
+        return render_inline_math_fallback(stripped)
+    if has_unsafe_escaped_math_brace(payload) or has_text_mode_command_in_math_payload(payload):
+        return render_inline_math_fallback(stripped)
+    if re.search(r"\\[A-Za-z]+\\\\", payload) or payload.endswith("\\"):
+        return render_inline_math_fallback(stripped)
+    payload = normalize_inline_math_unicode(payload)
+    if contains_dangerous_tex_primitive(payload):
+        return render_inline_math_fallback(stripped)
+    if has_repeated_script_operator(payload):
+        return render_inline_math_fallback(stripped)
+    if has_unsafe_math_accent_command(payload):
+        return render_inline_math_fallback(stripped)
+    if has_ambiguous_math_primitive(payload):
+        return render_inline_math_fallback(stripped)
+    if has_malformed_kern_dimension(payload):
+        return render_inline_math_fallback(stripped)
+    if not has_safe_left_right_delimiters(payload):
+        return render_inline_math_fallback(stripped)
+    if not has_required_math_command_arguments(payload):
+        return render_inline_math_fallback(stripped)
+    if RISKY_DISPLAY_ENV_RE.search(payload):
+        return render_inline_math_fallback(stripped)
+    if not is_plausible_inline_math_payload(payload):
+        return escape_latex(payload)
+    return r"\(" + payload + r"\)"
+
+
+def unwrap_inline_math_payload(text: str) -> tuple[str, bool]:
+    """Return the renderer-owned inline math payload without outer wrappers."""
+
+    value = str(text or "").strip()
+    if value.startswith("$") and value.endswith("$") and len(value) >= 2:
+        return value[1:-1].strip(), True
+    if value.startswith(r"\(") and value.endswith(r"\)") and len(value) >= 4:
+        return value[2:-2].strip(), True
+    return value, False
+
+
+def render_inline_math_fallback(text: str) -> str:
+    """Render unsafe inline math visibly without raw math delimiters."""
+
+    compact = re.sub(r"\s+", " ", str(text or "").strip())
+    return escape_latex(compact)
 
 
 def strip_unbalanced_left_right_delimiters(text: str) -> str:
@@ -1237,8 +1398,121 @@ def strip_unbalanced_left_right_delimiters(text: str) -> str:
     return re.sub(r"\\(?:left|right)\s*", "", value)
 
 
+LEFT_RIGHT_COMMAND_RE = re.compile(r"\\(?P<side>left|right)\b|\\(?P<side_delim>left|right)(?=[\\.()\[\]{}|<>])")
+
+ARG_REQUIRED_MATH_COMMANDS = {
+    "mathbf",
+    "mathrm",
+    "mathit",
+    "mathsf",
+    "mathtt",
+    "mathcal",
+    "mathbfcal",
+    "mathbb",
+    "mathscr",
+    "boldsymbol",
+    "operatorname",
+    "operatorname*",
+    "pmb",
+    "text",
+}
+
+
+def has_safe_left_right_delimiters(text: str) -> bool:
+    r"""Conservatively validate ``\left`` / ``\right`` delimiters.
+
+    OCR frequently produces payloads such as ``\right$`` or
+    ``\right\| \left\|`` after inline math spans are split across prose.  These
+    compile as ``Missing delimiter`` / ``Extra \right``.  Do not guess a repair:
+    reject the payload so the caller can render a visible escaped fallback.
+    """
+
+    value = str(text or "")
+    stack: list[str] = []
+    for match in LEFT_RIGHT_COMMAND_RE.finditer(value):
+        side = match.group("side") or match.group("side_delim") or ""
+        delimiter_end = _consume_left_right_delimiter(value, match.end())
+        if delimiter_end is None:
+            return False
+        if side == "left":
+            stack.append(side)
+        elif side == "right":
+            if not stack:
+                return False
+            stack.pop()
+    return not stack
+
+
+def _consume_left_right_delimiter(text: str, index: int) -> int | None:
+    value = str(text or "")
+    cursor = index
+    while cursor < len(value) and value[cursor].isspace():
+        cursor += 1
+    if cursor >= len(value):
+        return None
+    char = value[cursor]
+    if char == "$":
+        return None
+    if char == "\\":
+        if cursor + 1 >= len(value):
+            return None
+        next_char = value[cursor + 1]
+        if next_char in ".|{}()[]<>/":
+            return cursor + 2
+        command = MATH_COMMAND_RE.match(value, cursor)
+        if command:
+            return command.end()
+        return None
+    if char in ".|()[]<>/":
+        return cursor + 1
+    return None
+
+
+def has_required_math_command_arguments(text: str) -> bool:
+    """Reject style/text commands that lost their braced argument."""
+
+    value = str(text or "")
+    for match in MATH_COMMAND_RE.finditer(value):
+        command = match.group(1)
+        if command not in ARG_REQUIRED_MATH_COMMANDS:
+            continue
+        cursor = match.end()
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor >= len(value) or value[cursor] != "{":
+            return False
+    return True
+
+
+UNSAFE_ESCAPED_MATH_BRACE_RE = re.compile(r"\\[{}]")
+
+
+def has_unsafe_escaped_math_brace(text: str) -> bool:
+    r"""Reject literal brace commands that often break OCR math grouping.
+
+    ``\{`` / ``\}`` are valid in hand-authored equations, but MinerU OCR often
+    emits fragments like ``T^{\ \}`` where the visible right brace is not a real
+    group terminator.  That leaks out of ``\caption`` and display wrappers as a
+    runaway argument.  Keep the content visible via fallback instead of guessing
+    which brace was intended.
+    """
+
+    return bool(UNSAFE_ESCAPED_MATH_BRACE_RE.search(str(text or "")))
+
+
+TEXT_MODE_COMMAND_IN_MATH_RE = re.compile(r"\\(?:textcircled)\b|\\\^")
+
+
+def has_text_mode_command_in_math_payload(text: str) -> bool:
+    """Detect text-mode OCR commands that pdflatex rejects inside math."""
+
+    return bool(TEXT_MODE_COMMAND_IN_MATH_RE.search(str(text or "")))
+
+
 def normalize_inline_math_unicode(text: str) -> str:
-    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(text or ""))
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in normalized)
+    normalized = normalize_unsupported_math_macros(normalized)
     normalized = normalize_duplicate_math_command_slashes(normalized)
     return normalize_math_ocr_spacing(separate_glued_math_commands(normalized))
 
@@ -1254,7 +1528,9 @@ def normalize_display_math_text(text: str) -> str:
     """
 
     normalized = sanitize_latex_render_artifacts(text)
-    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in str(normalized or ""))
+    normalized = unicodedata.normalize("NFKC", str(normalized or ""))
+    normalized = "".join(ALGORITHM_MATH_UNICODE_REPLACEMENTS.get(char, char) for char in normalized)
+    normalized = normalize_unsupported_math_macros(normalized)
     normalized = normalize_duplicate_math_command_slashes(normalized)
     normalized = separate_glued_math_commands(normalized)
     normalized = normalize_math_ocr_spacing(normalized)
@@ -1287,6 +1563,78 @@ def contains_structural_latex_command(text: object) -> bool:
 
 def _contains_unescaped_dollar(text: str) -> bool:
     return find_unescaped(str(text or ""), "$", 0) is not None
+
+
+def has_unescaped_math_special(text: str, needle: str) -> bool:
+    return find_unescaped(str(text or ""), needle, 0) is not None
+
+
+def has_unsafe_fraction_command(text: str) -> bool:
+    r"""Reject OCR fragments where ``\frac`` lost its braced numerator."""
+
+    value = str(text or "")
+    for match in re.finditer(r"\\(?:frac|dfrac|tfrac)\b", value):
+        cursor = match.end()
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor >= len(value) or value[cursor] != "{":
+            return True
+    return False
+
+
+REPEATED_SCRIPT_OPERATOR_RE = re.compile(
+    r"(?:[A-Za-z0-9)\]}]|\\[A-Za-z]+(?:\s*\{[^{}]*\})?)\s*[\^_]\s*(?:\{[^{}]*\}|[A-Za-z0-9\\]+)\s*[\^_]"
+)
+
+
+def has_repeated_script_operator(text: str) -> bool:
+    """Detect common OCR double-script payloads such as ``x^{0}^{\top}``."""
+
+    return bool(REPEATED_SCRIPT_OPERATOR_RE.search(str(text or "")))
+
+
+DANGEROUS_TEX_PRIMITIVE_RE = re.compile(
+    r"\\(?:aftergroup|egroup|bgroup|mathopen|mathclose)\b"
+)
+
+
+def contains_dangerous_tex_primitive(text: str) -> bool:
+    """Quarantine TeX primitives that OCR can leak into math payloads."""
+
+    return bool(DANGEROUS_TEX_PRIMITIVE_RE.search(str(text or "")))
+
+
+BROKEN_MATH_TEXT_BRACE_COMMAND_RE = re.compile(
+    r"\\(?:mathrm|mathbf|mathit|mathsf|mathtt|mathcal|mathbb|mathscr|boldsymbol)\s*\{[^{}]*\\[{}]"
+)
+
+
+RENDERED_INLINE_MATH_RE = re.compile(r"\\\((?P<body>.*?)\\\)")
+
+
+def has_broken_math_text_brace_command(text: str) -> bool:
+    """Detect OCR text-style math commands whose literal brace ate the group."""
+
+    return bool(BROKEN_MATH_TEXT_BRACE_COMMAND_RE.search(str(text or "")))
+
+
+def quarantine_broken_rendered_inline_math(text: str) -> str:
+    """Last-resort guard for already-rendered inline OCR math wrappers."""
+
+    def replace(match: re.Match[str]) -> str:
+        body = match.group("body")
+        if (
+            has_broken_math_text_brace_command(body)
+            or contains_dangerous_tex_primitive(body)
+            or has_text_mode_command_in_math_payload(body)
+            or has_unsafe_math_accent_command(body)
+            or has_ambiguous_math_primitive(body)
+            or has_malformed_kern_dimension(body)
+        ):
+            return escape_latex(body)
+        return match.group(0)
+
+    return RENDERED_INLINE_MATH_RE.sub(replace, str(text or ""))
 
 
 MATH_TEXT_BRACE_COMMANDS = {
@@ -1323,6 +1671,7 @@ SPACED_OPERATORNAME_RE = re.compile(r"\\operatorname\*?\s*\{\s*(?P<body>[A-Za-z]
 
 def normalize_math_ocr_spacing(text: str) -> str:
     value = str(text or "")
+    value = re.sub(r"\\mathscr\b", r"\\mathcal", value)
     value = SPACED_OPERATORNAME_RE.sub(_replace_spaced_operatorname, value)
     value = MATH_COMMAND_BRACE_RE.sub(_replace_spaced_math_command, value)
     value = re.sub(r"\\operatorname\s*\{\s*([^{}]+?)\s*\}", lambda m: r"\operatorname{" + " ".join(m.group(1).split()) + "}", value)
@@ -1366,14 +1715,29 @@ def normalize_duplicate_math_command_slashes(text: str) -> str:
 
 
 GLUED_MATH_COMMAND_RE = re.compile(
-    r"\\(times|sigma|sim|ell|lambda|Phi|phi|theta|rho|mu|alpha|beta|gamma|delta|epsilon|in)(?=[A-Z])"
+    r"\\(times|sigma|sim|ell|lambda|Phi|phi|theta|rho|mu|nu|kappa|alpha|beta|gamma|delta|epsilon|eta|pi|tau|omega|zeta|iota|xi|chi|psi|upsilon|infty)(?=[A-Za-z])|\\(in)(?=[A-Z])"
 )
+
+
+OCR_GLUE_MATH_COMMAND_RE = re.compile(
+    r"\\(partial)(?=[A-Za-z])|\\(cap|cup|to|subset|supset)(?=[A-Z])"
+)
+
+
+OCR_NU_GLUE_RE = re.compile(r"\\nu(?=[rR])")
+
+
+OCR_UPPERCASE_NU_RE = re.compile(r"\\Nu(?=\s|[({\[]|$)")
 
 
 def separate_glued_math_commands(text: str) -> str:
     """Repair OCR-style command/variable glue such as ``\\timesY``."""
 
-    return GLUED_MATH_COMMAND_RE.sub(lambda match: f"\\{match.group(1)} ", str(text or ""))
+    value = str(text or "")
+    value = OCR_UPPERCASE_NU_RE.sub("N", value)
+    value = OCR_GLUE_MATH_COMMAND_RE.sub(lambda match: f"\\{match.group(1) or match.group(2)} ", value)
+    value = OCR_NU_GLUE_RE.sub(r"\\nu ", value)
+    return GLUED_MATH_COMMAND_RE.sub(lambda match: f"\\{match.group(1) or match.group(2)} ", value)
 
 
 def is_plausible_inline_math_payload(text: str) -> bool:
@@ -1425,6 +1789,7 @@ def render_text_with_inline_latex(text: str, *, strip: bool = True) -> str:
                 rendered.append(escape_latex(trailing_punctuation))
         cursor = end
     output = re.sub(r"\n{3,}", "\n\n", "".join(rendered))
+    output = quarantine_broken_rendered_inline_math(output)
     return output.strip() if strip else output
 
 
@@ -1484,6 +1849,60 @@ def find_next_math_command(text: str, start_index: int) -> tuple[int, str] | Non
             if command_start > start_index and text[command_start - 1] == "\\":
                 command_start -= 1
             return command_start, command_name
+        glued_name = split_known_glued_math_command_name(command_name)
+        if glued_name is not None:
+            command_start = match.start()
+            if command_start > start_index and text[command_start - 1] == "\\":
+                command_start -= 1
+            return command_start, glued_name
+    return None
+
+
+def split_known_glued_math_command_name(command_name: str) -> str | None:
+    value = str(command_name or "")
+    if value.startswith("partial") and len(value) > len("partial"):
+        return "partial"
+    for prefix in ("subset", "supset", "cap", "cup", "to"):
+        if value.startswith(prefix) and len(value) > len(prefix) and value[len(prefix)].isupper():
+            return prefix
+    if value.startswith("nu") and len(value) > 2 and value[2] in {"r", "R"}:
+        return "nu"
+    lowercase_glue_prefixes = {"zeta", "iota", "xi", "chi", "psi", "upsilon", "infty"}
+    for prefix in (
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "epsilon",
+        "eta",
+        "theta",
+        "kappa",
+        "lambda",
+        "mu",
+        "pi",
+        "rho",
+        "sigma",
+        "tau",
+        "omega",
+        "zeta",
+        "iota",
+        "xi",
+        "chi",
+        "psi",
+        "upsilon",
+        "infty",
+        "Phi",
+        "phi",
+        "times",
+        "ell",
+        "sim",
+        "in",
+    ):
+        if value.startswith(prefix) and len(value) > len(prefix):
+            if prefix in lowercase_glue_prefixes and value[len(prefix)].isalpha():
+                return prefix
+            if value[len(prefix)].isupper():
+                return prefix
     return None
 
 
@@ -1609,6 +2028,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "π": r"\pi",
     "ρ": r"\rho",
     "σ": r"\sigma",
+    "ς": r"\varsigma",
     "τ": r"\tau",
     "υ": r"\upsilon",
     "φ": r"\phi",
@@ -1626,15 +2046,21 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "Φ": r"\Phi",
     "Ψ": r"\Psi",
     "Ω": r"\Omega",
+    "Ḋ": r"\dot{D}",
+    "ḋ": r"\dot{d}",
     "≤": r"\leq",
     "≥": r"\geq",
     "≠": r"\neq",
     "≈": r"\approx",
     "±": r"\pm",
     "×": r"\times",
+    "♯": r"\sharp{}",
+    "ħ": r"\hbar",
+    "⃗": r"\vec{}",
     "−": "-",
     "÷": r"\div",
     "∞": r"\infty",
+    "∥": r"\parallel{}",
     "∂": r"\partial",
     "∇": r"\nabla",
     "∑": r"\sum",
@@ -1646,6 +2072,9 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "⊆": r"\subseteq",
     "⊃": r"\supset",
     "⊇": r"\supseteq",
+    "⊔": r"\sqcup{}",
+    "⋉": r"\ltimes{}",
+    "⋊": r"\rtimes{}",
     "∪": r"\cup",
     "∩": r"\cap",
     "∧": r"\wedge",
@@ -1656,6 +2085,7 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "∅": r"\emptyset",
     "∝": r"\propto",
     "∼": r"\sim",
+    "≺": r"\prec{}",
     "≃": r"\simeq",
     "≅": r"\cong",
     "≡": r"\equiv",
@@ -1664,8 +2094,10 @@ ALGORITHM_MATH_UNICODE_REPLACEMENTS = {
     "⋅": r"\cdot",
     "·": r"\cdot",
     "∗": r"*",
+    "⋆": r"\star{}",
     "√": r"\sqrt{}",
     "→": r"\to",
+    "↷": r"\curvearrowright{}",
     "←": r"\gets",
     "↔": r"\leftrightarrow",
     "⟶": r"\longrightarrow",
@@ -1696,6 +2128,7 @@ CODE_UNICODE_REPLACEMENTS = {
     "π": "pi",
     "ρ": "rho",
     "σ": "sigma",
+    "ς": "varsigma",
     "τ": "tau",
     "υ": "upsilon",
     "φ": "phi",
@@ -1713,14 +2146,20 @@ CODE_UNICODE_REPLACEMENTS = {
     "Φ": "Phi",
     "Ψ": "Psi",
     "Ω": "Omega",
+    "Ḋ": "D",
+    "ḋ": "d",
     "≤": "<=",
     "≥": ">=",
     "≠": "!=",
     "≈": "~=",
     "±": "+/-",
     "×": "x",
+    "♯": "#",
+    "ħ": "hbar",
+    "⃗": "vec",
     "÷": "/",
     "∞": "inf",
+    "∥": "parallel",
     "∂": "partial",
     "∇": "nabla",
     "∑": "sum",
@@ -1732,6 +2171,9 @@ CODE_UNICODE_REPLACEMENTS = {
     "⊆": " subseteq ",
     "⊃": " superset ",
     "⊇": " superseteq ",
+    "⊔": " sqcup ",
+    "⋉": " ltimes ",
+    "⋊": " rtimes ",
     "∪": " union ",
     "∩": " inter ",
     "∧": " and ",
@@ -1742,6 +2184,7 @@ CODE_UNICODE_REPLACEMENTS = {
     "∅": "empty",
     "∝": "propto",
     "∼": "~",
+    "≺": " prec ",
     "≃": "~=",
     "≅": "~=",
     "≡": "==",
@@ -1750,8 +2193,10 @@ CODE_UNICODE_REPLACEMENTS = {
     "⋅": "*",
     "·": "*",
     "∗": "*",
+    "⋆": "*",
     "√": "sqrt",
     "→": "->",
+    "↷": "curvearrowright",
     "←": "<-",
     "↔": "<->",
     "⟶": "->",
@@ -1801,6 +2246,7 @@ UNICODE_LATEX_REPLACEMENTS = {
     "π": r"\ensuremath{\pi}",
     "ρ": r"\ensuremath{\rho}",
     "σ": r"\ensuremath{\sigma}",
+    "ς": r"\ensuremath{\varsigma}",
     "τ": r"\ensuremath{\tau}",
     "υ": r"\ensuremath{\upsilon}",
     "φ": r"\ensuremath{\phi}",
@@ -1818,14 +2264,20 @@ UNICODE_LATEX_REPLACEMENTS = {
     "Φ": r"\ensuremath{\Phi}",
     "Ψ": r"\ensuremath{\Psi}",
     "Ω": r"\ensuremath{\Omega}",
+    "Ḋ": r"\.{D}",
+    "ḋ": r"\.{d}",
     "≤": r"\ensuremath{\leq}",
     "≥": r"\ensuremath{\geq}",
     "≠": r"\ensuremath{\neq}",
     "≈": r"\ensuremath{\approx}",
     "±": r"\ensuremath{\pm}",
     "×": r"\ensuremath{\times}",
+    "♯": r"\ensuremath{\sharp}",
+    "ħ": r"\ensuremath{\hbar}",
+    "⃗": r"\ensuremath{\vec{}}",
     "÷": r"\ensuremath{\div}",
     "∞": r"\ensuremath{\infty}",
+    "↷": r"\ensuremath{\curvearrowright}",
     "∂": r"\ensuremath{\partial}",
     "∇": r"\ensuremath{\nabla}",
     "∈": r"\ensuremath{\in}",
@@ -1835,6 +2287,9 @@ UNICODE_LATEX_REPLACEMENTS = {
     "⊆": r"\ensuremath{\subseteq}",
     "⊃": r"\ensuremath{\supset}",
     "⊇": r"\ensuremath{\supseteq}",
+    "⊔": r"\ensuremath{\sqcup}",
+    "⋉": r"\ensuremath{\ltimes}",
+    "⋊": r"\ensuremath{\rtimes}",
     "∪": r"\ensuremath{\cup}",
     "∩": r"\ensuremath{\cap}",
     "∧": r"\ensuremath{\wedge}",
@@ -1847,6 +2302,7 @@ UNICODE_LATEX_REPLACEMENTS = {
     "∫": r"\ensuremath{\int}",
     "∝": r"\ensuremath{\propto}",
     "∼": r"\ensuremath{\sim}",
+    "≺": r"\ensuremath{\prec}",
     "≃": r"\ensuremath{\simeq}",
     "≅": r"\ensuremath{\cong}",
     "≡": r"\ensuremath{\equiv}",
@@ -1855,6 +2311,7 @@ UNICODE_LATEX_REPLACEMENTS = {
     "⋅": r"\ensuremath{\cdot}",
     "·": r"\ensuremath{\cdot}",
     "∗": r"\ensuremath{*}",
+    "⋆": r"\ensuremath{\star}",
     "∥": r"\ensuremath{\parallel}",
     "√": r"\ensuremath{\sqrt{}}",
     "→": r"\ensuremath{\rightarrow}",

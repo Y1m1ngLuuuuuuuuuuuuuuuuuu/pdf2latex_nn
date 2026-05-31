@@ -16,10 +16,12 @@ from src.reasoning.float_caption_matcher import (
     CaptionCandidate,
     CaptionPairing,
     caption_candidates_from_document,
+    caption_float_types_compatible,
     caption_to_record,
     float_candidates_from_document,
     pairing_to_record,
     pair_caption_candidates,
+    parse_caption_prefix,
 )
 
 
@@ -141,45 +143,27 @@ def apply_float_caption_layout(
 
     for pairing in canonical_pairings:
         caption = pairing.caption
-        if caption.confidence < 0.78:
+        if not _strict_materialization_eligible(pairing):
+            selection.suppressed.append(
+                _suppression_record(
+                    pairing,
+                    reason=_strict_materialization_rejection_reason(pairing),
+                    kept_caption_id=None,
+                )
+            )
             continue
         if pairing.float_candidate is None:
-            if caption.confidence >= 0.86:
-                placeholder_id = f"float_caption_placeholder_{_safe_render_id(caption.caption_id)}"
-                placeholder = _placeholder_node(placeholder_id, caption)
-                updated_nodes[placeholder_id] = placeholder
-                parent_id = _parent_for_caption(caption, source_to_render_ids, parent_by_child_id, tree.root_id)
-                placeholder_insertions.append((parent_id, placeholder_id, pairing))
-                placeholders.append(_placeholder_record(pairing, render_id=placeholder_id, parent_id=parent_id))
-                consumed_caption_source_ids.update(caption.source_v8_ids)
-                consumed.append(_consumed_record(caption, "placeholder_float_created"))
-                promoted.append(_promotion_record(caption, pairing, render_id=placeholder_id))
             continue
 
         float_render_id = _render_id_for_float(pairing.float_candidate.source_v8_ids, source_to_render_ids, updated_nodes)
         if float_render_id is None:
-            if caption.confidence >= 0.86:
-                placeholder_id = f"float_caption_materialized_{_safe_render_id(caption.caption_id)}"
-                placeholder = _placeholder_node(
-                    placeholder_id,
-                    caption,
-                    source_v8_ids=pairing.float_candidate.source_v8_ids,
-                    paired_float_id=pairing.float_candidate.float_id,
+            selection.suppressed.append(
+                _suppression_record(
+                    pairing,
+                    reason="paired_float_render_node_missing_no_placeholder_created",
+                    kept_caption_id=None,
                 )
-                updated_nodes[placeholder_id] = placeholder
-                parent_id = _parent_for_caption(caption, source_to_render_ids, parent_by_child_id, tree.root_id)
-                placeholder_insertions.append((parent_id, placeholder_id, pairing))
-                placeholders.append(
-                    _placeholder_record(
-                        pairing,
-                        render_id=placeholder_id,
-                        parent_id=parent_id,
-                        reason="paired_float_render_node_missing_materialized_caption",
-                    )
-                )
-                consumed_caption_source_ids.update(caption.source_v8_ids)
-                consumed.append(_consumed_record(caption, "paired_float_render_node_missing_materialized_caption", render_id=placeholder_id))
-                promoted.append(_promotion_record(caption, pairing, render_id=placeholder_id))
+            )
             continue
         old = updated_nodes[float_render_id]
         attrs = dict(old.attributes)
@@ -196,7 +180,7 @@ def apply_float_caption_layout(
             children=list(old.children),
             attributes=attrs,
         )
-        consumed_caption_source_ids.update(caption.source_v8_ids)
+        consumed_caption_source_ids.update(_strict_consumable_source_ids(caption, document))
         consumed.append(_consumed_record(caption, "caption_attached_to_existing_float", render_id=float_render_id))
         promoted.append(_promotion_record(caption, pairing, render_id=float_render_id))
         if caption.origin == "crop_metadata":
@@ -211,10 +195,22 @@ def apply_float_caption_layout(
                 }
             )
 
+    consumed_caption_by_source = {
+        source_id: caption
+        for pairing in canonical_pairings
+        if _strict_materialization_eligible(pairing)
+        for caption in [pairing.caption]
+        for source_id in _strict_consumable_source_ids(caption, document)
+    }
+    document_nodes = {node.node_id: node for node in document.nodes}
     for source_id in consumed_caption_source_ids:
         for render_id in source_to_render_ids.get(source_id, []):
             node = updated_nodes.get(render_id)
             if node is None or node.role in {RenderRole.FIGURE, RenderRole.TABLE, RenderRole.ALGORITHM}:
+                continue
+            caption = consumed_caption_by_source.get(source_id)
+            source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
+            if caption is None or not _render_node_is_exact_consumed_caption(node, source_nodes, caption):
                 continue
             attrs = dict(node.attributes)
             attrs["float_caption_consumed"] = True
@@ -339,6 +335,92 @@ def _placeholder_node(
             "render_policy": "placeholder_float_with_structured_caption",
         },
     )
+
+
+def _strict_materialization_eligible(pairing: CaptionPairing) -> bool:
+    caption = pairing.caption
+    if caption.confidence < 0.78:
+        return False
+    if caption.origin == "text_block":
+        return False
+    if not caption.source_v8_ids:
+        return False
+    if pairing.float_candidate is None:
+        return False
+    if caption.caption_type in {"algorithm", "code"}:
+        return False
+    if pairing.float_candidate.float_type not in {"figure", "table"}:
+        return False
+    if not caption_float_types_compatible(caption.caption_type, pairing.float_candidate.float_type):
+        return False
+    candidate_class = _candidate_class(caption)
+    if candidate_class in {"PANEL_LABEL", "SYNTHETIC_FALLBACK_CAPTION", "BODY_REFERENCE_FALSE_POSITIVE"}:
+        return False
+    return True
+
+
+def _strict_materialization_rejection_reason(pairing: CaptionPairing) -> str:
+    caption = pairing.caption
+    if caption.confidence < 0.78:
+        return "low_confidence_caption_not_materialized"
+    if caption.origin == "text_block":
+        return "regex_or_text_block_caption_not_materialized"
+    if not caption.source_v8_ids:
+        return "missing_source_ids_not_materialized"
+    if pairing.float_candidate is None:
+        return "no_existing_float_target_no_placeholder"
+    if caption.caption_type in {"algorithm", "code"}:
+        return "algorithm_or_code_caption_deferred"
+    if pairing.float_candidate.float_type not in {"figure", "table"}:
+        return "unsupported_float_target_type"
+    if not caption_float_types_compatible(caption.caption_type, pairing.float_candidate.float_type):
+        return "wrong_float_type_pairing_blocked"
+    candidate_class = _candidate_class(caption)
+    if candidate_class in {"PANEL_LABEL", "SYNTHETIC_FALLBACK_CAPTION", "BODY_REFERENCE_FALSE_POSITIVE"}:
+        return f"{candidate_class.lower()}_not_materialized"
+    return "strict_materialization_not_eligible"
+
+
+def _strict_consumable_source_ids(caption: CaptionCandidate, document: DocumentIR) -> set[str]:
+    nodes = {node.node_id: node for node in document.nodes}
+    result: set[str] = set()
+    for source_id in caption.source_v8_ids:
+        node = nodes.get(source_id)
+        if node is not None and _source_node_is_exact_caption(node, caption):
+            result.add(source_id)
+    return result
+
+
+def _render_node_is_exact_consumed_caption(
+    node: RenderTreeNode,
+    source_nodes: list[DocumentNode],
+    caption: CaptionCandidate,
+) -> bool:
+    if not node.source_node_ids:
+        return False
+    if any(source.node_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.ALGORITHM} for source in source_nodes):
+        return False
+    if node.role not in {RenderRole.PARAGRAPH, RenderRole.CAPTION, RenderRole.UNKNOWN}:
+        return False
+    return all(_source_node_is_exact_caption(source, caption) for source in source_nodes)
+
+
+def _source_node_is_exact_caption(node: DocumentNode, caption: CaptionCandidate) -> bool:
+    metadata = node.metadata or {}
+    role_blob = " ".join(
+        str(metadata.get(key) or "")
+        for key in ("layout_role", "canonical_type", "role", "type", "raw_type", "category", "subtype")
+    ).casefold()
+    if "caption" in role_blob:
+        return True
+    text_match = parse_caption_prefix(node.text)
+    if text_match is None:
+        return False
+    source_text = _cluster_text_key(text_match.caption_body or node.text)
+    caption_text = _cluster_text_key(caption.normalized_text or caption.text)
+    if not source_text or not caption_text:
+        return False
+    return source_text == caption_text
 
 
 def _insert_placeholders(
@@ -486,10 +568,10 @@ def _choose_canonical_pairing(left: CaptionPairing, right: CaptionPairing) -> tu
 def _canonical_rank(pairing: CaptionPairing) -> tuple[int, float, int, str]:
     caption = pairing.caption
     origin_rank = {
-        "text_block": 0,
-        "caption_metadata": 1,
-        "float_metadata": 2,
-        "crop_metadata": 3,
+        "caption_metadata": 0,
+        "float_metadata": 1,
+        "crop_metadata": 2,
+        "text_block": 3,
         "unknown": 4,
     }.get(caption.origin, 4)
     source_bonus = 0 if caption.source_v8_ids else 1

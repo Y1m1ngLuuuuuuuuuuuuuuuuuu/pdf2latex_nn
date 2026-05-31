@@ -10,9 +10,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 
-from src.generation.citations import CitationResolution, author_year_lookup, replace_citation_markers, strip_reference_label
+from src.generation.citations import (
+    CitationResolution,
+    author_year_lookup,
+    replace_citation_markers,
+    split_reference_block,
+    strip_reference_label,
+)
 from src.generation.font_resolver import resolve_pdf_font
 from src.generation.front_matter import render_author_block_original_like, render_document_title_original_like
 from src.generation.ir_renderers import build_default_registry
@@ -28,10 +35,11 @@ from src.generation.latex_helpers import (
     render_inline_math,
     render_table_placeholder,
     render_text_with_inline_latex,
+    quarantine_broken_rendered_inline_math,
     strip_list_marker,
 )
 from src.generation.source_float_layout import SourceFloatLayout, SourceTableLayout
-from src.generation.table_assets import ensure_pdf_region_crop
+from src.generation.table_assets import ensure_pdf_region_crop, ensure_table_visual_asset
 from src.ir import BBox, BlockType, DocumentIR, DocumentNode, RenderRole, RenderTreeIR, RenderTreeNode, StyleProfile, StyleSpan
 from src.perception.title_features import strip_title_numbering, title_numbering_info
 from src.reasoning.front_matter_extractor import FrontMatterIR, FrontMatterSpan, extract_front_matter
@@ -84,6 +92,7 @@ class IRLatexRenderConfig:
     figure_asset_output_dir: Path | None = None
     table_asset_latex_prefix: str = "assets"
     figure_asset_latex_prefix: str = "assets"
+    table_safe_fallback_experimental: bool = False
     enable_fontspec: bool = False
     render_header_footer: bool = True
     preserve_span_font_family: bool = True
@@ -1042,7 +1051,29 @@ class OriginalLikeIRLatexRenderer:
     ) -> str | None:
         if node.role == RenderRole.LIST:
             return None
+        if node.role in {
+            RenderRole.DISPLAY_EQUATION,
+            RenderRole.INLINE_MATH,
+            RenderRole.FIGURE,
+            RenderRole.TABLE,
+            RenderRole.ALGORITHM,
+            RenderRole.CODE,
+        }:
+            return None
         source_nodes = [document_nodes[node_id] for node_id in node.source_node_ids if node_id in document_nodes]
+        if source_nodes and all(
+            source.node_type
+            in {
+                BlockType.EQUATION,
+                BlockType.INLINE_MATH,
+                BlockType.FIGURE,
+                BlockType.TABLE,
+                BlockType.ALGORITHM,
+                BlockType.CODE,
+            }
+            for source in source_nodes
+        ):
+            return None
         text = node.text or node.latex or " ".join(source.text for source in source_nodes)
         if node.role == RenderRole.LIST_ITEM:
             if node.attributes.get("ordered"):
@@ -1196,7 +1227,8 @@ class OriginalLikeIRLatexRenderer:
                 else:
                     rendered = self._apply_span_font_size(rendered, span, node_baseline)
             parts.append(rendered)
-        return self._replace_cross_refs("".join(parts).strip(), node=node)
+        rendered_output = quarantine_broken_rendered_inline_math("".join(parts).strip())
+        return self._replace_cross_refs(rendered_output, node=node)
 
     def _should_render_spans_for_node(self, node: DocumentNode, text: str) -> bool:
         """Use PyMuPDF spans only when they cover the canonical node text.
@@ -1312,6 +1344,14 @@ class OriginalLikeIRLatexRenderer:
                 _clear_table_caption_metadata(record)
             elif cleaned_caption:
                 self._remember_float_caption(cleaned_caption, "table")
+            if self.config.table_safe_fallback_experimental:
+                return self._render_table_framework_v1_fallback(
+                    record,
+                    caption_text,
+                    label=label,
+                    as_nonfloat=self._mixed_column_stack > 0,
+                    wide_float=True,
+                )
             return render_table_placeholder(
                 record,
                 caption_text,
@@ -1329,7 +1369,56 @@ class OriginalLikeIRLatexRenderer:
             layout_caption = ""
         elif cleaned_caption:
             self._remember_float_caption(cleaned_caption, "table")
+        if self.config.table_safe_fallback_experimental:
+            return self._render_table_framework_v1_fallback(
+                {"type": "table", "text": caption_text, "table_caption": layout_caption},
+                caption_text,
+                as_nonfloat=self._mixed_column_stack > 0,
+                wide_float=True,
+            )
         return render_table_placeholder({"type": "table", "text": caption_text, "table_caption": layout_caption}, caption_text, as_nonfloat=self._mixed_column_stack > 0, wide_float=True)
+
+    def _render_table_framework_v1_fallback(
+        self,
+        record: dict[str, object],
+        caption_text: str,
+        *,
+        label: str | None = None,
+        as_nonfloat: bool = False,
+        wide_float: bool = False,
+    ) -> str:
+        table = _simple_table_from_record(record)
+        caption = clean_float_caption_text(caption_text or str(record.get("table_caption") or record.get("table_group_caption") or ""), "table")
+        if table is not None:
+            return _render_simple_tabular_table(
+                table.rows,
+                caption,
+                label=label,
+                as_nonfloat=as_nonfloat,
+                wide_float=wide_float,
+                reason=table.reason,
+            )
+        graphic = ensure_table_visual_asset(
+            record,
+            source_pdf=record.get("source_pdf") if self.config.table_asset_output_dir else None,
+            asset_output_dir=self.config.table_asset_output_dir,
+            asset_latex_prefix=self.config.table_asset_latex_prefix,
+        )
+        if graphic:
+            return _render_table_visual_fallback(
+                graphic,
+                caption,
+                label=label,
+                as_nonfloat=as_nonfloat,
+                wide_float=wide_float,
+                reason="crop_or_existing_asset",
+            )
+        return _render_table_safe_placeholder(
+            caption,
+            label=label,
+            as_nonfloat=as_nonfloat,
+            reason=table.reason if table is not None else "no_safe_table_asset_or_grid",
+        )
 
     def _match_source_table_layout(self, primary: DocumentNode, text: str) -> SourceTableLayout | None:
         layout = self._active_source_float_layout
@@ -1608,11 +1697,13 @@ class OriginalLikeIRLatexRenderer:
             lines.append(r"\end{thebibliography}")
             return self._wrap_bibliography_columns("\n".join(lines), source_nodes)
         if source_nodes:
-            lines = [r"\begin{thebibliography}{99}"]
-            for index, source in enumerate(source_nodes, start=1):
-                lines.append(rf"\bibitem{{ref_{index}}} {render_text_with_inline_latex(strip_reference_label(source.text))}")
-            lines.append(r"\end{thebibliography}")
-            return self._wrap_bibliography_columns("\n".join(lines), source_nodes)
+            items = _stable_reference_items_from_source_nodes(source_nodes)
+            if items:
+                lines = [r"\begin{thebibliography}{99}"]
+                for index, item in enumerate(items, start=1):
+                    lines.append(rf"\bibitem{{ref_{index}}} {render_text_with_inline_latex(item)}")
+                lines.append(r"\end{thebibliography}")
+                return self._wrap_bibliography_columns("\n".join(lines), source_nodes)
         return self._render_children(node, render_nodes, document_nodes, citations, depth=0)
 
     def _render_bibliography_with_tail(
@@ -3165,6 +3256,240 @@ def _table_render_key(node: DocumentNode) -> tuple[str, str]:
 
 
 @dataclass(frozen=True)
+class _SimpleTableCandidate:
+    rows: list[list[str]]
+    reason: str
+
+
+class _SimpleTableHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._table_depth = 0
+        self.rejection_reason = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.casefold()
+        attributes = {key.casefold(): value for key, value in attrs}
+        if name == "table":
+            self._table_depth += 1
+            if self._table_depth > 1:
+                self._reject("nested_table")
+            return
+        if name == "tr":
+            self._row = []
+            return
+        if name in {"td", "th"}:
+            if self._cell is not None:
+                self._reject("nested_cell")
+            if not _table_span_is_one(attributes.get("rowspan")) or not _table_span_is_one(attributes.get("colspan")):
+                self._reject("rowspan_colspan")
+            self._cell = []
+            return
+        if name in {"script", "style"}:
+            self._reject("unsafe_html_tag")
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._cell is not None:
+            self._cell.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._cell is not None:
+            self._cell.append(f"&#{name};")
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.casefold()
+        if name in {"td", "th"}:
+            if self._cell is None:
+                return
+            text = " ".join("".join(self._cell).split())
+            if self._row is not None:
+                self._row.append(text)
+            self._cell = None
+            return
+        if name == "tr":
+            if self._row is not None:
+                self.rows.append(self._row)
+            self._row = None
+            return
+        if name == "table":
+            self._table_depth = max(0, self._table_depth - 1)
+
+    def close(self) -> None:
+        super().close()
+        if self._cell is not None:
+            self._reject("unclosed_cell")
+        if self._row is not None:
+            self._reject("unclosed_row")
+        if self._table_depth:
+            self._reject("unclosed_table")
+
+    def _reject(self, reason: str) -> None:
+        if not self.rejection_reason:
+            self.rejection_reason = reason
+
+
+def _simple_table_from_record(record: dict[str, object]) -> _SimpleTableCandidate | None:
+    raw_html = _table_html_from_record(record)
+    if raw_html:
+        return _simple_table_from_html(raw_html)
+    raw_grid = record.get("table_grid") or record.get("grid") or record.get("cells") or record.get("table_cells")
+    return _simple_table_from_grid(raw_grid)
+
+
+def _table_html_from_record(record: dict[str, object]) -> str:
+    for key in ("table_body", "table_html", "html"):
+        value = record.get(key)
+        if isinstance(value, str) and "<table" in value.casefold():
+            return value
+    return ""
+
+
+def _simple_table_from_html(raw_html: str) -> _SimpleTableCandidate | None:
+    parser = _SimpleTableHTMLParser()
+    try:
+        parser.feed(str(raw_html))
+        parser.close()
+    except Exception:
+        return None
+    if parser.rejection_reason:
+        return None
+    return _validated_simple_table(parser.rows, reason="simple_html_rectangular")
+
+
+def _simple_table_from_grid(raw_grid: object) -> _SimpleTableCandidate | None:
+    if not isinstance(raw_grid, list):
+        return None
+    rows: list[list[str]] = []
+    for raw_row in raw_grid:
+        if not isinstance(raw_row, list):
+            return None
+        rows.append([" ".join(str(cell or "").split()) for cell in raw_row])
+    return _validated_simple_table(rows, reason="simple_grid_rectangular")
+
+
+def _validated_simple_table(rows: list[list[str]], *, reason: str) -> _SimpleTableCandidate | None:
+    if not rows:
+        return None
+    widths = [len(row) for row in rows]
+    if not widths or min(widths) <= 0 or len(set(widths)) != 1:
+        return None
+    if len(rows) > 80 or widths[0] > 12:
+        return None
+    return _SimpleTableCandidate(rows=rows, reason=reason)
+
+
+def _table_span_is_one(raw_value: str | None) -> bool:
+    if raw_value is None or str(raw_value).strip() == "":
+        return True
+    try:
+        return int(str(raw_value).strip().strip("\"'")) == 1
+    except ValueError:
+        return False
+
+
+def _render_simple_tabular_table(
+    rows: list[list[str]],
+    caption: str,
+    *,
+    label: str | None,
+    as_nonfloat: bool,
+    wide_float: bool,
+    reason: str,
+) -> str:
+    column_count = len(rows[0]) if rows else 1
+    alignment = "@{}" + "l" * max(column_count, 1) + "@{}"
+    table_body = [rf"\begin{{tabular}}{{{alignment}}}"]
+    for row in rows:
+        cells = [_render_safe_table_cell(cell) for cell in row]
+        table_body.append(" & ".join(cells) + r" \\")
+    table_body.append(r"\end{tabular}")
+    body = "\n".join(table_body)
+    return _render_table_container(
+        rf"\resizebox{{\linewidth}}{{!}}{{%" + "\n" + body + "\n}",
+        caption,
+        label=label,
+        as_nonfloat=as_nonfloat,
+        wide_float=wide_float,
+        policy=f"tabular_safe,{reason}",
+    )
+
+
+def _render_table_visual_fallback(
+    graphic: str,
+    caption: str,
+    *,
+    label: str | None,
+    as_nonfloat: bool,
+    wide_float: bool,
+    reason: str,
+) -> str:
+    include_width = r"\linewidth" if as_nonfloat else (r"\textwidth" if wide_float else r"\linewidth")
+    return _render_table_container(
+        rf"\includegraphics[width={include_width}]{{{graphic}}}",
+        caption,
+        label=label,
+        as_nonfloat=as_nonfloat,
+        wide_float=wide_float,
+        policy=f"crop_fallback,{reason}",
+    )
+
+
+def _render_table_safe_placeholder(
+    caption: str,
+    *,
+    label: str | None,
+    as_nonfloat: bool,
+    reason: str,
+) -> str:
+    placeholder = r"\small [Table region preserved; structured table reconstruction unavailable]"
+    return _render_table_container(
+        placeholder,
+        caption,
+        label=label,
+        as_nonfloat=as_nonfloat,
+        wide_float=False,
+        policy=f"safe_placeholder,{reason}",
+    )
+
+
+def _render_table_container(
+    body: str,
+    caption: str,
+    *,
+    label: str | None,
+    as_nonfloat: bool,
+    wide_float: bool,
+    policy: str,
+) -> str:
+    environment = "table*" if wide_float and not as_nonfloat else "table"
+    placement = "!t" if environment == "table*" else "H"
+    lines = [r"\begin{center}"] if as_nonfloat else [rf"\begin{{{environment}}}[{placement}]", r"\centering"]
+    lines.append(f"% [TABLE_SAFE_FALLBACK: {policy}]")
+    lines.append(body)
+    if caption:
+        rendered_caption = render_text_with_inline_latex(caption)
+        lines.append(rf"\captionof{{table}}{{{rendered_caption}}}" if as_nonfloat else rf"\caption{{{rendered_caption}}}")
+    if label:
+        lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{center}" if as_nonfloat else rf"\end{{{environment}}}")
+    return "\n".join(lines)
+
+
+def _render_safe_table_cell(text: str) -> str:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ""
+    return render_text_with_inline_latex(value)
+
+
+@dataclass(frozen=True)
 class _LayoutBand:
     mode: str
     band_id: int | None = None
@@ -3947,6 +4272,76 @@ def _span_sequence_starts_at_canonical_text(spans: list[StyleSpan], canonical_co
         probe_len = min(len(compact), max(8, min(32, len(canonical_compact))))
         return canonical_compact.startswith(compact[:probe_len])
     return False
+
+
+def _stable_reference_items_from_source_nodes(source_nodes: list[DocumentNode]) -> list[str]:
+    """Return compile-safe reference item text from high-confidence reference nodes.
+
+    This is intentionally a renderer fallback, not BibTeX reconstruction.  It
+    only consumes DocumentIR reference nodes or MinerU-backed ref_text metadata
+    already present on the node, skips headings/empty items, and emits stable
+    local ``ref_N`` keys at render time.
+    """
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for source in sorted(source_nodes, key=lambda node: (node.page_idx, node.reading_index, node.node_id)):
+        if not _is_stable_reference_item_source(source):
+            continue
+        for raw_text in _reference_texts_from_source_node(source):
+            text = strip_reference_label(raw_text).strip()
+            if not text:
+                continue
+            key = _stable_reference_item_key(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(text)
+    return items
+
+
+def _is_stable_reference_item_source(source: DocumentNode) -> bool:
+    metadata = source.metadata or {}
+    role = str(metadata.get("mineru_reference_role") or "").casefold()
+    context_role = str(metadata.get("reference_context_role") or "").casefold()
+    if role == "reference_heading" or context_role == "reference_heading":
+        return False
+    if source.node_type == BlockType.REFERENCE:
+        return True
+    if bool(metadata.get("is_reference_item")):
+        return True
+    if role in {"ref_text", "bibliography_item"}:
+        return True
+    if context_role == "reference_item":
+        return True
+    return False
+
+
+def _reference_texts_from_source_node(source: DocumentNode) -> list[str]:
+    metadata = source.metadata or {}
+    texts: list[str] = []
+    items = metadata.get("reference_items")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                value = item.get("text") or item.get("raw_text") or item.get("content")
+            else:
+                value = item
+            text = str(value or "").strip()
+            if text:
+                texts.append(text)
+    reference_text = str(metadata.get("reference_text") or "").strip()
+    if reference_text:
+        texts.append(reference_text)
+    if source.node_type == BlockType.REFERENCE and source.text.strip():
+        texts.extend(split_reference_block(source.text))
+    return texts
+
+
+def _stable_reference_item_key(text: str) -> str:
+    value = " ".join(str(text or "").casefold().split())
+    value = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", " ", value)
+    return re.sub(r"[^0-9a-z]+", "", value)
 
 
 def _is_orphan_ocr_noise_span(text: str, canonical_compact: str) -> bool:
