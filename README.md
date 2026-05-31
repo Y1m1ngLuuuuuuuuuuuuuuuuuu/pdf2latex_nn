@@ -1,5 +1,37 @@
 # PDF2LaTeX NN
 
+## Post-PRCV Status (2026-05-31)
+
+PRCV 2026 submission is complete. The current project-facing source of truth is
+the observable-fact-guided reconstruction pipeline:
+
+```text
+PDF / MinerU parser outputs
+  -> Observable Fact Layer
+  -> DocumentIR
+  -> RenderTreeIR
+  -> compile-safe role renderers
+  -> ComparisonStructure evaluation
+```
+
+The PRCV-facing mainline is not GNN-driven and does not target source-level TeX
+AST recovery. Final PRCV evidence starts at
+`data/09_eval_reports/00_PRCV_FINAL_EVIDENCE_20260531/`. The paper-side
+evidence index is mirrored under
+`paper_assets/00_FINAL_EVIDENCE_20260531/` in the PRCV manuscript workspace.
+
+The submitted evidence hierarchy is:
+
+- selected2000: primary large-scale direct-parser comparison, n=1972 fair
+  intersection, Ours / ContentList Direct / MinerU Direct.
+- selected200: controlled four-method comparison including Nougat as an
+  external MMD/Markdown baseline.
+- compile/visual QA: defined only for complete LaTeX outputs.
+
+See `docs/PROJECT_ARCHITECTURE_CURRENT_20260531.md`,
+`docs/PRCV_EVIDENCE_REGISTRY_20260531.md`, and
+`docs/PATH_CONFIGURATION.md` before using older reports.
+
 **Last updated**: 2026-05-26
 
 PDF2LaTeX NN is a layout-aware PDF-to-LaTeX reconstruction pipeline for

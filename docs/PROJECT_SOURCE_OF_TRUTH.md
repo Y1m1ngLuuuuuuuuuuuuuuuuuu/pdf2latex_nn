@@ -1,5 +1,33 @@
 # Project Source Of Truth
 
+## Post-PRCV Current Source of Truth (2026-05-31)
+
+PRCV submission is complete. The local repository is the source-control home,
+AutoDL is the runtime home, and the PRCV paper workspace is the submission home.
+
+Canonical evidence starts here:
+
+```text
+data/09_eval_reports/00_PRCV_FINAL_EVIDENCE_20260531/
+```
+
+Paper-facing canonical evidence starts here:
+
+```text
+/Users/lu/University/Paper/pdf2latex/PRCV/LaTeX_Reconstruction_zh/paper_assets/00_FINAL_EVIDENCE_20260531/
+```
+
+The current evidence hierarchy is:
+
+- selected2000: primary large-scale direct-parser comparison, n=1972 fair
+  intersection, Ours / ContentList Direct / MinerU Direct.
+- selected200: controlled four-method comparison including Nougat.
+- compile/visual QA: only for complete LaTeX outputs.
+
+The current architecture source of truth is
+`docs/PROJECT_ARCHITECTURE_CURRENT_20260531.md`. The current path configuration
+source of truth is `docs/PATH_CONFIGURATION.md`.
+
 **Last updated**: 2026-05-24
 
 This repository is the source-control home for the PDF2LaTeX-NN reconstruction
