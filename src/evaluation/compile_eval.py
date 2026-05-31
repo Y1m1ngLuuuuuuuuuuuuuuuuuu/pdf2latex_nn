@@ -87,6 +87,8 @@ def run_compile_commands(command: list[str], cwd: Path, *, timeout: int, passes:
             command,
             cwd=str(cwd),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
