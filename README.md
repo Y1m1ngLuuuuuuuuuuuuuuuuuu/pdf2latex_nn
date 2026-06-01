@@ -28,6 +28,8 @@ module registries, evidence folders, and claim boundaries.
   `docs/INTERFACE_DESIGN_CURRENT_20260601.md`
 - Documentation index:
   `docs/DOCUMENTATION_INDEX_20260601.md`
+- Project organization and module flow:
+  `docs/PROJECT_ORGANIZATION_AND_MODULE_FLOW_20260601.md`
 - Current source of truth:
   `docs/PROJECT_SOURCE_OF_TRUTH.md`
 - Current architecture:
