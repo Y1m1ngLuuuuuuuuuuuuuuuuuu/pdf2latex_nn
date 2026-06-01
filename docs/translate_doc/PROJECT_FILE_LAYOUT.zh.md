@@ -1,5 +1,9 @@
 # 项目文件布局
 
+> 历史翻译文档。当前目录布局请看
+> `docs/MAIN_PATH_LAYOUT_AFTER_SUBMISSION.md` 和
+> `docs/CANONICAL_PROJECT_PATHS_POST_SUBMISSION.md`。
+
 **最后更新**：2026-05-24
 
 本文档说明本地和 AutoDL 两边的目录语义。相同路径在两边应表示同一类

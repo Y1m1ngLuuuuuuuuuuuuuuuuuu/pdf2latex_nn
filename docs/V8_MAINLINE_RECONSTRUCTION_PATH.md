@@ -1,5 +1,10 @@
 # V8 Mainline Reconstruction Path
 
+> Historical/current implementation background. The overall project is now
+> organized around stable interfaces rather than a single v8 paper story. See
+> `docs/INTERFACE_DESIGN_CURRENT_20260601.md` before promoting any v8-specific
+> behavior into a paper claim.
+
 **Last updated**: 2026-05-26
 
 This document is the single current production path contract for PDF2LaTeX-NN.

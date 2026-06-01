@@ -1,5 +1,12 @@
 # Project File Layout
 
+> Historical reference with useful directory background. The current local
+> source path is
+> `/Users/lu/Code/Project/pdf2latex_nn/pdf2latex-observable-reconstruction`.
+> The old `test_4_19` path is now a compatibility symlink. For current layout,
+> see `docs/MAIN_PATH_LAYOUT_AFTER_SUBMISSION.md` and
+> `docs/CANONICAL_PROJECT_PATHS_POST_SUBMISSION.md`.
+
 **Last updated**: 2026-05-26
 
 This document is the current directory contract for both the local checkout and

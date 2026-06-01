@@ -1,5 +1,10 @@
 # PDF2LaTeX-NN Project Overview
 
+> Historical overview. The current project scope, paper-module boundary, and
+> interface map are maintained in
+> `docs/PROJECT_SCOPE_AND_PAPER_MODULES_20260601.md` and
+> `docs/INTERFACE_DESIGN_CURRENT_20260601.md`.
+
 **Last updated**: 2026-05-24
 
 This document summarizes the current v8/default architecture. It is the high-level

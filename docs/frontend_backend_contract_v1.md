@@ -1,5 +1,8 @@
 # Frontend / Backend Contract v1
 
+> Interface reference. For the current cross-paper interface registry, see
+> `docs/INTERFACE_DESIGN_CURRENT_20260601.md`.
+
 **Last updated**: 2026-05-24
 
 This contract fixes the boundary between PDF extraction, optional TeX truth

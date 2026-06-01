@@ -1,5 +1,10 @@
 # Project Description For Paper Planning
 
+> Historical paper-description draft. The submitted PRCV paper module is now
+> tracked through `docs/PRCV_EVIDENCE_REGISTRY_20260531.md` and
+> `data/09_eval_reports/00_PRCV_FINAL_EVIDENCE_20260531/`. Do not treat this
+> file as the current locked claim boundary.
+
 **Last updated**: 2026-05-24
 
 This document is a paper-facing description of the current system.  It is more

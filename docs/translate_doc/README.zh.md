@@ -1,5 +1,7 @@
 # PDF2LaTeX NN
 
+> 历史翻译文档。当前 README 请看仓库根目录 `README.md`。
+
 **最后更新**：2026-05-24
 
 PDF2LaTeX NN 是一个面向 born-digital 学术论文的、版式感知 PDF 到

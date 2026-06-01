@@ -1,5 +1,9 @@
 # V7 / GNN Training And Monitoring
 
+> Historical optional relation-learning material. GNN/v7 training is not the
+> submitted PRCV mainline. Treat this as future-paper or diagnostic material
+> unless a new paper module explicitly promotes it.
+
 **Last updated**: 2026-05-24
 
 This is the operational runbook for the optional v7/GNN relation-learning

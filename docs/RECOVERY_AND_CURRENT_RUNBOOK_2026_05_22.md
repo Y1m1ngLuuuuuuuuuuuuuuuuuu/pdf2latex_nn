@@ -1,5 +1,9 @@
 # Recovery And Current Runbook 2026-05-22
 
+> Historical recovery runbook. Use `docs/PROJECT_SOURCE_OF_TRUTH.md` for the
+> current repository path and GitHub remote, and use this file only to
+> understand the May 2026 recovery context.
+
 **Last updated**: 2026-05-24
 
 This note records the current recovery state, remote rebuild path, and latest

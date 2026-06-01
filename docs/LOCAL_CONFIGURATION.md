@@ -1,5 +1,9 @@
 # Local Configuration And Secret Handling
 
+> Historical local setup note. The current path and repository configuration
+> live in `docs/PATH_CONFIGURATION.md` and
+> `docs/CANONICAL_PROJECT_PATHS_POST_SUBMISSION.md`.
+
 **Last updated**: 2026-05-18
 
 This document records local/private setup rules. Do not commit secrets.

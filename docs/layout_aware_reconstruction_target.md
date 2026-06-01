@@ -1,5 +1,9 @@
 # Layout-Aware Reconstruction Target
 
+> Project target reference. For the current separation between the overall
+> PDF2LaTeX project and the submitted PRCV paper module, see
+> `docs/PROJECT_SCOPE_AND_PAPER_MODULES_20260601.md`.
+
 **Last updated**: 2026-05-24
 
 This document fixes the project target and evaluation philosophy.  It is the

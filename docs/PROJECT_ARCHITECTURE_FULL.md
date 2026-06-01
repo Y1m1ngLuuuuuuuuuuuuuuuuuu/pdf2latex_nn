@@ -1,5 +1,12 @@
 # PDF2LaTeX-NN Full Architecture And Design Notes
 
+> Historical reference. The current source of truth is
+> `docs/PROJECT_ARCHITECTURE_CURRENT_20260531.md`, and the current
+> project-vs-paper boundary is
+> `docs/PROJECT_SCOPE_AND_PAPER_MODULES_20260601.md`. Use this file for
+> architecture history and detailed background, not as the current paper claim
+> registry.
+
 **Last updated**: 2026-05-24
 
 This is the full project architecture record. It collects the design decisions,

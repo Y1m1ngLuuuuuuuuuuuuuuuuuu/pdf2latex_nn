@@ -1,5 +1,9 @@
 # V8 Middle Reflow And Style Detector
 
+> Historical/current implementation background. This document records one
+> reconstruction path, but the project-level interface map now lives in
+> `docs/INTERFACE_DESIGN_CURRENT_20260601.md`.
+
 **Last updated**: 2026-05-24
 
 This document records the current v8 reconstruction path and its parameters.
